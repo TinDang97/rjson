@@ -13,6 +13,7 @@ dependencies = [
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
+compatibility = "linux"
 
 [dependency-groups]
 dev = [

@@ -107,3 +107,32 @@ orjson.loads is 2.45x faster than json.loads
 - `/benches/`: Performance benchmarks
 - `Cargo.toml`: Rust package manifest
 - `pyproject.toml`: Python project configuration
+
+## Features
+
+- High-performance JSON serialization and deserialization
+- Rust-backed core for speed and safety
+- Pythonic API: `loads` and `dumps` functions
+- Compatible with Python 3.7+
+- Supports basic Python types: `dict`, `list`, `str`, `int`, `float`, `bool`, `None`
+- Simple installation with Maturin
+
+## Status
+
+- Experimental: APIs and behavior may change
+- Core serialization/deserialization stable for basic types
+- Advanced features (custom encoders, streaming, etc.) not yet implemented
+- Limited error handling; edge cases may not be fully covered
+- Seeking feedback and contributions
+
+## Planned Features
+
+- Support for custom encoders and decoders
+- Streaming (incremental) parsing and serialization
+- Improved error messages and diagnostics
+- Optional type validation and schema support
+- Support for datetime and other complex types
+- CLI tool for quick JSON processing
+- Async API for non-blocking operations
+- Extended benchmarking and profiling tools
+- Documentation improvements and usage examples
