@@ -1,5 +1,7 @@
 # rjson
 
+> ⚠️ **Experimental:** This project is experimental and APIs may change or break at any time. Use at your own risk.
+
 A Python library for high-performance JSON parsing, backed by Rust.
 
 ## Installation
@@ -46,6 +48,28 @@ def main():
 if __name__ == "__main__":
     main()
 ```
+
+## Benchmarking 
+
+with 100 repetitions...
+
+--- Serialization (dumps) ---
+rjson.dumps:  0.324385 seconds
+orjson.dumps: 0.091530 seconds
+json.dumps:   0.351510 seconds
+
+--- Deserialization (loads) ---
+rjson.loads:  0.422533 seconds
+orjson.loads: 0.168543 seconds
+json.loads:   0.422147 seconds
+
+--- Comparisons ---
+orjson.dumps is 3.54x faster than rjson.dumps
+rjson.dumps is 1.08x faster than json.dumps
+orjson.dumps is 3.84x faster than json.dumps
+orjson.loads is 2.51x faster than rjson.loads
+json.loads is 1.00x faster than rjson.loads
+orjson.loads is 2.50x faster than json.loads
 
 ## Troubleshooting
 
