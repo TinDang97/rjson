@@ -49,27 +49,29 @@ if __name__ == "__main__":
     main()
 ```
 
-## Benchmarking 
+## Benchmarking
 
-with 100 repetitions...
+```
+Benchmarking with 100 repetitions...
 
 --- Serialization (dumps) ---
-rjson.dumps:  0.324385 seconds
-orjson.dumps: 0.091530 seconds
-json.dumps:   0.351510 seconds
+rjson.dumps:  0.101865 seconds
+orjson.dumps: 0.037093 seconds
+json.dumps:   0.338490 seconds
 
 --- Deserialization (loads) ---
-rjson.loads:  0.422533 seconds
-orjson.loads: 0.168543 seconds
-json.loads:   0.422147 seconds
+rjson.loads:  0.267361 seconds
+orjson.loads: 0.156367 seconds
+json.loads:   0.382381 seconds
 
 --- Comparisons ---
-orjson.dumps is 3.54x faster than rjson.dumps
-rjson.dumps is 1.08x faster than json.dumps
-orjson.dumps is 3.84x faster than json.dumps
-orjson.loads is 2.51x faster than rjson.loads
-json.loads is 1.00x faster than rjson.loads
-orjson.loads is 2.50x faster than json.loads
+orjson.dumps is 2.75x faster than rjson.dumps
+rjson.dumps is 3.32x faster than json.dumps
+orjson.dumps is 9.13x faster than json.dumps
+orjson.loads is 1.71x faster than rjson.loads
+rjson.loads is 1.43x faster than json.loads
+orjson.loads is 2.45x faster than json.loads
+```
 
 ## Troubleshooting
 
