@@ -2,10 +2,10 @@ use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 use pyo3::types::{PyDict, PyList, PyBool, PyFloat, PyInt, PyString, PyTuple, PyAny};
 use serde_json;
-use serde::de::{self, Visitor, MapAccess, SeqAccess, Deserializer};
-use serde::ser::{Serialize, Serializer, SerializeMap, SerializeSeq};
+use serde::de::{self, Visitor, MapAccess, SeqAccess, Deserializer, DeserializeSeed};
 use std::fmt;
-use serde::de::DeserializeSeed;
+use itoa;
+use ryu;
 
 // Performance optimizations module
 mod optimizations;
@@ -179,105 +179,287 @@ fn loads(json_str: &str) -> PyResult<PyObject> {
     })
 }
 
-/// Optimized wrapper to implement serde::Serialize for PyAny (Python objects).
+/// Phase 2: Custom high-performance JSON serializer
 ///
-/// Phase 1 Optimizations Applied:
-/// - Fast type detection using cached type pointers
-/// - Eliminates sequential if-else downcast chain
-struct PyAnySerialize<'py> {
-    obj: &'py Bound<'py, PyAny>,
+/// Uses itoa (10x faster than fmt) and ryu (5x faster than fmt) for number formatting.
+/// Writes directly to Vec<u8> buffer, bypassing serde_json overhead.
+struct JsonBuffer {
+    buf: Vec<u8>,
 }
 
-impl<'py> Serialize for PyAnySerialize<'py> {
-    #[inline(always)]
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let obj = self.obj;
+impl JsonBuffer {
+    #[inline]
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            buf: Vec::with_capacity(capacity),
+        }
+    }
 
-        // OPTIMIZATION Phase 1.2: Use fast type detection instead of sequential downcasts
+    #[inline]
+    fn write_null(&mut self) {
+        self.buf.extend_from_slice(b"null");
+    }
+
+    #[inline]
+    fn write_bool(&mut self, value: bool) {
+        self.buf.extend_from_slice(if value { b"true" } else { b"false" });
+    }
+
+    #[inline]
+    fn write_int_i64(&mut self, value: i64) {
+        // OPTIMIZATION: Use itoa for 10x faster integer formatting
+        let mut itoa_buf = itoa::Buffer::new();
+        self.buf.extend_from_slice(itoa_buf.format(value).as_bytes());
+    }
+
+    #[inline]
+    fn write_int_u64(&mut self, value: u64) {
+        let mut itoa_buf = itoa::Buffer::new();
+        self.buf.extend_from_slice(itoa_buf.format(value).as_bytes());
+    }
+
+    #[inline]
+    fn write_float(&mut self, value: f64) -> PyResult<()> {
+        if !value.is_finite() {
+            return Err(PyValueError::new_err(format!(
+                "Cannot serialize non-finite float: {}",
+                value
+            )));
+        }
+        // OPTIMIZATION: Use ryu for 5x faster float formatting
+        let mut ryu_buf = ryu::Buffer::new();
+        self.buf.extend_from_slice(ryu_buf.format(value).as_bytes());
+        Ok(())
+    }
+
+    #[inline]
+    fn write_string(&mut self, s: &str) {
+        self.buf.push(b'"');
+
+        // Fast path: check if escaping is needed using memchr-like scan
+        let bytes = s.as_bytes();
+        let mut needs_escape = false;
+        for &b in bytes {
+            if b == b'"' || b == b'\\' || b < 0x20 {
+                needs_escape = true;
+                break;
+            }
+        }
+
+        if !needs_escape {
+            // Fast path: no escapes, direct copy
+            self.buf.extend_from_slice(bytes);
+            self.buf.push(b'"');
+            return;
+        }
+
+        // Slow path: escape special characters
+        for ch in s.chars() {
+            match ch {
+                '"' => self.buf.extend_from_slice(b"\\\""),
+                '\\' => self.buf.extend_from_slice(b"\\\\"),
+                '\n' => self.buf.extend_from_slice(b"\\n"),
+                '\r' => self.buf.extend_from_slice(b"\\r"),
+                '\t' => self.buf.extend_from_slice(b"\\t"),
+                '\x08' => self.buf.extend_from_slice(b"\\b"),
+                '\x0C' => self.buf.extend_from_slice(b"\\f"),
+                c if c.is_control() => {
+                    // Unicode escape for control characters
+                    self.buf.extend_from_slice(b"\\u");
+                    let hex = format!("{:04x}", c as u32);
+                    self.buf.extend_from_slice(hex.as_bytes());
+                }
+                c => {
+                    let mut tmp = [0u8; 4];
+                    let s = c.encode_utf8(&mut tmp);
+                    self.buf.extend_from_slice(s.as_bytes());
+                }
+            }
+        }
+        self.buf.push(b'"');
+    }
+
+    fn serialize_pyany(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<()> {
         let fast_type = type_cache::get_fast_type(obj);
 
         match fast_type {
-            FastType::None => serializer.serialize_unit(),
+            FastType::None => {
+                self.write_null();
+                Ok(())
+            }
 
             FastType::Bool => {
-                // SAFETY: We just verified the type via fast_type check
                 let b_val = unsafe { obj.downcast_exact::<PyBool>().unwrap_unchecked() };
-                serializer.serialize_bool(b_val.is_true())
+                self.write_bool(b_val.is_true());
+                Ok(())
             }
 
             FastType::Int => {
                 let l_val = unsafe { obj.downcast_exact::<PyInt>().unwrap_unchecked() };
+
+                // Try i64 first (most common)
                 if let Ok(val_i64) = l_val.extract::<i64>() {
-                    serializer.serialize_i64(val_i64)
+                    self.write_int_i64(val_i64);
+                    Ok(())
                 } else if let Ok(val_u64) = l_val.extract::<u64>() {
-                    serializer.serialize_u64(val_u64)
-                } else if let Ok(val_f64) = l_val.extract::<f64>() {
-                    if val_f64.fract() == 0.0 {
-                        serializer.serialize_f64(val_f64)
-                    } else {
-                        Err(serde::ser::Error::custom("Cannot serialize non-integer PyInt as JSON number"))
-                    }
+                    self.write_int_u64(val_u64);
+                    Ok(())
                 } else {
+                    // Fallback for very large integers: convert to string
                     let s = l_val.to_string();
-                    serializer.serialize_str(&s)
+                    self.buf.extend_from_slice(s.as_bytes());
+                    Ok(())
                 }
             }
 
             FastType::Float => {
                 let f_val = unsafe { obj.downcast_exact::<PyFloat>().unwrap_unchecked() };
-                let val_f64 = f_val.extract::<f64>().map_err(serde::ser::Error::custom)?;
-                serializer.serialize_f64(val_f64)
+                let val_f64 = f_val.extract::<f64>()?;
+                self.write_float(val_f64)
             }
 
             FastType::String => {
                 let s_val = unsafe { obj.downcast_exact::<PyString>().unwrap_unchecked() };
-                serializer.serialize_str(s_val.to_str().map_err(serde::ser::Error::custom)?)
+                let s = s_val.to_str()?;
+                self.write_string(s);
+                Ok(())
             }
 
             FastType::List => {
                 let list_val = unsafe { obj.downcast_exact::<PyList>().unwrap_unchecked() };
-                let mut seq = serializer.serialize_seq(Some(list_val.len()))?;
+                self.buf.push(b'[');
+
+                let mut first = true;
                 for item in list_val.iter() {
-                    seq.serialize_element(&PyAnySerialize { obj: &item })?;
+                    if !first {
+                        self.buf.push(b',');
+                    }
+                    first = false;
+                    self.serialize_pyany(&item)?;
                 }
-                seq.end()
+
+                self.buf.push(b']');
+                Ok(())
             }
 
             FastType::Tuple => {
                 let tuple_val = unsafe { obj.downcast_exact::<PyTuple>().unwrap_unchecked() };
-                let mut seq = serializer.serialize_seq(Some(tuple_val.len()))?;
+                self.buf.push(b'[');
+
+                let mut first = true;
                 for item in tuple_val.iter() {
-                    seq.serialize_element(&PyAnySerialize { obj: &item })?;
+                    if !first {
+                        self.buf.push(b',');
+                    }
+                    first = false;
+                    self.serialize_pyany(&item)?;
                 }
-                seq.end()
+
+                self.buf.push(b']');
+                Ok(())
             }
 
             FastType::Dict => {
                 let dict_val = unsafe { obj.downcast_exact::<PyDict>().unwrap_unchecked() };
-                let mut map = serializer.serialize_map(Some(dict_val.len()))?;
+                self.buf.push(b'{');
+
+                let mut first = true;
                 for (key, value) in dict_val.iter() {
-                    let key_str = key.extract::<String>().map_err(serde::ser::Error::custom)?;
-                    map.serialize_entry(&key_str, &PyAnySerialize { obj: &value })?;
+                    if !first {
+                        self.buf.push(b',');
+                    }
+                    first = false;
+
+                    // Keys must be strings - use to_str() to avoid allocation
+                    let key_str = if let Ok(py_str) = key.downcast_exact::<PyString>() {
+                        py_str.to_str().map_err(|_| {
+                            PyValueError::new_err("Dictionary key must be valid UTF-8")
+                        })?
+                    } else {
+                        return Err(PyValueError::new_err(
+                            "Dictionary keys must be strings for JSON serialization"
+                        ));
+                    };
+
+                    self.write_string(key_str);
+                    self.buf.push(b':');
+                    self.serialize_pyany(&value)?;
                 }
-                map.end()
+
+                self.buf.push(b'}');
+                Ok(())
             }
 
-            FastType::Other => {
-                Err(serde::ser::Error::custom(format!(
-                    "Unsupported Python type for JSON serialization: {}",
-                    obj.get_type().name().and_then(|n| n.to_str().map(|s| s.to_owned())).unwrap_or_else(|_| "unknown".to_string())
-                )))
+            FastType::Other => Err(PyValueError::new_err(format!(
+                "Unsupported Python type for JSON serialization: {}",
+                obj.get_type()
+                    .name()
+                    .and_then(|n| n.to_str().map(|s| s.to_owned()))
+                    .unwrap_or_else(|_| "unknown".to_string())
+            ))),
+        }
+    }
+
+    fn into_string(self) -> String {
+        // SAFETY: We only write valid UTF-8 (all JSON is valid UTF-8)
+        unsafe { String::from_utf8_unchecked(self.buf) }
+    }
+}
+
+/// Estimate JSON output size for buffer pre-allocation.
+///
+/// Provides a heuristic size estimate to minimize reallocations.
+#[inline]
+fn estimate_json_size(obj: &Bound<'_, PyAny>) -> usize {
+    let fast_type = type_cache::get_fast_type(obj);
+
+    match fast_type {
+        FastType::None => 4,                          // "null"
+        FastType::Bool => 5,                          // "false"
+        FastType::Int => 20,                          // max i64 digits
+        FastType::Float => 24,                        // max f64 representation
+        FastType::String => {
+            if let Ok(s) = obj.downcast_exact::<PyString>() {
+                s.len().unwrap_or(0) + 8              // +8 for quotes and potential escapes
+            } else {
+                32
             }
         }
+        FastType::List => {
+            if let Ok(list) = obj.downcast_exact::<PyList>() {
+                let len = list.len();
+                len * 16 + 16                         // heuristic: 16 bytes per element
+            } else {
+                64
+            }
+        }
+        FastType::Tuple => {
+            if let Ok(tuple) = obj.downcast_exact::<PyTuple>() {
+                let len = tuple.len();
+                len * 16 + 16
+            } else {
+                64
+            }
+        }
+        FastType::Dict => {
+            if let Ok(dict) = obj.downcast_exact::<PyDict>() {
+                let len = dict.len();
+                len * 32 + 16                         // heuristic: 32 bytes per entry
+            } else {
+                128
+            }
+        }
+        FastType::Other => 64,
     }
 }
 
 /// Dumps a Python object into a JSON string.
 ///
-/// Phase 1+ Optimizations: Fast type detection, unsafe unwrap_unchecked for performance.
+/// Phase 2 Optimizations:
+/// - Direct buffer writing (bypasses serde_json)
+/// - itoa for 10x faster integer formatting
+/// - ryu for 5x faster float formatting
+/// - Pre-sized buffer allocation
 ///
 /// # Arguments
 /// * `py` - The Python GIL token.
@@ -287,8 +469,10 @@ impl<'py> Serialize for PyAnySerialize<'py> {
 /// A JSON string, or a PyValueError on error.
 #[pyfunction]
 fn dumps(_py: Python, data: &Bound<'_, PyAny>) -> PyResult<String> {
-    serde_json::to_string(&PyAnySerialize { obj: data })
-        .map_err(|e| PyValueError::new_err(format!("JSON serialization error: {e}")))
+    let capacity = estimate_json_size(data);
+    let mut buffer = JsonBuffer::with_capacity(capacity);
+    buffer.serialize_pyany(data)?;
+    Ok(buffer.into_string())
 }
 
 /// Python module definition for rjson.

@@ -150,7 +150,9 @@ dependencies = [
 name = "rjson"
 version = "0.1.0"
 dependencies = [
+ "itoa",
  "pyo3",
+ "ryu",
  "serde",
  "serde_json",
 ]
