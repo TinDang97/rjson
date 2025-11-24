@@ -11,15 +11,16 @@ use pyo3::ffi;
 use std::sync::OnceLock;
 
 /// Cached type pointers for common Python types
-struct TypeCache {
-    none_type: *mut ffi::PyTypeObject,
-    bool_type: *mut ffi::PyTypeObject,
-    int_type: *mut ffi::PyTypeObject,
-    float_type: *mut ffi::PyTypeObject,
-    str_type: *mut ffi::PyTypeObject,
-    list_type: *mut ffi::PyTypeObject,
-    tuple_type: *mut ffi::PyTypeObject,
-    dict_type: *mut ffi::PyTypeObject,
+pub struct TypeCache {
+    pub none_type: *mut ffi::PyTypeObject,
+    pub bool_type: *mut ffi::PyTypeObject,
+    pub int_type: *mut ffi::PyTypeObject,
+    pub float_type: *mut ffi::PyTypeObject,
+    pub string_type: *mut ffi::PyTypeObject,
+    pub list_type: *mut ffi::PyTypeObject,
+    pub tuple_type: *mut ffi::PyTypeObject,
+    pub dict_type: *mut ffi::PyTypeObject,
+    true_ptr: *mut ffi::PyObject,  // Cached True singleton pointer
 }
 
 // SAFETY: Type pointers are immutable once initialized and valid for the lifetime
@@ -43,15 +44,18 @@ pub fn init_type_cache(py: Python) {
         return;
     }
 
+    let true_obj = PyBool::new(py, true);
+
     let cache = TypeCache {
         none_type: py.None().bind(py).get_type().as_type_ptr(),
-        bool_type: PyBool::new(py, true).get_type().as_type_ptr(),
+        bool_type: true_obj.get_type().as_type_ptr(),
         int_type: PyInt::new(py, 0).get_type().as_type_ptr(),
         float_type: PyFloat::new(py, 0.0).get_type().as_type_ptr(),
-        str_type: PyString::new(py, "").get_type().as_type_ptr(),
+        string_type: PyString::new(py, "").get_type().as_type_ptr(),
         list_type: PyList::empty(py).get_type().as_type_ptr(),
         tuple_type: PyTuple::empty(py).get_type().as_type_ptr(),
         dict_type: PyDict::new(py).get_type().as_type_ptr(),
+        true_ptr: true_obj.as_ptr(),
     };
 
     let _ = TYPE_CACHE.set(cache);
@@ -103,7 +107,7 @@ pub fn get_fast_type(obj: &Bound<'_, PyAny>) -> FastType {
             FastType::Int
         } else if type_ptr == cache.float_type {
             FastType::Float
-        } else if type_ptr == cache.str_type {
+        } else if type_ptr == cache.string_type {
             FastType::String
         } else if type_ptr == cache.list_type {
             FastType::List
@@ -118,6 +122,22 @@ pub fn get_fast_type(obj: &Bound<'_, PyAny>) -> FastType {
         // Fallback if cache not initialized (shouldn't happen in practice)
         FastType::Other
     }
+}
+
+/// Get the cached TypeCache for direct C API type checking
+///
+/// Used in Phase 5A optimizations for inline type checking without PyO3 overhead
+#[inline(always)]
+pub fn get_type_cache() -> &'static TypeCache {
+    TYPE_CACHE.get().expect("Type cache not initialized")
+}
+
+/// Get the cached True singleton pointer for fast bool comparison
+///
+/// Used for inline bool serialization in Phase 5A
+#[inline(always)]
+pub fn get_true_ptr() -> *mut ffi::PyObject {
+    TYPE_CACHE.get().expect("Type cache not initialized").true_ptr
 }
 
 /// Fast type check with likely/unlikely hints for branch prediction
