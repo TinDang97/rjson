@@ -167,14 +167,20 @@ impl<'de, 'py> Visitor<'de> for PyObjectVisitor<'py> {
 
     #[inline]
     fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> {
-        // OPTIMIZATION: Use integer cache for common values
-        Ok(object_cache::get_int(self.py, v))
+        // OPTIMIZATION: Inline cache check to avoid function call overhead
+        // Only use cache for small values where it's beneficial
+        if v >= -256 && v <= 256 {
+            Ok(object_cache::get_int(self.py, v))
+        } else {
+            // Fast path: direct conversion for large integers
+            Ok(v.to_object(self.py))
+        }
     }
 
     #[inline]
     fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
-        // OPTIMIZATION: Check if u64 fits in i64 range for caching
-        if v <= i64::MAX as u64 {
+        // OPTIMIZATION: Only cache if value fits in small integer range
+        if v <= 256 {
             Ok(object_cache::get_int(self.py, v as i64))
         } else {
             Ok(v.to_object(self.py))
@@ -228,11 +234,6 @@ impl<'de, 'py> Visitor<'de> for PyObjectVisitor<'py> {
             elements.push(elem);
         }
 
-        // OPTIMIZATION: Return cached empty list for empty arrays
-        if elements.is_empty() {
-            return Ok(object_cache::get_empty_list(self.py));
-        }
-
         use serde::de::Error as SerdeDeError;
         let pylist = PyList::new(self.py, &elements)
             .map_err(|e| SerdeDeError::custom(e.to_string()))?;
@@ -243,25 +244,16 @@ impl<'de, 'py> Visitor<'de> for PyObjectVisitor<'py> {
     where
         A: MapAccess<'de>,
     {
-        // OPTIMIZATION Phase 1.3: Pre-allocate with size hint
-        let size_hint = map.size_hint().unwrap_or(0);
-        let mut keys = Vec::with_capacity(size_hint);
-        let mut values = Vec::with_capacity(size_hint);
-
-        // Collect all entries
-        while let Some((key, value)) = map.next_entry_seed(KeySeed, PyObjectSeed { py: self.py })? {
-            keys.push(key);
-            values.push(value);
-        }
-
-        // OPTIMIZATION: Return cached empty dict for empty objects
-        if keys.is_empty() {
-            return Ok(object_cache::get_empty_dict(self.py));
-        }
+        // OPTIMIZATION Phase 1.5: Direct dict insertion without intermediate Vecs
+        // This eliminates 2 heap allocations and improves cache locality
+        use serde::de::Error as SerdeDeError;
 
         let dict = PyDict::new(self.py);
-        for (k, v) in keys.iter().zip(values.iter()) {
-            dict.set_item(k, v).unwrap();
+
+        // Insert directly into dict as we parse
+        while let Some((key, value)) = map.next_entry_seed(KeySeed, PyObjectSeed { py: self.py })? {
+            dict.set_item(&key, &value)
+                .map_err(|e| SerdeDeError::custom(format!("Failed to insert into dict: {}", e)))?;
         }
 
         Ok(dict.to_object(self.py))
