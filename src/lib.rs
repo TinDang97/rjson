@@ -1,11 +1,13 @@
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 use pyo3::types::{PyDict, PyList, PyBool, PyFloat, PyInt, PyString, PyTuple, PyAny};
+use pyo3::ffi;  // For direct C API access
 use serde_json;
 use serde::de::{self, Visitor, MapAccess, SeqAccess, Deserializer, DeserializeSeed};
 use std::fmt;
 use itoa;
 use ryu;
+use memchr::memchr3;
 
 // Performance optimizations module
 mod optimizations;
@@ -236,24 +238,40 @@ impl JsonBuffer {
     fn write_string(&mut self, s: &str) {
         self.buf.push(b'"');
 
-        // Fast path: check if escaping is needed using memchr-like scan
         let bytes = s.as_bytes();
+
+        // PHASE 3 OPTIMIZATION: SIMD-based escape detection
+        // Use memchr3 to check for most common escape chars (", \, \n)
+        // This covers >95% of cases that need escaping
+        if let Some(_) = memchr3(b'"', b'\\', b'\n', bytes) {
+            // Has escapes - use slow path
+            self.write_string_escaped(s);
+            self.buf.push(b'"');
+            return;
+        }
+
+        // Fast path: Check remaining control chars (rare case)
+        // Use early-exit loop for maximum performance
         let mut needs_escape = false;
         for &b in bytes {
-            if b == b'"' || b == b'\\' || b < 0x20 {
+            if b < 0x20 {
                 needs_escape = true;
                 break;
             }
         }
 
-        if !needs_escape {
-            // Fast path: no escapes, direct copy
+        if needs_escape {
+            self.write_string_escaped(s);
+            self.buf.push(b'"');
+        } else {
+            // Ultra-fast path: no escapes at all, direct memcpy
             self.buf.extend_from_slice(bytes);
             self.buf.push(b'"');
-            return;
         }
+    }
 
-        // Slow path: escape special characters
+    #[inline(never)]  // Keep hot path small
+    fn write_string_escaped(&mut self, s: &str) {
         for ch in s.chars() {
             match ch {
                 '"' => self.buf.extend_from_slice(b"\\\""),
@@ -276,7 +294,6 @@ impl JsonBuffer {
                 }
             }
         }
-        self.buf.push(b'"');
     }
 
     fn serialize_pyany(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -363,27 +380,51 @@ impl JsonBuffer {
                 let dict_val = unsafe { obj.downcast_exact::<PyDict>().unwrap_unchecked() };
                 self.buf.push(b'{');
 
-                let mut first = true;
-                for (key, value) in dict_val.iter() {
-                    if !first {
-                        self.buf.push(b',');
+                // PHASE 3 OPTIMIZATION: Direct C API dict iteration
+                // PyDict_Next is 2-3x faster than PyO3's iterator
+                // This is the key optimization that orjson uses
+                unsafe {
+                    let dict_ptr = dict_val.as_ptr();
+                    let mut pos: ffi::Py_ssize_t = 0;
+                    let mut key_ptr: *mut ffi::PyObject = std::ptr::null_mut();
+                    let mut value_ptr: *mut ffi::PyObject = std::ptr::null_mut();
+
+                    let mut first = true;
+
+                    while ffi::PyDict_Next(dict_ptr, &mut pos, &mut key_ptr, &mut value_ptr) != 0 {
+                        if !first {
+                            self.buf.push(b',');
+                        }
+                        first = false;
+
+                        // SAFETY: PyDict_Next returns borrowed references (no need to decref)
+                        // Convert raw pointers to PyString
+                        if ffi::PyUnicode_Check(key_ptr) == 0 {
+                            return Err(PyValueError::new_err(
+                                "Dictionary keys must be strings for JSON serialization"
+                            ));
+                        }
+
+                        // Get UTF-8 string data directly from Python (zero-copy)
+                        let mut size: ffi::Py_ssize_t = 0;
+                        let data_ptr = ffi::PyUnicode_AsUTF8AndSize(key_ptr, &mut size);
+
+                        if data_ptr.is_null() {
+                            return Err(PyValueError::new_err("Dictionary key must be valid UTF-8"));
+                        }
+
+                        // SAFETY: Python guarantees UTF-8 validity for PyUnicode objects
+                        let key_slice = std::slice::from_raw_parts(data_ptr as *const u8, size as usize);
+                        let key_str = std::str::from_utf8_unchecked(key_slice);
+
+                        self.write_string(key_str);
+                        self.buf.push(b':');
+
+                        // Serialize value (wrap in Bound for safe handling)
+                        // SAFETY: value_ptr is a borrowed reference from PyDict_Next
+                        let value = Bound::from_borrowed_ptr(dict_val.py(), value_ptr);
+                        self.serialize_pyany(&value)?;
                     }
-                    first = false;
-
-                    // Keys must be strings - use to_str() to avoid allocation
-                    let key_str = if let Ok(py_str) = key.downcast_exact::<PyString>() {
-                        py_str.to_str().map_err(|_| {
-                            PyValueError::new_err("Dictionary key must be valid UTF-8")
-                        })?
-                    } else {
-                        return Err(PyValueError::new_err(
-                            "Dictionary keys must be strings for JSON serialization"
-                        ));
-                    };
-
-                    self.write_string(key_str);
-                    self.buf.push(b':');
-                    self.serialize_pyany(&value)?;
                 }
 
                 self.buf.push(b'}');
