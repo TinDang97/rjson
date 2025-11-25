@@ -1,0 +1,11 @@
+# Build configuration for maximum performance
+# Enables CPU-specific optimizations (AVX2, SSE4.2, etc.)
+
+[build]
+rustflags = ["-C", "target-cpu=native"]
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=native", "-C", "target-feature=+avx2,+sse4.2"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=native"]
