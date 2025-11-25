@@ -566,32 +566,31 @@ mod tests {
     fn test_detect_array_type() {
         Python::with_gil(|py| {
             // All ints
-            let ints = PyList::new(py, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+            let ints = PyList::new(py, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]).unwrap();
             assert_eq!(detect_array_type(&ints), ArrayType::AllInts);
 
             // All floats
-            let floats = PyList::new(py, &[1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8]);
+            let floats = PyList::new(py, &[1.1, 2.2, 3.3, 4.4, 5.5, 6.6, 7.7, 8.8]).unwrap();
             assert_eq!(detect_array_type(&floats), ArrayType::AllFloats);
 
             // All strings
-            let strings = PyList::new(py, &["a", "b", "c", "d", "e", "f", "g", "h"]);
+            let strings = PyList::new(py, &["a", "b", "c", "d", "e", "f", "g", "h"]).unwrap();
             assert_eq!(detect_array_type(&strings), ArrayType::AllStrings);
 
             // All bools
-            let bools = PyList::new(py, &[true, false, true, false, true, false, true, false]);
+            let bools = PyList::new(py, &[true, false, true, false, true, false, true, false]).unwrap();
             assert_eq!(detect_array_type(&bools), ArrayType::AllBools);
 
             // Mixed
-            let mixed = PyList::new(py, &[1.to_object(py), "a".to_object(py), 2.to_object(py)]);
-            let mixed_bound = mixed.bind(py);
-            assert_eq!(detect_array_type(&mixed_bound), ArrayType::Mixed);
+            let mixed = PyList::new(py, &[1.to_object(py), "a".to_object(py), 2.to_object(py)]).unwrap();
+            assert_eq!(detect_array_type(&mixed), ArrayType::Mixed);
 
             // Empty
-            let empty: &PyList = PyList::empty(py);
+            let empty = PyList::empty(py);
             assert_eq!(detect_array_type(&empty), ArrayType::Empty);
 
             // Too small (below MIN_BULK_SIZE)
-            let small = PyList::new(py, &[1, 2, 3]);
+            let small = PyList::new(py, &[1, 2, 3]).unwrap();
             assert_eq!(detect_array_type(&small), ArrayType::Mixed);
         });
     }
@@ -599,7 +598,7 @@ mod tests {
     #[test]
     fn test_serialize_int_array_bulk() {
         Python::with_gil(|py| {
-            let ints = PyList::new(py, &[1, 2, 3, 42, 100, -5, 999, 0, 1234567890]);
+            let ints = PyList::new(py, &[1, 2, 3, 42, 100, -5, 999, 0, 1234567890]).unwrap();
             let mut buf = Vec::new();
 
             unsafe {
@@ -614,7 +613,7 @@ mod tests {
     #[test]
     fn test_serialize_float_array_bulk() {
         Python::with_gil(|py| {
-            let floats = PyList::new(py, &[1.5, 2.7, 3.14, -0.5]);
+            let floats = PyList::new(py, &[1.5, 2.7, 3.14, -0.5]).unwrap();
             let mut buf = Vec::new();
 
             unsafe {
@@ -630,7 +629,7 @@ mod tests {
     #[test]
     fn test_serialize_bool_array_bulk() {
         Python::with_gil(|py| {
-            let bools = PyList::new(py, &[true, false, true, true, false]);
+            let bools = PyList::new(py, &[true, false, true, true, false]).unwrap();
             let mut buf = Vec::new();
 
             unsafe {

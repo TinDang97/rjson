@@ -165,7 +165,7 @@ mod tests {
 
             // Test None
             let none = py.None();
-            assert_eq!(get_fast_type(&none), FastType::None);
+            assert_eq!(get_fast_type(&none.bind(py)), FastType::None);
 
             // Test bool
             let bool_val = PyBool::new(py, true);
