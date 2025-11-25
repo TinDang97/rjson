@@ -365,7 +365,7 @@ impl JsonBuffer {
 
                 match array_type {
                     bulk::ArrayType::AllInts => {
-                        // Bulk serialize integer array (3-4x faster)
+                        // Bulk serialize integer array (Phase 6A: itoa is fastest)
                         unsafe { bulk::serialize_int_array_bulk(&list_val, &mut self.buf)? }
                     }
                     bulk::ArrayType::AllFloats => {
