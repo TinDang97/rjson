@@ -32,9 +32,16 @@ pub enum ArrayType {
 /// Tradeoff: Larger N → more accurate detection, smaller N → less overhead
 const SAMPLE_SIZE: usize = 16;
 
-/// Minimum array size to benefit from bulk processing
-/// Small arrays (<8 elements) are faster with normal path due to detection overhead
-const MIN_BULK_SIZE: usize = 8;
+/// Minimum array size to benefit from bulk processing (adaptive per type)
+/// Type-specific thresholds based on empirical performance data:
+/// - Booleans: Very fast (beat orjson!), low overhead → threshold=4
+/// - Integers: Medium speed, moderate overhead → threshold=8
+/// - Floats: Close to orjson, moderate overhead → threshold=8
+/// - Strings: Slower, higher overhead → threshold=12
+const MIN_BULK_SIZE_BOOL: usize = 4;
+const MIN_BULK_SIZE_INT: usize = 8;
+const MIN_BULK_SIZE_FLOAT: usize = 8;
+const MIN_BULK_SIZE_STRING: usize = 12;
 
 /// Detect if a list contains all elements of the same type
 ///
@@ -58,11 +65,6 @@ pub fn detect_array_type(list: &Bound<'_, PyList>) -> ArrayType {
     // Empty array special case
     if len == 0 {
         return ArrayType::Empty;
-    }
-
-    // Too small for bulk processing
-    if len < MIN_BULK_SIZE {
-        return ArrayType::Mixed;
     }
 
     unsafe {
@@ -90,6 +92,20 @@ pub fn detect_array_type(list: &Bound<'_, PyList>) -> ArrayType {
         } else {
             return ArrayType::Mixed;
         };
+
+        // Adaptive threshold check: Different types have different break-even points
+        let min_size = match expected_array_type {
+            ArrayType::AllBools => MIN_BULK_SIZE_BOOL,    // 4: booleans are very fast
+            ArrayType::AllInts => MIN_BULK_SIZE_INT,       // 8: moderate overhead
+            ArrayType::AllFloats => MIN_BULK_SIZE_FLOAT,   // 8: close to orjson
+            ArrayType::AllStrings => MIN_BULK_SIZE_STRING, // 12: higher overhead
+            _ => 8,  // Fallback (shouldn't reach here)
+        };
+
+        // Too small for this type's bulk processing
+        if len < min_size {
+            return ArrayType::Mixed;
+        }
 
         // Check if all sampled elements match the expected type
         for i in 1..sample_count {
