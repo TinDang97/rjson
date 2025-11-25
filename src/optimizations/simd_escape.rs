@@ -14,10 +14,31 @@
 //! - Scalar fallback: For non-x86 platforms
 
 use super::escape_lut::{EscapeAction, ESCAPE_LUT};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Minimum string length to use SIMD path
 /// Below this, the setup overhead exceeds the benefit
 const SIMD_THRESHOLD: usize = 16;
+
+/// Cached CPU feature level to avoid repeated detection
+/// 0 = uninitialized, 1 = SSE2 only, 2 = AVX2 available
+#[cfg(target_arch = "x86_64")]
+static CPU_FEATURE_LEVEL: AtomicU8 = AtomicU8::new(0);
+
+/// Initialize CPU feature detection cache
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn get_cpu_feature_level() -> u8 {
+    let level = CPU_FEATURE_LEVEL.load(Ordering::Relaxed);
+    if level != 0 {
+        return level;
+    }
+
+    // First call - detect and cache
+    let detected = if is_x86_feature_detected!("avx2") { 2 } else { 1 };
+    CPU_FEATURE_LEVEL.store(detected, Ordering::Relaxed);
+    detected
+}
 
 /// Write a JSON string with SIMD-accelerated escape detection
 ///
@@ -55,11 +76,10 @@ pub fn write_json_string_simd(buf: &mut Vec<u8>, s: &str) {
     #[cfg(target_arch = "x86_64")]
     {
         if bytes.len() >= SIMD_THRESHOLD {
-            // Try AVX2 first (32 bytes at a time)
-            if is_x86_feature_detected!("avx2") {
+            // Use cached CPU feature level (avoids repeated detection)
+            if get_cpu_feature_level() == 2 {
                 unsafe { write_escaped_avx2(buf, bytes); }
             } else {
-                // Fall back to SSE2 (always available on x86_64)
                 unsafe { write_escaped_sse2(buf, bytes); }
             }
             buf.push(b'"');
@@ -96,7 +116,8 @@ pub fn needs_escape_simd(bytes: &[u8]) -> bool {
         return needs_escape_scalar(bytes);
     }
 
-    if is_x86_feature_detected!("avx2") {
+    // Use cached CPU feature level (avoids repeated detection)
+    if get_cpu_feature_level() == 2 {
         unsafe { needs_escape_avx2(bytes) }
     } else {
         unsafe { needs_escape_sse2(bytes) }
