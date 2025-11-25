@@ -127,6 +127,14 @@ pub fn get_type_cache() -> &'static TypeCache {
     TYPE_CACHE.get().expect("Type cache not initialized")
 }
 
+/// Check if an object is of a specific FastType
+///
+/// Convenience function that combines get_fast_type with comparison
+#[inline(always)]
+pub fn is_type(obj: &Bound<'_, PyAny>, expected: FastType) -> bool {
+    get_fast_type(obj) == expected
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -11,7 +11,7 @@ use memchr::memchr3;
 
 // Performance optimizations module
 mod optimizations;
-use optimizations::{object_cache, type_cache, bulk, extreme};
+use optimizations::{object_cache, type_cache, bulk, extreme, escape_lut, likely, unlikely};
 use type_cache::FastType;
 
 // Dead code removed: serde_value_to_py_object and py_object_to_serde_value
@@ -183,73 +183,60 @@ fn loads(json_str: &str) -> PyResult<PyObject> {
 
 /// Write a JSON string with proper escaping to a buffer
 ///
-/// This is a standalone function so it can be used by both JsonBuffer
-/// and the bulk serialization code.
+/// PHASE 7 OPTIMIZATION: Hybrid approach using:
+/// 1. SIMD memchr3 for quick escape detection (most strings have no escapes)
+/// 2. LUT-based escaping for strings that need it (faster than match statements)
 ///
 /// # Arguments
 /// * `buf` - Buffer to write to
 /// * `s` - String to serialize
 #[inline]
 fn write_json_string(buf: &mut Vec<u8>, s: &str) {
-    buf.push(b'"');
-
     let bytes = s.as_bytes();
 
-    // PHASE 3 OPTIMIZATION: SIMD-based escape detection
-    // Use memchr3 to check for most common escape chars (", \, \n)
-    // This covers >95% of cases that need escaping
-    if let Some(_) = memchr3(b'"', b'\\', b'\n', bytes) {
-        // Has escapes - use slow path
-        write_json_string_escaped(buf, s);
-        buf.push(b'"');
-        return;
-    }
+    // FAST PATH: Use SIMD to detect if any common escapes exist
+    // memchr3 is extremely fast (uses SIMD internally)
+    let has_common_escapes = memchr3(b'"', b'\\', b'\n', bytes).is_some();
 
-    // Fast path: Check remaining control chars (rare case)
-    // Use early-exit loop for maximum performance
-    let mut needs_escape = false;
-    for &b in bytes {
-        if b < 0x20 {
-            needs_escape = true;
-            break;
+    if likely(!has_common_escapes) {
+        // Check for control characters (rare case)
+        if let Some(idx) = escape_lut::find_first_escape(bytes) {
+            // Has escapes - use LUT path
+            write_json_string_with_lut(buf, s, idx);
+        } else {
+            // ULTRA-FAST PATH: No escapes at all, direct memcpy
+            buf.push(b'"');
+            buf.extend_from_slice(bytes);
+            buf.push(b'"');
         }
-    }
-
-    if needs_escape {
-        write_json_string_escaped(buf, s);
-        buf.push(b'"');
     } else {
-        // Ultra-fast path: no escapes at all, direct memcpy
-        buf.extend_from_slice(bytes);
-        buf.push(b'"');
+        // Has common escapes - find first and use LUT
+        if let Some(idx) = escape_lut::find_first_escape(bytes) {
+            write_json_string_with_lut(buf, s, idx);
+        } else {
+            // Shouldn't happen, but handle gracefully
+            buf.push(b'"');
+            buf.extend_from_slice(bytes);
+            buf.push(b'"');
+        }
     }
 }
 
-/// Write an escaped JSON string (no quotes added)
-#[inline(never)]  // Keep hot path small
-fn write_json_string_escaped(buf: &mut Vec<u8>, s: &str) {
-    for ch in s.chars() {
-        match ch {
-            '"' => buf.extend_from_slice(b"\\\""),
-            '\\' => buf.extend_from_slice(b"\\\\"),
-            '\n' => buf.extend_from_slice(b"\\n"),
-            '\r' => buf.extend_from_slice(b"\\r"),
-            '\t' => buf.extend_from_slice(b"\\t"),
-            '\x08' => buf.extend_from_slice(b"\\b"),
-            '\x0C' => buf.extend_from_slice(b"\\f"),
-            c if c.is_control() => {
-                // Unicode escape for control characters
-                buf.extend_from_slice(b"\\u");
-                let hex = format!("{:04x}", c as u32);
-                buf.extend_from_slice(hex.as_bytes());
-            }
-            c => {
-                let mut tmp = [0u8; 4];
-                let s = c.encode_utf8(&mut tmp);
-                buf.extend_from_slice(s.as_bytes());
-            }
-        }
+/// Write JSON string using LUT-based escaping, knowing escape starts at `first_escape_idx`
+#[inline(never)]  // Keep hot path small, this is the cold path
+#[cold]
+fn write_json_string_with_lut(buf: &mut Vec<u8>, s: &str, first_escape_idx: usize) {
+    let bytes = s.as_bytes();
+    buf.push(b'"');
+
+    // Copy prefix (before first escape) directly
+    if first_escape_idx > 0 {
+        buf.extend_from_slice(&bytes[..first_escape_idx]);
     }
+
+    // Escape the rest using LUT
+    escape_lut::write_escaped_lut(buf, &bytes[first_escape_idx..]);
+    buf.push(b'"');
 }
 
 /// Phase 2: Custom high-performance JSON serializer
@@ -293,16 +280,23 @@ impl JsonBuffer {
 
     #[inline]
     fn write_float(&mut self, value: f64) -> PyResult<()> {
-        if !value.is_finite() {
-            return Err(PyValueError::new_err(format!(
-                "Cannot serialize non-finite float: {}",
-                value
-            )));
+        if unlikely(!value.is_finite()) {
+            return Self::float_error(value);
         }
         // OPTIMIZATION: Use ryu for 5x faster float formatting
         let mut ryu_buf = ryu::Buffer::new();
         self.buf.extend_from_slice(ryu_buf.format(value).as_bytes());
         Ok(())
+    }
+
+    /// Error path for non-finite floats (cold path)
+    #[cold]
+    #[inline(never)]
+    fn float_error(value: f64) -> PyResult<()> {
+        Err(PyValueError::new_err(format!(
+            "Cannot serialize non-finite float: {}",
+            value
+        )))
     }
 
     #[inline]
@@ -517,14 +511,21 @@ impl JsonBuffer {
                 Ok(())
             }
 
-            FastType::Other => Err(PyValueError::new_err(format!(
-                "Unsupported Python type for JSON serialization: {}",
-                obj.get_type()
-                    .name()
-                    .and_then(|n| n.to_str().map(|s| s.to_owned()))
-                    .unwrap_or_else(|_| "unknown".to_string())
-            ))),
+            FastType::Other => Self::unsupported_type_error(obj),
         }
+    }
+
+    /// Error path for unsupported types (cold path)
+    #[cold]
+    #[inline(never)]
+    fn unsupported_type_error(obj: &Bound<'_, PyAny>) -> PyResult<()> {
+        Err(PyValueError::new_err(format!(
+            "Unsupported Python type for JSON serialization: {}",
+            obj.get_type()
+                .name()
+                .and_then(|n| n.to_str().map(|s| s.to_owned()))
+                .unwrap_or_else(|_| "unknown".to_string())
+        )))
     }
 
     fn into_string(self) -> String {
