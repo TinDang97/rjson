@@ -27,7 +27,7 @@ struct PyASCIIObject {
 const STATE_ASCII_MASK: u32 = 0b01000000;
 
 #[cfg(target_pointer_width = "64")]
-const ASCII_DATA_OFFSET: usize = 48;
+const ASCII_DATA_OFFSET: usize = 40;  // PyASCIIObject: PyObject_HEAD(16) + length(8) + hash(8) + state(4) + padding(4) = 40
 
 #[cfg(target_pointer_width = "32")]
 const ASCII_DATA_OFFSET: usize = 24;
@@ -185,59 +185,116 @@ pub unsafe fn serialize_int_array_bulk(list: &Bound<'_, PyList>, buf: &mut Vec<u
     let list_ptr = list.as_ptr();
     let size = ffi::PyList_GET_SIZE(list_ptr);
 
-    // Reserve buffer space (estimate: 12 bytes per int on average)
-    buf.reserve((size as usize) * 12);
+    // Empty array fast path
+    if size == 0 {
+        buf.extend_from_slice(b"[]");
+        return Ok(());
+    }
 
+    // Reserve buffer space (estimate: 10 bytes per int including comma)
+    buf.reserve((size as usize) * 10 + 2);
     buf.push(b'[');
 
     let mut itoa_buf = itoa::Buffer::new();
 
-    for i in 0..size {
-        if i > 0 {
-            buf.push(b',');
-        }
+    // Serialize first element without comma
+    serialize_single_int(ffi::PyList_GET_ITEM(list_ptr, 0), buf, &mut itoa_buf)?;
 
-        let item_ptr = ffi::PyList_GET_ITEM(list_ptr, i);
-
-        // PHASE 11 OPTIMIZATION: Use PyLong_AsLongLongAndOverflow
-        // This avoids the expensive PyErr_Occurred() call on every integer
-        let mut overflow: std::ffi::c_int = 0;
-        let val_i64 = ffi::PyLong_AsLongLongAndOverflow(item_ptr, &mut overflow);
-
-        if overflow == 0 {
-            // Fast path: Value fits in i64 (most common case)
-            buf.extend_from_slice(itoa_buf.format(val_i64).as_bytes());
-        } else {
-            // Overflow - try u64 for large positive numbers
-            let val_u64 = ffi::PyLong_AsUnsignedLongLong(item_ptr);
-
-            if val_u64 != u64::MAX || ffi::PyErr_Occurred().is_null() {
-                ffi::PyErr_Clear();  // Clear any error from the check
-                buf.extend_from_slice(itoa_buf.format(val_u64).as_bytes());
-            } else {
-                // Very large int - fall back to string representation
-                ffi::PyErr_Clear();
-
-                let repr_ptr = ffi::PyObject_Str(item_ptr);
-                if repr_ptr.is_null() {
-                    return Err(pyo3::exceptions::PyValueError::new_err("Failed to convert large int"));
-                }
-
-                // Get UTF-8 string
-                let mut str_size: ffi::Py_ssize_t = 0;
-                let str_data = ffi::PyUnicode_AsUTF8AndSize(repr_ptr, &mut str_size);
-
-                if !str_data.is_null() {
-                    let str_slice = std::slice::from_raw_parts(str_data as *const u8, str_size as usize);
-                    buf.extend_from_slice(str_slice);
-                }
-
-                ffi::Py_DECREF(repr_ptr);
-            }
-        }
+    // Serialize remaining elements with leading comma
+    for i in 1..size {
+        buf.push(b',');
+        serialize_single_int(ffi::PyList_GET_ITEM(list_ptr, i), buf, &mut itoa_buf)?;
     }
 
     buf.push(b']');
+    Ok(())
+}
+
+/// Fast inline integer formatting for small positive integers (0-999999)
+/// Uses lookup table approach for maximum speed
+#[inline(always)]
+fn write_positive_int(buf: &mut Vec<u8>, val: u64) {
+    if val < 10 {
+        buf.push(b'0' + val as u8);
+    } else if val < 100 {
+        buf.push(b'0' + (val / 10) as u8);
+        buf.push(b'0' + (val % 10) as u8);
+    } else if val < 1000 {
+        buf.push(b'0' + (val / 100) as u8);
+        buf.push(b'0' + ((val / 10) % 10) as u8);
+        buf.push(b'0' + (val % 10) as u8);
+    } else if val < 10000 {
+        buf.push(b'0' + (val / 1000) as u8);
+        buf.push(b'0' + ((val / 100) % 10) as u8);
+        buf.push(b'0' + ((val / 10) % 10) as u8);
+        buf.push(b'0' + (val % 10) as u8);
+    } else if val < 100000 {
+        buf.push(b'0' + (val / 10000) as u8);
+        buf.push(b'0' + ((val / 1000) % 10) as u8);
+        buf.push(b'0' + ((val / 100) % 10) as u8);
+        buf.push(b'0' + ((val / 10) % 10) as u8);
+        buf.push(b'0' + (val % 10) as u8);
+    } else if val < 1000000 {
+        buf.push(b'0' + (val / 100000) as u8);
+        buf.push(b'0' + ((val / 10000) % 10) as u8);
+        buf.push(b'0' + ((val / 1000) % 10) as u8);
+        buf.push(b'0' + ((val / 100) % 10) as u8);
+        buf.push(b'0' + ((val / 10) % 10) as u8);
+        buf.push(b'0' + (val % 10) as u8);
+    } else {
+        // 7+ digits: use itoa
+        let mut itoa_buf = itoa::Buffer::new();
+        buf.extend_from_slice(itoa_buf.format(val).as_bytes());
+    }
+}
+
+/// Serialize a single Python integer to buffer
+#[inline(always)]
+unsafe fn serialize_single_int(
+    item_ptr: *mut ffi::PyObject,
+    buf: &mut Vec<u8>,
+    _itoa_buf: &mut itoa::Buffer
+) -> PyResult<()> {
+    // PHASE 11 OPTIMIZATION: Use PyLong_AsLongLongAndOverflow
+    let mut overflow: std::ffi::c_int = 0;
+    let val_i64 = ffi::PyLong_AsLongLongAndOverflow(item_ptr, &mut overflow);
+
+    if overflow == 0 {
+        // Fast path for common positive integers
+        if val_i64 >= 0 {
+            write_positive_int(buf, val_i64 as u64);
+        } else {
+            // Negative number
+            buf.push(b'-');
+            write_positive_int(buf, (-val_i64) as u64);
+        }
+    } else {
+        // Overflow - try u64 for large positive numbers
+        let val_u64 = ffi::PyLong_AsUnsignedLongLong(item_ptr);
+
+        if val_u64 != u64::MAX || ffi::PyErr_Occurred().is_null() {
+            ffi::PyErr_Clear();
+            write_positive_int(buf, val_u64);
+        } else {
+            // Very large int - fall back to string representation
+            ffi::PyErr_Clear();
+
+            let repr_ptr = ffi::PyObject_Str(item_ptr);
+            if repr_ptr.is_null() {
+                return Err(pyo3::exceptions::PyValueError::new_err("Failed to convert large int"));
+            }
+
+            let mut str_size: ffi::Py_ssize_t = 0;
+            let str_data = ffi::PyUnicode_AsUTF8AndSize(repr_ptr, &mut str_size);
+
+            if !str_data.is_null() {
+                let str_slice = std::slice::from_raw_parts(str_data as *const u8, str_size as usize);
+                buf.extend_from_slice(str_slice);
+            }
+
+            ffi::Py_DECREF(repr_ptr);
+        }
+    }
     Ok(())
 }
 

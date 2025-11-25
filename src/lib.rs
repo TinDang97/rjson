@@ -67,7 +67,7 @@ const STATE_ASCII_MASK: u32 = 0b01000000;  // bit 6
 ///
 /// For maximum safety, compute offset based on known structure:
 #[cfg(target_pointer_width = "64")]
-const ASCII_DATA_OFFSET: usize = 48;  // PyASCIIObject(40) + padding to 8-byte alignment for data
+const ASCII_DATA_OFFSET: usize = 40;  // PyASCIIObject: PyObject_HEAD(16) + length(8) + hash(8) + state(4) + padding(4) = 40
 
 #[cfg(target_pointer_width = "32")]
 const ASCII_DATA_OFFSET: usize = 24;  // PyASCIIObject(20) + padding
@@ -530,26 +530,31 @@ impl JsonBuffer {
                     bulk::ArrayType::Mixed => {
                         // Fall back to normal per-element serialization
                         // PHASE 3+ OPTIMIZATION: Direct C API list access (no bounds checking)
-                        self.buf.push(b'[');
-
                         unsafe {
                             let list_ptr = list_val.as_ptr();
                             let len = ffi::PyList_GET_SIZE(list_ptr);
 
-                            for i in 0..len {
-                                if i > 0 {
+                            // Pre-allocate buffer (estimate: 8 bytes per element)
+                            self.buf.reserve((len as usize) * 8 + 2);
+                            self.buf.push(b'[');
+
+                            if len > 0 {
+                                // Handle first element without comma
+                                let first_ptr = ffi::PyList_GET_ITEM(list_ptr, 0);
+                                let first = Bound::from_borrowed_ptr(list_val.py(), first_ptr);
+                                self.serialize_pyany(&first)?;
+
+                                // Handle remaining elements with leading comma
+                                for i in 1..len {
                                     self.buf.push(b',');
+                                    let item_ptr = ffi::PyList_GET_ITEM(list_ptr, i);
+                                    let item = Bound::from_borrowed_ptr(list_val.py(), item_ptr);
+                                    self.serialize_pyany(&item)?;
                                 }
-
-                                // SAFETY: PyList_GET_ITEM returns borrowed reference (no refcount)
-                                // Index is guaranteed valid (0 <= i < len)
-                                let item_ptr = ffi::PyList_GET_ITEM(list_ptr, i);
-                                let item = Bound::from_borrowed_ptr(list_val.py(), item_ptr);
-                                self.serialize_pyany(&item)?;
                             }
-                        }
 
-                        self.buf.push(b']');
+                            self.buf.push(b']');
+                        }
                     }
                 }
 
@@ -585,45 +590,61 @@ impl JsonBuffer {
 
             FastType::Dict => {
                 let dict_val = unsafe { obj.downcast_exact::<PyDict>().unwrap_unchecked() };
-                self.buf.push(b'{');
 
                 // PHASE 3 OPTIMIZATION: Direct C API dict iteration
                 // PyDict_Next is 2-3x faster than PyO3's iterator
-                // This is the key optimization that orjson uses
                 unsafe {
                     let dict_ptr = dict_val.as_ptr();
+                    let dict_len = ffi::PyDict_Size(dict_ptr);
+
+                    // Empty dict fast path
+                    if dict_len == 0 {
+                        self.buf.extend_from_slice(b"{}");
+                        return Ok(());
+                    }
+
+                    // Pre-allocate buffer (estimate: 20 bytes per key-value pair)
+                    self.buf.reserve((dict_len as usize) * 20);
+                    self.buf.push(b'{');
+
                     let mut pos: ffi::Py_ssize_t = 0;
                     let mut key_ptr: *mut ffi::PyObject = std::ptr::null_mut();
                     let mut value_ptr: *mut ffi::PyObject = std::ptr::null_mut();
 
-                    let mut first = true;
-
-                    while ffi::PyDict_Next(dict_ptr, &mut pos, &mut key_ptr, &mut value_ptr) != 0 {
-                        if !first {
-                            self.buf.push(b',');
-                        }
-                        first = false;
-
-                        // SAFETY: PyDict_Next returns borrowed references (no need to decref)
-                        // Convert raw pointers to PyString
+                    // Handle first element without comma
+                    if ffi::PyDict_Next(dict_ptr, &mut pos, &mut key_ptr, &mut value_ptr) != 0 {
+                        // Check key is string
                         if ffi::PyUnicode_Check(key_ptr) == 0 {
                             return Err(PyValueError::new_err(
                                 "Dictionary keys must be strings for JSON serialization"
                             ));
                         }
 
-                        // PHASE 10.7: Direct Unicode buffer access with inline UTF-8 encoding
                         write_json_string_direct(&mut self.buf, key_ptr);
                         self.buf.push(b':');
-
-                        // Serialize value (wrap in Bound for safe handling)
-                        // SAFETY: value_ptr is a borrowed reference from PyDict_Next
                         let value = Bound::from_borrowed_ptr(dict_val.py(), value_ptr);
                         self.serialize_pyany(&value)?;
+
+                        // Handle remaining elements with leading comma
+                        while ffi::PyDict_Next(dict_ptr, &mut pos, &mut key_ptr, &mut value_ptr) != 0 {
+                            self.buf.push(b',');
+
+                            if ffi::PyUnicode_Check(key_ptr) == 0 {
+                                return Err(PyValueError::new_err(
+                                    "Dictionary keys must be strings for JSON serialization"
+                                ));
+                            }
+
+                            write_json_string_direct(&mut self.buf, key_ptr);
+                            self.buf.push(b':');
+                            let value = Bound::from_borrowed_ptr(dict_val.py(), value_ptr);
+                            self.serialize_pyany(&value)?;
+                        }
                     }
+
+                    self.buf.push(b'}');
                 }
 
-                self.buf.push(b'}');
                 Ok(())
             }
 
@@ -712,21 +733,15 @@ fn estimate_json_size(obj: &Bound<'_, PyAny>) -> usize {
 /// A JSON string, or a PyValueError on error.
 #[pyfunction]
 fn dumps(_py: Python, data: &Bound<'_, PyAny>) -> PyResult<String> {
+    // Allocate a new buffer each time - simpler and avoids clone overhead
+    // The allocation cost is minimal compared to serialization work
     let capacity = estimate_json_size(data);
+    let mut buffer = JsonBuffer { buf: Vec::with_capacity(capacity) };
 
-    // PHASE 14 OPTIMIZATION: Reuse thread-local buffer
-    object_cache::get_serialize_buffer(capacity, |buf| {
-        let mut buffer = JsonBuffer { buf: std::mem::take(buf) };
-        let result = buffer.serialize_pyany(data);
+    buffer.serialize_pyany(data)?;
 
-        // Put buffer back (keeping capacity for next call)
-        *buf = buffer.buf;
-
-        result.map(|_| {
-            // SAFETY: We only write valid UTF-8 (JSON is always UTF-8)
-            unsafe { String::from_utf8_unchecked(buf.clone()) }
-        })
-    })
+    // SAFETY: We only write valid UTF-8 (JSON is always UTF-8)
+    Ok(unsafe { String::from_utf8_unchecked(buffer.buf) })
 }
 
 /// EXTREME OPTIMIZATION: dumps_bytes() - The "Nuclear Option"

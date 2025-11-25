@@ -253,6 +253,7 @@ pub fn loads_adaptive(json_str: &str) -> PyResult<PyObject> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pyo3::types::{PyList, PyDict};
 
     #[test]
     fn test_loads_simd_basic() {
