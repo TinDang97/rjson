@@ -11,11 +11,13 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.24.0", features = ["extension-module"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+simd-json = "0.14"   # SIMD-accelerated JSON parsing (Phase 7)
 itoa = "1.0"
 ryu = "1.0"
 memchr = "2.7"
 fast-float = "0.2"   # 4x faster float parsing than stdlib
 ahash = "0.8"        # 2x faster hashing than default HashMap
+smallvec = "1.13"    # Stack-allocated small vectors
 
 [profile.release]
 debug = true         # Debug symbols for our profiler.

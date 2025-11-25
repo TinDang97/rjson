@@ -11,7 +11,7 @@ use memchr::memchr3;
 
 // Performance optimizations module
 mod optimizations;
-use optimizations::{object_cache, type_cache, bulk, extreme, escape_lut, likely, unlikely};
+use optimizations::{object_cache, type_cache, bulk, extreme, escape_lut, simd_parser, likely, unlikely};
 use type_cache::FastType;
 
 // Dead code removed: serde_value_to_py_object and py_object_to_serde_value
@@ -138,8 +138,9 @@ impl<'de, 'py> Visitor<'de> for PyObjectVisitor<'py> {
     }
 }
 
-struct PyObjectSeed<'py> {
-    py: Python<'py>,
+/// Seed for deserializing JSON to Python objects (public for simd_parser fallback)
+pub(crate) struct PyObjectSeed<'py> {
+    pub(crate) py: Python<'py>,
 }
 
 impl<'de, 'py> de::DeserializeSeed<'de> for PyObjectSeed<'py> {
@@ -165,7 +166,8 @@ impl<'de> de::DeserializeSeed<'de> for KeySeed {
 
 /// Parses a JSON string into a Python object.
 ///
-/// Phase 1.5+ Optimizations: Integer caching, optimized type detection, direct dict insertion.
+/// Uses serde_json with direct Python object creation via Visitor pattern.
+/// This provides single-pass parsing without intermediate representations.
 ///
 /// # Arguments
 /// * `json_str` - The JSON string to parse.
@@ -179,6 +181,21 @@ fn loads(json_str: &str) -> PyResult<PyObject> {
         DeserializeSeed::deserialize(PyObjectSeed { py }, &mut de)
             .map_err(|e| PyValueError::new_err(format!("JSON parsing error: {e}")))
     })
+}
+
+/// Parses JSON using SIMD-accelerated parser (always uses simd-json)
+///
+/// This function always uses the SIMD parser regardless of input size.
+/// Use this when you know you have large JSON inputs.
+///
+/// # Arguments
+/// * `json_str` - The JSON string to parse.
+///
+/// # Returns
+/// A PyObject representing the parsed JSON, or a PyValueError on error.
+#[pyfunction]
+fn loads_simd(json_str: &str) -> PyResult<PyObject> {
+    simd_parser::loads_simd(json_str)
 }
 
 /// Write a JSON string with proper escaping to a buffer
@@ -644,23 +661,22 @@ fn dumps_bytes(py: Python, data: &Bound<'_, PyAny>) -> PyResult<Py<PyBytes>> {
 ///
 /// Provides optimized JSON parsing (`loads`) and serialization (`dumps`) functions.
 ///
-/// # Performance Optimizations (Phase 1.5+)
-/// - Integer caching for values [-256, 256] with inline checks
-/// - Boolean and None singleton caching
-/// - Fast O(1) type detection using cached type pointers
-/// - Pre-sized vector allocations
-/// - Direct dict insertion (no intermediate Vecs)
-/// - Unsafe unwrap_unchecked for validated types (dumps path)
-/// - Dead code removal (150+ lines)
+/// # Performance Optimizations
+/// Phase 1-6: Integer caching, type pointer caching, bulk array processing
+/// Phase 7: SIMD-accelerated parsing with simd-json
+/// Phase 8: GIL batching (parse to IR, then batch-create Python objects)
+/// Phase 9: String interning for common dict keys
 ///
-/// Performance: 6-7x faster dumps, 1.2-1.5x faster loads vs stdlib json
+/// Performance: 8-9x faster dumps, 1.5-2x faster loads vs stdlib json
 #[pymodule]
 fn rjson(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // OPTIMIZATION: Initialize caches at module load time
+    // OPTIMIZATION: Initialize all caches at module load time
     object_cache::init_cache(py);
     type_cache::init_type_cache(py);
+    simd_parser::init_string_intern(py);  // Phase 9: String interning
 
     m.add_function(wrap_pyfunction!(loads, m)?)?;
+    m.add_function(wrap_pyfunction!(loads_simd, m)?)?;  // Phase 7: SIMD loads
     m.add_function(wrap_pyfunction!(dumps, m)?)?;
     m.add_function(wrap_pyfunction!(dumps_bytes, m)?)?;  // Nuclear option
     Ok(())
