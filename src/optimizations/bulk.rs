@@ -5,10 +5,35 @@
 //! for common cases like [1,2,3,4,5] or ["a","b","c"].
 //!
 //! Performance impact: +30-40% for array-heavy workloads
+//!
+//! DYNAMIC PROGRAMMING: Uses precomputed lookup tables for digit pairs
+//! to eliminate runtime division/modulo operations.
 
 use pyo3::prelude::*;
 use pyo3::ffi;
 use pyo3::types::{PyList, PyInt, PyFloat, PyString, PyBool};
+
+// ============================================================================
+// DYNAMIC PROGRAMMING: Precomputed digit lookup tables
+// ============================================================================
+
+/// Precomputed two-digit pairs "00" through "99"
+/// Using this table eliminates modulo operations for digit extraction
+static DIGIT_PAIRS: [[u8; 2]; 100] = [
+    *b"00", *b"01", *b"02", *b"03", *b"04", *b"05", *b"06", *b"07", *b"08", *b"09",
+    *b"10", *b"11", *b"12", *b"13", *b"14", *b"15", *b"16", *b"17", *b"18", *b"19",
+    *b"20", *b"21", *b"22", *b"23", *b"24", *b"25", *b"26", *b"27", *b"28", *b"29",
+    *b"30", *b"31", *b"32", *b"33", *b"34", *b"35", *b"36", *b"37", *b"38", *b"39",
+    *b"40", *b"41", *b"42", *b"43", *b"44", *b"45", *b"46", *b"47", *b"48", *b"49",
+    *b"50", *b"51", *b"52", *b"53", *b"54", *b"55", *b"56", *b"57", *b"58", *b"59",
+    *b"60", *b"61", *b"62", *b"63", *b"64", *b"65", *b"66", *b"67", *b"68", *b"69",
+    *b"70", *b"71", *b"72", *b"73", *b"74", *b"75", *b"76", *b"77", *b"78", *b"79",
+    *b"80", *b"81", *b"82", *b"83", *b"84", *b"85", *b"86", *b"87", *b"88", *b"89",
+    *b"90", *b"91", *b"92", *b"93", *b"94", *b"95", *b"96", *b"97", *b"98", *b"99",
+];
+
+/// Single digit lookup (0-9 as ASCII)
+static DIGITS: [u8; 10] = [b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9'];
 
 // ============================================================================
 // Phase 10.6: Fast ASCII String Extraction (duplicated from lib.rs for perf)
@@ -210,39 +235,75 @@ pub unsafe fn serialize_int_array_bulk(list: &Bound<'_, PyList>, buf: &mut Vec<u
     Ok(())
 }
 
-/// Fast inline integer formatting for small positive integers (0-999999)
-/// Uses lookup table approach for maximum speed
+/// Fast inline integer formatting using DYNAMIC PROGRAMMING lookup tables
+/// Uses precomputed digit pairs to eliminate modulo operations
 #[inline(always)]
 fn write_positive_int(buf: &mut Vec<u8>, val: u64) {
+    // Stack buffer for batch writes (max 20 digits for u64)
+    let mut tmp = [0u8; 20];
+
     if val < 10 {
-        buf.push(b'0' + val as u8);
+        // Single digit: direct lookup
+        buf.push(DIGITS[val as usize]);
     } else if val < 100 {
-        buf.push(b'0' + (val / 10) as u8);
-        buf.push(b'0' + (val % 10) as u8);
+        // 2 digits: single pair lookup
+        buf.extend_from_slice(&DIGIT_PAIRS[val as usize]);
     } else if val < 1000 {
-        buf.push(b'0' + (val / 100) as u8);
-        buf.push(b'0' + ((val / 10) % 10) as u8);
-        buf.push(b'0' + (val % 10) as u8);
+        // 3 digits: 1 digit + 1 pair
+        let d1 = (val / 100) as usize;
+        let d23 = (val % 100) as usize;
+        tmp[0] = DIGITS[d1];
+        tmp[1..3].copy_from_slice(&DIGIT_PAIRS[d23]);
+        buf.extend_from_slice(&tmp[..3]);
     } else if val < 10000 {
-        buf.push(b'0' + (val / 1000) as u8);
-        buf.push(b'0' + ((val / 100) % 10) as u8);
-        buf.push(b'0' + ((val / 10) % 10) as u8);
-        buf.push(b'0' + (val % 10) as u8);
+        // 4 digits: 2 pairs
+        let d12 = (val / 100) as usize;
+        let d34 = (val % 100) as usize;
+        tmp[0..2].copy_from_slice(&DIGIT_PAIRS[d12]);
+        tmp[2..4].copy_from_slice(&DIGIT_PAIRS[d34]);
+        buf.extend_from_slice(&tmp[..4]);
     } else if val < 100000 {
-        buf.push(b'0' + (val / 10000) as u8);
-        buf.push(b'0' + ((val / 1000) % 10) as u8);
-        buf.push(b'0' + ((val / 100) % 10) as u8);
-        buf.push(b'0' + ((val / 10) % 10) as u8);
-        buf.push(b'0' + (val % 10) as u8);
+        // 5 digits: 1 digit + 2 pairs
+        let d1 = (val / 10000) as usize;
+        let d23 = ((val / 100) % 100) as usize;
+        let d45 = (val % 100) as usize;
+        tmp[0] = DIGITS[d1];
+        tmp[1..3].copy_from_slice(&DIGIT_PAIRS[d23]);
+        tmp[3..5].copy_from_slice(&DIGIT_PAIRS[d45]);
+        buf.extend_from_slice(&tmp[..5]);
     } else if val < 1000000 {
-        buf.push(b'0' + (val / 100000) as u8);
-        buf.push(b'0' + ((val / 10000) % 10) as u8);
-        buf.push(b'0' + ((val / 1000) % 10) as u8);
-        buf.push(b'0' + ((val / 100) % 10) as u8);
-        buf.push(b'0' + ((val / 10) % 10) as u8);
-        buf.push(b'0' + (val % 10) as u8);
+        // 6 digits: 3 pairs
+        let d12 = (val / 10000) as usize;
+        let d34 = ((val / 100) % 100) as usize;
+        let d56 = (val % 100) as usize;
+        tmp[0..2].copy_from_slice(&DIGIT_PAIRS[d12]);
+        tmp[2..4].copy_from_slice(&DIGIT_PAIRS[d34]);
+        tmp[4..6].copy_from_slice(&DIGIT_PAIRS[d56]);
+        buf.extend_from_slice(&tmp[..6]);
+    } else if val < 10000000 {
+        // 7 digits: 1 digit + 3 pairs
+        let d1 = (val / 1000000) as usize;
+        let d23 = ((val / 10000) % 100) as usize;
+        let d45 = ((val / 100) % 100) as usize;
+        let d67 = (val % 100) as usize;
+        tmp[0] = DIGITS[d1];
+        tmp[1..3].copy_from_slice(&DIGIT_PAIRS[d23]);
+        tmp[3..5].copy_from_slice(&DIGIT_PAIRS[d45]);
+        tmp[5..7].copy_from_slice(&DIGIT_PAIRS[d67]);
+        buf.extend_from_slice(&tmp[..7]);
+    } else if val < 100000000 {
+        // 8 digits: 4 pairs
+        let d12 = (val / 1000000) as usize;
+        let d34 = ((val / 10000) % 100) as usize;
+        let d56 = ((val / 100) % 100) as usize;
+        let d78 = (val % 100) as usize;
+        tmp[0..2].copy_from_slice(&DIGIT_PAIRS[d12]);
+        tmp[2..4].copy_from_slice(&DIGIT_PAIRS[d34]);
+        tmp[4..6].copy_from_slice(&DIGIT_PAIRS[d56]);
+        tmp[6..8].copy_from_slice(&DIGIT_PAIRS[d78]);
+        buf.extend_from_slice(&tmp[..8]);
     } else {
-        // 7+ digits: use itoa
+        // 9+ digits: use itoa (rare case, large integers)
         let mut itoa_buf = itoa::Buffer::new();
         buf.extend_from_slice(itoa_buf.format(val).as_bytes());
     }
