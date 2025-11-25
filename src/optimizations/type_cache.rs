@@ -131,6 +131,7 @@ pub fn get_type_cache() -> &'static TypeCache {
 ///
 /// Convenience function that combines get_fast_type with comparison
 #[inline(always)]
+#[allow(dead_code)]
 pub fn is_type(obj: &Bound<'_, PyAny>, expected: FastType) -> bool {
     get_fast_type(obj) == expected
 }

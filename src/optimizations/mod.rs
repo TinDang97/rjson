@@ -16,6 +16,7 @@ pub mod simd_escape;
 /// These are no-ops on stable Rust but document intent and may be
 /// optimized by LLVM based on code structure.
 #[inline(always)]
+#[allow(dead_code)]
 pub fn likely(b: bool) -> bool {
     if !b {
         cold_path();

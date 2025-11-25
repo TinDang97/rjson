@@ -217,18 +217,21 @@ pub unsafe fn set_dict_item_direct(dict: *mut ffi::PyObject, key: *mut ffi::PyOb
 
 /// Get cached True singleton pointer for direct comparison
 #[inline(always)]
+#[allow(dead_code)]
 pub fn get_true_ptr() -> *mut ffi::PyObject {
     unsafe { ffi::Py_True() }
 }
 
 /// Get cached False singleton pointer for direct comparison
 #[inline(always)]
+#[allow(dead_code)]
 pub fn get_false_ptr() -> *mut ffi::PyObject {
     unsafe { ffi::Py_False() }
 }
 
 /// Get cached None singleton pointer
 #[inline(always)]
+#[allow(dead_code)]
 pub fn get_none_ptr() -> *mut ffi::PyObject {
     unsafe { ffi::Py_None() }
 }
@@ -241,7 +244,7 @@ pub fn get_none_ptr() -> *mut ffi::PyObject {
 // web servers), this causes unnecessary allocations. Thread-local storage
 // allows reusing the same buffer across calls.
 
-/// Thread-local buffer for dumps serialization
+// Thread-local buffer for dumps serialization
 thread_local! {
     static SERIALIZE_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(4096));
 }
@@ -276,6 +279,7 @@ where
 ///
 /// PHASE 14 OPTIMIZATION: Creates String from buffer contents without extra copy
 #[inline]
+#[allow(dead_code)]
 pub fn buffer_to_string(buf: &Vec<u8>) -> String {
     // SAFETY: We only write valid UTF-8 (JSON is always UTF-8)
     unsafe { String::from_utf8_unchecked(buf.clone()) }

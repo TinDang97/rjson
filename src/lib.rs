@@ -1,17 +1,13 @@
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
-use pyo3::types::{PyDict, PyList, PyBool, PyFloat, PyInt, PyString, PyTuple, PyAny, PyBytes};
+use pyo3::types::{PyBool, PyFloat, PyInt, PyString, PyList, PyTuple, PyDict, PyAny, PyBytes};
 use pyo3::ffi;  // For direct C API access
-use serde_json;
 use serde::de::{self, Visitor, MapAccess, SeqAccess, Deserializer, DeserializeSeed};
 use std::fmt;
-use itoa;
-use ryu;
-use memchr::memchr3;
 
 // Performance optimizations module
 mod optimizations;
-use optimizations::{object_cache, type_cache, bulk, extreme, escape_lut, simd_parser, simd_escape, likely, unlikely};
+use optimizations::{object_cache, type_cache, bulk, extreme, simd_parser, simd_escape, unlikely};
 use type_cache::FastType;
 
 // ============================================================================
@@ -119,36 +115,6 @@ unsafe fn write_json_string_direct(buf: &mut Vec<u8>, str_ptr: *mut ffi::PyObjec
 // write_json_string_ucs4) were tested but removed because they were slower than using
 // Python's cached UTF-8 via PyUnicode_AsUTF8AndSize. The per-byte encoding overhead
 // and lack of caching made them 1.5-2x slower for repeated serialization.
-
-/// Fast string extraction with ASCII optimization
-///
-/// For ASCII strings: Direct buffer access (no conversion)
-/// For non-ASCII: Falls back to PyUnicode_AsUTF8AndSize
-///
-/// # Safety
-/// Caller must ensure str_ptr is a valid PyUnicode object
-#[inline(always)]
-unsafe fn extract_string_fast(str_ptr: *mut ffi::PyObject) -> Result<(*const u8, usize), &'static str> {
-    let ascii_obj = str_ptr as *const PyASCIIObject;
-    let state = (*ascii_obj).state;
-
-    if state & STATE_ASCII_MASK != 0 {
-        // FAST PATH: ASCII string - direct buffer access
-        let length = (*ascii_obj).length as usize;
-        let data_ptr = (str_ptr as *const u8).add(ASCII_DATA_OFFSET);
-        Ok((data_ptr, length))
-    } else {
-        // SLOW PATH: Non-ASCII - use PyUnicode_AsUTF8AndSize
-        let mut size: ffi::Py_ssize_t = 0;
-        let data_ptr = ffi::PyUnicode_AsUTF8AndSize(str_ptr, &mut size);
-
-        if data_ptr.is_null() {
-            Err("String must be valid UTF-8")
-        } else {
-            Ok((data_ptr as *const u8, size as usize))
-        }
-    }
-}
 
 // Dead code removed: serde_value_to_py_object and py_object_to_serde_value
 // were never used (150+ lines). This reduces binary size and improves
@@ -418,13 +384,6 @@ struct JsonBuffer {
 
 impl JsonBuffer {
     #[inline]
-    fn with_capacity(capacity: usize) -> Self {
-        Self {
-            buf: Vec::with_capacity(capacity),
-        }
-    }
-
-    #[inline]
     fn write_null(&mut self) {
         self.buf.extend_from_slice(b"null");
     }
@@ -466,11 +425,6 @@ impl JsonBuffer {
             "Cannot serialize non-finite float: {}",
             value
         )))
-    }
-
-    #[inline]
-    fn write_string(&mut self, s: &str) {
-        write_json_string(&mut self.buf, s);
     }
 
     fn serialize_pyany(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -688,11 +642,6 @@ impl JsonBuffer {
                 .and_then(|n| n.to_str().map(|s| s.to_owned()))
                 .unwrap_or_else(|_| "unknown".to_string())
         )))
-    }
-
-    fn into_string(self) -> String {
-        // SAFETY: We only write valid UTF-8 (all JSON is valid UTF-8)
-        unsafe { String::from_utf8_unchecked(self.buf) }
     }
 }
 

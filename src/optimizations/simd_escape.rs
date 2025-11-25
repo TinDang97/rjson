@@ -95,6 +95,7 @@ pub fn write_json_string_simd(buf: &mut Vec<u8>, s: &str) {
 /// Fast scalar path that assumes no escapes needed
 /// Used for bulk copying when we know string is safe
 #[inline]
+#[allow(dead_code)]
 pub fn write_json_string_fast(buf: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
     buf.reserve(bytes.len() + 2);
@@ -272,7 +273,7 @@ unsafe fn write_escaped_sse2(buf: &mut Vec<u8>, bytes: &[u8]) {
         // Most strings have 0 control chars, so any detection is fine
         let control_mask = _mm_cmplt_epi8(chunk, space_vec);
         // Also mask out negative bytes (0x80-0xFF are valid UTF-8, not control)
-        let zero_vec = _mm_setzero_si128();
+        let _zero_vec = _mm_setzero_si128(); // Kept for documentation/potential future use
         let is_positive = _mm_cmpgt_epi8(chunk, _mm_set1_epi8(-1)); // chunk > -1 means chunk >= 0
         let is_control = _mm_and_si128(control_mask, is_positive);
 

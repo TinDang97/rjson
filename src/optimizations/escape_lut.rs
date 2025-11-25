@@ -80,6 +80,7 @@ pub static ESCAPE_LUT: [EscapeAction; 256] = {
 
 /// Quick check: does this byte need escaping?
 #[inline(always)]
+#[allow(dead_code)]
 pub fn needs_escape(b: u8) -> bool {
     ESCAPE_LUT[b as usize] != EscapeAction::None
 }
@@ -87,6 +88,7 @@ pub fn needs_escape(b: u8) -> bool {
 /// Check if any byte in a slice needs escaping using the LUT
 /// Returns the index of the first byte that needs escaping, or None
 #[inline]
+#[allow(dead_code)]
 pub fn find_first_escape(bytes: &[u8]) -> Option<usize> {
     for (i, &b) in bytes.iter().enumerate() {
         if needs_escape(b) {
@@ -97,8 +99,9 @@ pub fn find_first_escape(bytes: &[u8]) -> Option<usize> {
 }
 
 /// Write escaped JSON string to buffer using LUT
-/// Much faster than match-based escaping
+/// Much faster than match-based escaping (superseded by SIMD but kept for reference)
 #[inline]
+#[allow(dead_code)]
 pub fn write_escaped_lut(buf: &mut Vec<u8>, bytes: &[u8]) {
     for &b in bytes {
         match ESCAPE_LUT[b as usize] {
@@ -123,7 +126,9 @@ pub fn write_escaped_lut(buf: &mut Vec<u8>, bytes: &[u8]) {
 }
 
 /// Optimized string writing with fast-path for no-escape case
+/// (superseded by SIMD but kept for reference and non-x86 fallback)
 #[inline]
+#[allow(dead_code)]
 pub fn write_json_string_lut(buf: &mut Vec<u8>, s: &str) {
     buf.push(b'"');
 

@@ -8,7 +8,7 @@
 //! Expected performance improvement: 40-60% faster loads
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyString};
+use pyo3::types::PyString;
 use pyo3::exceptions::PyValueError;
 use ahash::AHashMap;
 use std::sync::RwLock;
@@ -234,6 +234,7 @@ pub fn loads_simd(json_str: &str) -> PyResult<PyObject> {
 /// Optimized loads for small JSON (< 1KB)
 /// Falls back to serde_json for very small inputs where simd overhead isn't worth it
 #[inline]
+#[allow(dead_code)]
 pub fn loads_adaptive(json_str: &str) -> PyResult<PyObject> {
     // simd-json has setup overhead, only use for larger inputs
     if json_str.len() >= 256 {
