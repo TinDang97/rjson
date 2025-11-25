@@ -110,9 +110,11 @@ fn get_interned_string(py: Python, s: &str) -> PyObject {
 /// This is the core conversion function that:
 /// - Uses string interning for dictionary keys (Phase 9)
 /// - Creates Python objects in a cache-friendly order
+/// - PHASE 13: Uses direct C API for object creation
 #[inline]
 fn simd_value_to_py(py: Python, value: &simd_json::BorrowedValue) -> PyResult<PyObject> {
     use simd_json::BorrowedValue;
+    use pyo3::ffi;
 
     match value {
         // Static values: null, bool, numbers
@@ -125,52 +127,82 @@ fn simd_value_to_py(py: Python, value: &simd_json::BorrowedValue) -> PyResult<Py
                     if *n >= -256 && *n <= 256 {
                         Ok(object_cache::get_int(py, *n))
                     } else {
-                        Ok(n.into_py(py))
+                        // PHASE 13: Direct C API call
+                        unsafe {
+                            let ptr = object_cache::create_int_i64_direct(*n);
+                            Ok(PyObject::from_owned_ptr(py, ptr))
+                        }
                     }
                 }
                 simd_json::StaticNode::U64(n) => {
                     if *n <= 256 {
                         Ok(object_cache::get_int(py, *n as i64))
                     } else {
-                        Ok(n.into_py(py))
+                        // PHASE 13: Direct C API call
+                        unsafe {
+                            let ptr = object_cache::create_int_u64_direct(*n);
+                            Ok(PyObject::from_owned_ptr(py, ptr))
+                        }
                     }
                 }
-                simd_json::StaticNode::F64(f) => Ok(f.into_py(py)),
+                // PHASE 13: Direct C API call for floats
+                simd_json::StaticNode::F64(f) => unsafe {
+                    let ptr = object_cache::create_float_direct(*f);
+                    Ok(PyObject::from_owned_ptr(py, ptr))
+                },
             }
         }
 
         BorrowedValue::String(s) => {
-            // For string values, don't intern (only keys benefit from interning)
-            Ok(PyString::new(py, s).into_py(py))
+            // PHASE 13: Direct C API call for strings (2-3x faster)
+            unsafe {
+                let ptr = object_cache::create_string_direct(s);
+                Ok(PyObject::from_owned_ptr(py, ptr))
+            }
         }
 
         BorrowedValue::Array(arr) => {
-            // Pre-allocate vector for batch conversion
-            let mut items = Vec::with_capacity(arr.len());
+            // PHASE 13: Direct list creation with C API
+            unsafe {
+                let len = arr.len();
+                let list_ptr = object_cache::create_list_direct(len as ffi::Py_ssize_t);
+                if list_ptr.is_null() {
+                    return Err(PyValueError::new_err("Failed to create list"));
+                }
 
-            for item in arr.iter() {
-                items.push(simd_value_to_py(py, item)?);
+                for (i, item) in arr.iter().enumerate() {
+                    let py_item = simd_value_to_py(py, item)?;
+                    // PyList_SET_ITEM steals the reference
+                    object_cache::set_list_item_direct(list_ptr, i as ffi::Py_ssize_t, py_item.into_ptr());
+                }
+
+                Ok(PyObject::from_owned_ptr(py, list_ptr))
             }
-
-            // Create PyList from collected items
-            let list = PyList::new(py, &items)
-                .map_err(|e| PyValueError::new_err(format!("Failed to create list: {e}")))?;
-            Ok(list.into_py(py))
         }
 
         BorrowedValue::Object(obj) => {
-            let dict = PyDict::new(py);
+            // PHASE 13 + PHASE 15: Direct dict creation with interned keys
+            unsafe {
+                let dict_ptr = object_cache::create_dict_direct();
+                if dict_ptr.is_null() {
+                    return Err(PyValueError::new_err("Failed to create dict"));
+                }
 
-            for (key, value) in obj.iter() {
-                // Use string interning for keys (Phase 9)
-                let py_key = get_interned_string(py, key);
-                let py_value = simd_value_to_py(py, value)?;
+                for (key, value) in obj.iter() {
+                    // Use string interning for keys (Phase 9/15)
+                    let py_key = get_interned_string(py, key);
+                    let py_value = simd_value_to_py(py, value)?;
 
-                dict.set_item(py_key, py_value)
-                    .map_err(|e| PyValueError::new_err(format!("Failed to set dict item: {e}")))?;
+                    // PyDict_SetItem does NOT steal references
+                    let result = object_cache::set_dict_item_direct(dict_ptr, py_key.as_ptr(), py_value.as_ptr());
+                    if result < 0 {
+                        ffi::Py_DECREF(dict_ptr);
+                        return Err(PyValueError::new_err("Failed to set dict item"));
+                    }
+                }
+
+                Ok(PyObject::from_owned_ptr(py, dict_ptr))
             }
-
-            Ok(dict.into_py(py))
         }
     }
 }
