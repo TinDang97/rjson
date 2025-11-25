@@ -180,6 +180,7 @@ pub fn detect_array_type(list: &Bound<'_, PyList>) -> ArrayType {
 /// # Performance
 /// - ~3-4x faster than per-element for large int arrays
 /// - Uses itoa for fast integer formatting
+/// - Phase 11: Uses PyLong_AsLongLongAndOverflow to avoid PyErr_Occurred() overhead
 pub unsafe fn serialize_int_array_bulk(list: &Bound<'_, PyList>, buf: &mut Vec<u8>) -> PyResult<()> {
     let list_ptr = list.as_ptr();
     let size = ffi::PyList_GET_SIZE(list_ptr);
@@ -198,43 +199,41 @@ pub unsafe fn serialize_int_array_bulk(list: &Bound<'_, PyList>, buf: &mut Vec<u
 
         let item_ptr = ffi::PyList_GET_ITEM(list_ptr, i);
 
-        // Fast path: Try i64 first (most common)
-        let val_i64 = ffi::PyLong_AsLongLong(item_ptr);
+        // PHASE 11 OPTIMIZATION: Use PyLong_AsLongLongAndOverflow
+        // This avoids the expensive PyErr_Occurred() call on every integer
+        let mut overflow: std::ffi::c_int = 0;
+        let val_i64 = ffi::PyLong_AsLongLongAndOverflow(item_ptr, &mut overflow);
 
-        if val_i64 == -1 && !ffi::PyErr_Occurred().is_null() {
-            // Error occurred (overflow or not an int)
-            ffi::PyErr_Clear();
-
-            // Try u64
+        if overflow == 0 {
+            // Fast path: Value fits in i64 (most common case)
+            buf.extend_from_slice(itoa_buf.format(val_i64).as_bytes());
+        } else {
+            // Overflow - try u64 for large positive numbers
             let val_u64 = ffi::PyLong_AsUnsignedLongLong(item_ptr);
 
-            if val_u64 == u64::MAX && !ffi::PyErr_Occurred().is_null() {
-                // Still failed - very large int, use string representation
+            if val_u64 != u64::MAX || ffi::PyErr_Occurred().is_null() {
+                ffi::PyErr_Clear();  // Clear any error from the check
+                buf.extend_from_slice(itoa_buf.format(val_u64).as_bytes());
+            } else {
+                // Very large int - fall back to string representation
                 ffi::PyErr_Clear();
 
-                // Fall back to PyObject string conversion
                 let repr_ptr = ffi::PyObject_Str(item_ptr);
                 if repr_ptr.is_null() {
                     return Err(pyo3::exceptions::PyValueError::new_err("Failed to convert large int"));
                 }
 
                 // Get UTF-8 string
-                let mut size: ffi::Py_ssize_t = 0;
-                let str_data = ffi::PyUnicode_AsUTF8AndSize(repr_ptr, &mut size);
+                let mut str_size: ffi::Py_ssize_t = 0;
+                let str_data = ffi::PyUnicode_AsUTF8AndSize(repr_ptr, &mut str_size);
 
                 if !str_data.is_null() {
-                    let str_slice = std::slice::from_raw_parts(str_data as *const u8, size as usize);
+                    let str_slice = std::slice::from_raw_parts(str_data as *const u8, str_size as usize);
                     buf.extend_from_slice(str_slice);
                 }
 
                 ffi::Py_DECREF(repr_ptr);
-            } else {
-                // u64 success
-                buf.extend_from_slice(itoa_buf.format(val_u64).as_bytes());
             }
-        } else {
-            // i64 success
-            buf.extend_from_slice(itoa_buf.format(val_i64).as_bytes());
         }
     }
 
