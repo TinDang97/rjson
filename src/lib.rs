@@ -11,7 +11,7 @@ use memchr::memchr3;
 
 // Performance optimizations module
 mod optimizations;
-use optimizations::{object_cache, type_cache, bulk, extreme, escape_lut, simd_parser, likely, unlikely};
+use optimizations::{object_cache, type_cache, bulk, extreme, escape_lut, simd_parser, simd_escape, likely, unlikely};
 use type_cache::FastType;
 
 // Dead code removed: serde_value_to_py_object and py_object_to_serde_value
@@ -200,60 +200,21 @@ fn loads_simd(json_str: &str) -> PyResult<PyObject> {
 
 /// Write a JSON string with proper escaping to a buffer
 ///
-/// PHASE 7 OPTIMIZATION: Hybrid approach using:
-/// 1. SIMD memchr3 for quick escape detection (most strings have no escapes)
-/// 2. LUT-based escaping for strings that need it (faster than match statements)
+/// PHASE 10 OPTIMIZATION: SIMD-accelerated escape detection and bulk copy
+/// - SSE2: Process 16 bytes at a time (baseline for all x86_64)
+/// - AVX2: Process 32 bytes at a time (when available)
+/// - Scalar fallback for short strings and non-x86
+///
+/// Key insight: Most strings have NO escapes, so we optimize for bulk copying.
+/// The LUT-based escaping is kept for strings that DO need escaping (beats orjson!).
 ///
 /// # Arguments
 /// * `buf` - Buffer to write to
 /// * `s` - String to serialize
 #[inline]
 fn write_json_string(buf: &mut Vec<u8>, s: &str) {
-    let bytes = s.as_bytes();
-
-    // FAST PATH: Use SIMD to detect if any common escapes exist
-    // memchr3 is extremely fast (uses SIMD internally)
-    let has_common_escapes = memchr3(b'"', b'\\', b'\n', bytes).is_some();
-
-    if likely(!has_common_escapes) {
-        // Check for control characters (rare case)
-        if let Some(idx) = escape_lut::find_first_escape(bytes) {
-            // Has escapes - use LUT path
-            write_json_string_with_lut(buf, s, idx);
-        } else {
-            // ULTRA-FAST PATH: No escapes at all, direct memcpy
-            buf.push(b'"');
-            buf.extend_from_slice(bytes);
-            buf.push(b'"');
-        }
-    } else {
-        // Has common escapes - find first and use LUT
-        if let Some(idx) = escape_lut::find_first_escape(bytes) {
-            write_json_string_with_lut(buf, s, idx);
-        } else {
-            // Shouldn't happen, but handle gracefully
-            buf.push(b'"');
-            buf.extend_from_slice(bytes);
-            buf.push(b'"');
-        }
-    }
-}
-
-/// Write JSON string using LUT-based escaping, knowing escape starts at `first_escape_idx`
-#[inline(never)]  // Keep hot path small, this is the cold path
-#[cold]
-fn write_json_string_with_lut(buf: &mut Vec<u8>, s: &str, first_escape_idx: usize) {
-    let bytes = s.as_bytes();
-    buf.push(b'"');
-
-    // Copy prefix (before first escape) directly
-    if first_escape_idx > 0 {
-        buf.extend_from_slice(&bytes[..first_escape_idx]);
-    }
-
-    // Escape the rest using LUT
-    escape_lut::write_escaped_lut(buf, &bytes[first_escape_idx..]);
-    buf.push(b'"');
+    // Use SIMD-accelerated path
+    simd_escape::write_json_string_simd(buf, s);
 }
 
 /// Phase 2: Custom high-performance JSON serializer
