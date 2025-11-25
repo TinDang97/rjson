@@ -20,7 +20,6 @@ pub struct TypeCache {
     pub list_type: *mut ffi::PyTypeObject,
     pub tuple_type: *mut ffi::PyTypeObject,
     pub dict_type: *mut ffi::PyTypeObject,
-    true_ptr: *mut ffi::PyObject,  // Cached True singleton pointer
 }
 
 // SAFETY: Type pointers are immutable once initialized and valid for the lifetime
@@ -43,19 +42,15 @@ pub fn init_type_cache(py: Python) {
     if TYPE_CACHE.get().is_some() {
         return;
     }
-
-    let true_obj = PyBool::new(py, true);
-
     let cache = TypeCache {
         none_type: py.None().bind(py).get_type().as_type_ptr(),
-        bool_type: true_obj.get_type().as_type_ptr(),
+        bool_type: PyBool::new(py, true).get_type().as_type_ptr(),
         int_type: PyInt::new(py, 0).get_type().as_type_ptr(),
         float_type: PyFloat::new(py, 0.0).get_type().as_type_ptr(),
         string_type: PyString::new(py, "").get_type().as_type_ptr(),
         list_type: PyList::empty(py).get_type().as_type_ptr(),
         tuple_type: PyTuple::empty(py).get_type().as_type_ptr(),
         dict_type: PyDict::new(py).get_type().as_type_ptr(),
-        true_ptr: true_obj.as_ptr(),
     };
 
     let _ = TYPE_CACHE.set(cache);
@@ -130,27 +125,6 @@ pub fn get_fast_type(obj: &Bound<'_, PyAny>) -> FastType {
 #[inline(always)]
 pub fn get_type_cache() -> &'static TypeCache {
     TYPE_CACHE.get().expect("Type cache not initialized")
-}
-
-/// Get the cached True singleton pointer for fast bool comparison
-///
-/// Used for inline bool serialization in Phase 5A
-#[inline(always)]
-pub fn get_true_ptr() -> *mut ffi::PyObject {
-    TYPE_CACHE.get().expect("Type cache not initialized").true_ptr
-}
-
-/// Fast type check with likely/unlikely hints for branch prediction
-///
-/// # Arguments
-/// * `obj` - Python object to check
-/// * `expected` - Expected type
-///
-/// # Returns
-/// true if the object is of the expected type
-#[inline(always)]
-pub fn is_type(obj: &Bound<'_, PyAny>, expected: FastType) -> bool {
-    get_fast_type(obj) == expected
 }
 
 #[cfg(test)]

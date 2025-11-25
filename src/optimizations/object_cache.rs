@@ -5,10 +5,8 @@
 //!
 //! 1. Integer caching for small values [-256, 256]
 //! 2. Singleton caching for None, True, False
-//! 3. Empty collection caching
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
 use std::sync::OnceLock;
 
 /// Size of the integer cache (range: -256 to 256)
@@ -28,12 +26,6 @@ struct ObjectCache {
 
     /// Singleton False
     false_obj: PyObject,
-
-    /// Empty list singleton
-    empty_list: PyObject,
-
-    /// Empty dict singleton
-    empty_dict: PyObject,
 }
 
 /// Global object cache instance
@@ -63,8 +55,6 @@ pub fn init_cache(py: Python) {
         none: py.None(),
         true_obj: true.to_object(py),
         false_obj: false.to_object(py),
-        empty_list: PyList::empty(py).to_object(py),
-        empty_dict: PyDict::new(py).to_object(py),
     };
 
     // Store in global cache
@@ -138,38 +128,6 @@ pub fn get_bool(py: Python, value: bool) -> PyObject {
     }
 }
 
-/// Get cached empty list singleton
-///
-/// # Arguments
-/// * `py` - Python GIL token
-///
-/// # Returns
-/// Python empty list object
-#[inline(always)]
-pub fn get_empty_list(py: Python) -> PyObject {
-    if let Some(cache) = OBJECT_CACHE.get() {
-        cache.empty_list.clone_ref(py)
-    } else {
-        PyList::empty(py).to_object(py)
-    }
-}
-
-/// Get cached empty dict singleton
-///
-/// # Arguments
-/// * `py` - Python GIL token
-///
-/// # Returns
-/// Python empty dict object
-#[inline(always)]
-pub fn get_empty_dict(py: Python) -> PyObject {
-    if let Some(cache) = OBJECT_CACHE.get() {
-        cache.empty_dict.clone_ref(py)
-    } else {
-        PyDict::new(py).to_object(py)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,8 +139,8 @@ mod tests {
 
             // Test cached values
             let zero = get_int(py, 0);
-            let positive = get_int(py, 100);
-            let negative = get_int(py, -100);
+            let _positive = get_int(py, 100);
+            let _negative = get_int(py, -100);
 
             // Test cache hit (should be same object)
             let zero2 = get_int(py, 0);

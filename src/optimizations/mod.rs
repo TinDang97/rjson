@@ -5,6 +5,5 @@
 
 pub mod object_cache;
 pub mod type_cache;
-pub mod buffer_pool;
 pub mod bulk;
 pub mod extreme;

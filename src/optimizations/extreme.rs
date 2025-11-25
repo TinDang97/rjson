@@ -11,7 +11,7 @@
 
 use pyo3::prelude::*;
 use pyo3::ffi;
-use pyo3::types::{PyBytes, PyList, PyDict, PyTuple};
+use pyo3::types::PyBytes;
 use std::ptr;
 
 /// Direct C API serializer with zero abstraction
@@ -45,7 +45,7 @@ impl DirectSerializer {
         use crate::optimizations::type_cache;
         let type_cache_ref = type_cache::get_type_cache();
 
-        let none_type = type_cache_ref.none_type;
+        let _none_type = type_cache_ref.none_type;
         let bool_type = type_cache_ref.bool_type;
         let int_type = type_cache_ref.int_type;
         let float_type = type_cache_ref.float_type;
@@ -378,7 +378,7 @@ impl DirectSerializer {
 /// Estimate buffer size for allocation
 #[inline(always)]
 pub unsafe fn estimate_size_fast(obj: *mut ffi::PyObject) -> usize {
-    let obj_type = (*obj).ob_type;
+    let _obj_type = (*obj).ob_type;
 
     // Quick heuristics
     if obj == ffi::Py_None() {
