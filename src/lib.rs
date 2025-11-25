@@ -259,7 +259,7 @@ impl<'de, 'py> Visitor<'de> for PyObjectVisitor<'py> {
     where
         A: MapAccess<'de>,
     {
-        // PHASE 13 OPTIMIZATION: Direct dict creation with C API
+        // PHASE 13 + PHASE 16 OPTIMIZATION: Direct dict creation with string interning
         use serde::de::Error as SerdeDeError;
 
         unsafe {
@@ -268,20 +268,13 @@ impl<'de, 'py> Visitor<'de> for PyObjectVisitor<'py> {
                 return Err(SerdeDeError::custom("Failed to create dict"));
             }
 
-            // Insert directly using C API
+            // Insert directly using C API with interned keys
             while let Some((key, value)) = map.next_entry_seed(KeySeed, PyObjectSeed { py: self.py })? {
-                // Create key string directly
-                let key_ptr = object_cache::create_string_direct(&key);
-                if key_ptr.is_null() {
-                    ffi::Py_DECREF(dict_ptr);
-                    return Err(SerdeDeError::custom("Failed to create key string"));
-                }
+                // PHASE 16: Use interned string for common keys (reduces allocations)
+                let key_obj = simd_parser::get_interned_string(self.py, &key);
 
                 // Insert: PyDict_SetItem does NOT steal references
-                let result = object_cache::set_dict_item_direct(dict_ptr, key_ptr, value.as_ptr());
-
-                // Clean up key (we own it, PyDict_SetItem increfs it)
-                ffi::Py_DECREF(key_ptr);
+                let result = object_cache::set_dict_item_direct(dict_ptr, key_obj.as_ptr(), value.as_ptr());
 
                 if result < 0 {
                     ffi::Py_DECREF(dict_ptr);

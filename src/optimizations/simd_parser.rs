@@ -84,8 +84,21 @@ pub fn init_string_intern(py: Python) {
 }
 
 /// Get an interned string (or create a new one)
+/// Public for use in main loads path
+///
+/// Optimization: Only tries to intern short strings (<=16 chars) to avoid
+/// lock contention for unique/long keys that won't benefit from caching.
 #[inline]
-fn get_interned_string(py: Python, s: &str) -> PyObject {
+pub fn get_interned_string(py: Python, s: &str) -> PyObject {
+    // Skip interning for long strings - they're unlikely to be repeated keys
+    // and the lock overhead hurts more than it helps
+    if s.len() > 16 {
+        return unsafe {
+            let ptr = crate::optimizations::object_cache::create_string_direct(s);
+            PyObject::from_owned_ptr(py, ptr)
+        };
+    }
+
     if let Some(intern) = STRING_INTERN.get() {
         // Try read lock first (fast path for cached strings)
         if let Ok(guard) = intern.read() {
@@ -94,15 +107,20 @@ fn get_interned_string(py: Python, s: &str) -> PyObject {
             }
         }
 
-        // Write lock to potentially add to cache
-        if let Ok(mut guard) = intern.write() {
-            return guard.get_or_intern(py, s);
+        // Only take write lock for very short strings (common keys like "id", "name")
+        // to minimize lock contention
+        if s.len() <= 8 {
+            if let Ok(mut guard) = intern.write() {
+                return guard.get_or_intern(py, s);
+            }
         }
     }
 
     // Fallback: create without caching
-    let result: PyObject = PyString::new(py, s).into_py(py);
-    result
+    unsafe {
+        let ptr = crate::optimizations::object_cache::create_string_direct(s);
+        PyObject::from_owned_ptr(py, ptr)
+    }
 }
 
 /// Convert simd_json Value to Python object
