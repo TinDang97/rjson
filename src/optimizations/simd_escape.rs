@@ -55,6 +55,17 @@ pub fn write_json_string_simd(buf: &mut Vec<u8>, s: &str) {
     buf.push(b'"');
 }
 
+/// Fast scalar path that assumes no escapes needed
+/// Used for bulk copying when we know string is safe
+#[inline]
+pub fn write_json_string_fast(buf: &mut Vec<u8>, s: &str) {
+    let bytes = s.as_bytes();
+    buf.reserve(bytes.len() + 2);
+    buf.push(b'"');
+    buf.extend_from_slice(bytes);
+    buf.push(b'"');
+}
+
 /// SSE2 implementation: Process 16 bytes at a time
 ///
 /// # Safety
