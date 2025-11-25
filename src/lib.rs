@@ -229,26 +229,44 @@ impl<'de, 'py> Visitor<'de> for PyObjectVisitor<'py> {
     where
         A: SeqAccess<'de>,
     {
-        // PHASE 13 OPTIMIZATION: Direct list creation with C API
-        // First collect elements (we need the count for PyList_New)
-        let size = seq.size_hint().unwrap_or(0);
-        let mut elements: Vec<PyObject> = Vec::with_capacity(size);
+        // PHASE 17 OPTIMIZATION: Direct list population without intermediate Vec
+        // JSON always has accurate size hints, so we can create list with exact size
+        use serde::de::Error as SerdeDeError;
 
-        while let Some(elem) = seq.next_element_seed(PyObjectSeed { py: self.py })? {
-            elements.push(elem);
-        }
+        let size_hint = seq.size_hint().unwrap_or(0);
 
-        // Now create list directly with exact size (no resizing)
         unsafe {
-            let list_ptr = object_cache::create_list_direct(elements.len() as ffi::Py_ssize_t);
+            // Create list with estimated size (will be resized if needed)
+            let list_ptr = object_cache::create_list_direct(size_hint as ffi::Py_ssize_t);
             if list_ptr.is_null() {
-                use serde::de::Error as SerdeDeError;
                 return Err(SerdeDeError::custom("Failed to create list"));
             }
 
-            // Set items directly (steals references, so we use into_ptr)
-            for (i, elem) in elements.into_iter().enumerate() {
-                object_cache::set_list_item_direct(list_ptr, i as ffi::Py_ssize_t, elem.into_ptr());
+            let mut idx = 0isize;
+
+            // Populate list directly as we parse
+            while let Some(elem) = seq.next_element_seed(PyObjectSeed { py: self.py })? {
+                if (idx as usize) < size_hint {
+                    // Fast path: within pre-allocated size
+                    object_cache::set_list_item_direct(list_ptr, idx as ffi::Py_ssize_t, elem.into_ptr());
+                } else {
+                    // Slow path: need to append (very rare for valid JSON)
+                    if ffi::PyList_Append(list_ptr, elem.as_ptr()) < 0 {
+                        ffi::Py_DECREF(list_ptr);
+                        return Err(SerdeDeError::custom("Failed to append to list"));
+                    }
+                }
+                idx += 1;
+            }
+
+            // If we got fewer elements than size_hint, we need to truncate
+            // This shouldn't happen with valid JSON but handle it safely
+            if (idx as usize) < size_hint {
+                // PyList_SetSlice to truncate is complex, just rebuild
+                // But this is extremely rare, so we just leave extra None slots
+                // Actually, let's set the size correctly
+                let list_obj = list_ptr as *mut ffi::PyListObject;
+                (*list_obj).ob_base.ob_size = idx;
             }
 
             Ok(PyObject::from_owned_ptr(self.py, list_ptr))
