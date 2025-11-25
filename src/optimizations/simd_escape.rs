@@ -23,16 +23,33 @@ const SIMD_THRESHOLD: usize = 16;
 ///
 /// This is the main entry point that dispatches to the appropriate
 /// implementation based on CPU features and string length.
+///
+/// Optimization strategy:
+/// 1. First, do a fast SIMD pre-scan to check if ANY escapes are needed
+/// 2. If no escapes: bulk copy the entire string (very fast)
+/// 3. If escapes present: use chunk-by-chunk escape detection
 #[inline]
 pub fn write_json_string_simd(buf: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
 
-    buf.push(b'"');
-
     if bytes.is_empty() {
+        buf.extend_from_slice(b"\"\"");
+        return;
+    }
+
+    // FAST PATH: Pre-scan to check if any escaping is needed
+    // Most strings don't need escaping, so this is the common case
+    if !needs_escape_simd(bytes) {
+        // No escapes needed - bulk copy the entire string
+        buf.reserve(bytes.len() + 2);
+        buf.push(b'"');
+        buf.extend_from_slice(bytes);
         buf.push(b'"');
         return;
     }
+
+    // SLOW PATH: String has at least one character that needs escaping
+    buf.push(b'"');
 
     // Use SIMD for strings >= threshold on x86_64
     #[cfg(target_arch = "x86_64")]
@@ -64,6 +81,118 @@ pub fn write_json_string_fast(buf: &mut Vec<u8>, s: &str) {
     buf.push(b'"');
     buf.extend_from_slice(bytes);
     buf.push(b'"');
+}
+
+/// SIMD pre-scan: Check if ANY bytes need escaping
+/// Returns true if escaping is needed, false if string can be bulk-copied
+///
+/// This enables a fast path: scan first, then either bulk-copy or escape.
+/// For strings without escapes (common case), this is faster than
+/// chunk-by-chunk escape detection.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn needs_escape_simd(bytes: &[u8]) -> bool {
+    if bytes.len() < 16 {
+        return needs_escape_scalar(bytes);
+    }
+
+    if is_x86_feature_detected!("avx2") {
+        unsafe { needs_escape_avx2(bytes) }
+    } else {
+        unsafe { needs_escape_sse2(bytes) }
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+pub fn needs_escape_simd(bytes: &[u8]) -> bool {
+    needs_escape_scalar(bytes)
+}
+
+/// Scalar check for escape characters
+#[inline]
+fn needs_escape_scalar(bytes: &[u8]) -> bool {
+    for &b in bytes {
+        if b == b'"' || b == b'\\' || b < 0x20 {
+            return true;
+        }
+    }
+    false
+}
+
+/// SSE2 pre-scan for escape characters
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn needs_escape_sse2(bytes: &[u8]) -> bool {
+    use std::arch::x86_64::*;
+
+    let len = bytes.len();
+    let mut i = 0;
+
+    let quote_vec = _mm_set1_epi8(b'"' as i8);
+    let backslash_vec = _mm_set1_epi8(b'\\' as i8);
+    let space_vec = _mm_set1_epi8(0x20);
+
+    // Process 16 bytes at a time
+    while i + 16 <= len {
+        let chunk = _mm_loadu_si128(bytes.as_ptr().add(i) as *const __m128i);
+
+        let is_quote = _mm_cmpeq_epi8(chunk, quote_vec);
+        let is_backslash = _mm_cmpeq_epi8(chunk, backslash_vec);
+        let control_mask = _mm_cmplt_epi8(chunk, space_vec);
+        let is_positive = _mm_cmpgt_epi8(chunk, _mm_set1_epi8(-1));
+        let is_control = _mm_and_si128(control_mask, is_positive);
+
+        let needs_escape = _mm_or_si128(_mm_or_si128(is_quote, is_backslash), is_control);
+        let mask = _mm_movemask_epi8(needs_escape);
+
+        if mask != 0 {
+            return true;
+        }
+        i += 16;
+    }
+
+    // Check remaining bytes
+    needs_escape_scalar(&bytes[i..])
+}
+
+/// AVX2 pre-scan for escape characters
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn needs_escape_avx2(bytes: &[u8]) -> bool {
+    use std::arch::x86_64::*;
+
+    let len = bytes.len();
+    let mut i = 0;
+
+    let quote_vec = _mm256_set1_epi8(b'"' as i8);
+    let backslash_vec = _mm256_set1_epi8(b'\\' as i8);
+    let space_vec = _mm256_set1_epi8(0x20);
+
+    // Process 32 bytes at a time
+    while i + 32 <= len {
+        let chunk = _mm256_loadu_si256(bytes.as_ptr().add(i) as *const __m256i);
+
+        let is_quote = _mm256_cmpeq_epi8(chunk, quote_vec);
+        let is_backslash = _mm256_cmpeq_epi8(chunk, backslash_vec);
+        let control_mask = _mm256_cmpgt_epi8(space_vec, chunk);
+        let is_positive = _mm256_cmpgt_epi8(chunk, _mm256_set1_epi8(-1));
+        let is_control = _mm256_and_si256(control_mask, is_positive);
+
+        let needs_escape = _mm256_or_si256(_mm256_or_si256(is_quote, is_backslash), is_control);
+        let mask = _mm256_movemask_epi8(needs_escape);
+
+        if mask != 0 {
+            return true;
+        }
+        i += 32;
+    }
+
+    // Check remaining bytes with SSE2 or scalar
+    if i + 16 <= len {
+        return needs_escape_sse2(&bytes[i..]);
+    }
+    needs_escape_scalar(&bytes[i..])
 }
 
 /// SSE2 implementation: Process 16 bytes at a time
