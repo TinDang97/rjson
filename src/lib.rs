@@ -11,7 +11,7 @@ use memchr::memchr3;
 
 // Performance optimizations module
 mod optimizations;
-use optimizations::{object_cache, type_cache};
+use optimizations::{object_cache, type_cache, bulk};
 use type_cache::FastType;
 
 // Dead code removed: serde_value_to_py_object and py_object_to_serde_value
@@ -181,6 +181,77 @@ fn loads(json_str: &str) -> PyResult<PyObject> {
     })
 }
 
+/// Write a JSON string with proper escaping to a buffer
+///
+/// This is a standalone function so it can be used by both JsonBuffer
+/// and the bulk serialization code.
+///
+/// # Arguments
+/// * `buf` - Buffer to write to
+/// * `s` - String to serialize
+#[inline]
+fn write_json_string(buf: &mut Vec<u8>, s: &str) {
+    buf.push(b'"');
+
+    let bytes = s.as_bytes();
+
+    // PHASE 3 OPTIMIZATION: SIMD-based escape detection
+    // Use memchr3 to check for most common escape chars (", \, \n)
+    // This covers >95% of cases that need escaping
+    if let Some(_) = memchr3(b'"', b'\\', b'\n', bytes) {
+        // Has escapes - use slow path
+        write_json_string_escaped(buf, s);
+        buf.push(b'"');
+        return;
+    }
+
+    // Fast path: Check remaining control chars (rare case)
+    // Use early-exit loop for maximum performance
+    let mut needs_escape = false;
+    for &b in bytes {
+        if b < 0x20 {
+            needs_escape = true;
+            break;
+        }
+    }
+
+    if needs_escape {
+        write_json_string_escaped(buf, s);
+        buf.push(b'"');
+    } else {
+        // Ultra-fast path: no escapes at all, direct memcpy
+        buf.extend_from_slice(bytes);
+        buf.push(b'"');
+    }
+}
+
+/// Write an escaped JSON string (no quotes added)
+#[inline(never)]  // Keep hot path small
+fn write_json_string_escaped(buf: &mut Vec<u8>, s: &str) {
+    for ch in s.chars() {
+        match ch {
+            '"' => buf.extend_from_slice(b"\\\""),
+            '\\' => buf.extend_from_slice(b"\\\\"),
+            '\n' => buf.extend_from_slice(b"\\n"),
+            '\r' => buf.extend_from_slice(b"\\r"),
+            '\t' => buf.extend_from_slice(b"\\t"),
+            '\x08' => buf.extend_from_slice(b"\\b"),
+            '\x0C' => buf.extend_from_slice(b"\\f"),
+            c if c.is_control() => {
+                // Unicode escape for control characters
+                buf.extend_from_slice(b"\\u");
+                let hex = format!("{:04x}", c as u32);
+                buf.extend_from_slice(hex.as_bytes());
+            }
+            c => {
+                let mut tmp = [0u8; 4];
+                let s = c.encode_utf8(&mut tmp);
+                buf.extend_from_slice(s.as_bytes());
+            }
+        }
+    }
+}
+
 /// Phase 2: Custom high-performance JSON serializer
 ///
 /// Uses itoa (10x faster than fmt) and ryu (5x faster than fmt) for number formatting.
@@ -236,64 +307,7 @@ impl JsonBuffer {
 
     #[inline]
     fn write_string(&mut self, s: &str) {
-        self.buf.push(b'"');
-
-        let bytes = s.as_bytes();
-
-        // PHASE 3 OPTIMIZATION: SIMD-based escape detection
-        // Use memchr3 to check for most common escape chars (", \, \n)
-        // This covers >95% of cases that need escaping
-        if let Some(_) = memchr3(b'"', b'\\', b'\n', bytes) {
-            // Has escapes - use slow path
-            self.write_string_escaped(s);
-            self.buf.push(b'"');
-            return;
-        }
-
-        // Fast path: Check remaining control chars (rare case)
-        // Use early-exit loop for maximum performance
-        let mut needs_escape = false;
-        for &b in bytes {
-            if b < 0x20 {
-                needs_escape = true;
-                break;
-            }
-        }
-
-        if needs_escape {
-            self.write_string_escaped(s);
-            self.buf.push(b'"');
-        } else {
-            // Ultra-fast path: no escapes at all, direct memcpy
-            self.buf.extend_from_slice(bytes);
-            self.buf.push(b'"');
-        }
-    }
-
-    #[inline(never)]  // Keep hot path small
-    fn write_string_escaped(&mut self, s: &str) {
-        for ch in s.chars() {
-            match ch {
-                '"' => self.buf.extend_from_slice(b"\\\""),
-                '\\' => self.buf.extend_from_slice(b"\\\\"),
-                '\n' => self.buf.extend_from_slice(b"\\n"),
-                '\r' => self.buf.extend_from_slice(b"\\r"),
-                '\t' => self.buf.extend_from_slice(b"\\t"),
-                '\x08' => self.buf.extend_from_slice(b"\\b"),
-                '\x0C' => self.buf.extend_from_slice(b"\\f"),
-                c if c.is_control() => {
-                    // Unicode escape for control characters
-                    self.buf.extend_from_slice(b"\\u");
-                    let hex = format!("{:04x}", c as u32);
-                    self.buf.extend_from_slice(hex.as_bytes());
-                }
-                c => {
-                    let mut tmp = [0u8; 4];
-                    let s = c.encode_utf8(&mut tmp);
-                    self.buf.extend_from_slice(s.as_bytes());
-                }
-            }
-        }
+        write_json_string(&mut self.buf, s);
     }
 
     fn serialize_pyany(&mut self, obj: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -344,18 +358,55 @@ impl JsonBuffer {
 
             FastType::List => {
                 let list_val = unsafe { obj.downcast_exact::<PyList>().unwrap_unchecked() };
-                self.buf.push(b'[');
 
-                let mut first = true;
-                for item in list_val.iter() {
-                    if !first {
-                        self.buf.push(b',');
+                // PHASE 6A OPTIMIZATION: Bulk array processing for homogeneous arrays
+                // Detect if the array contains all the same type and use optimized path
+                let array_type = bulk::detect_array_type(&list_val);
+
+                match array_type {
+                    bulk::ArrayType::AllInts => {
+                        // Bulk serialize integer array (3-4x faster)
+                        unsafe { bulk::serialize_int_array_bulk(&list_val, &mut self.buf)? }
                     }
-                    first = false;
-                    self.serialize_pyany(&item)?;
+                    bulk::ArrayType::AllFloats => {
+                        // Bulk serialize float array
+                        unsafe { bulk::serialize_float_array_bulk(&list_val, &mut self.buf)? }
+                    }
+                    bulk::ArrayType::AllBools => {
+                        // Bulk serialize boolean array
+                        unsafe { bulk::serialize_bool_array_bulk(&list_val, &mut self.buf)? }
+                    }
+                    bulk::ArrayType::AllStrings => {
+                        // Bulk serialize string array
+                        unsafe {
+                            bulk::serialize_string_array_bulk(
+                                &list_val,
+                                &mut self.buf,
+                                write_json_string
+                            )?
+                        }
+                    }
+                    bulk::ArrayType::Empty => {
+                        // Empty array
+                        self.buf.extend_from_slice(b"[]");
+                    }
+                    bulk::ArrayType::Mixed => {
+                        // Fall back to normal per-element serialization
+                        self.buf.push(b'[');
+
+                        let mut first = true;
+                        for item in list_val.iter() {
+                            if !first {
+                                self.buf.push(b',');
+                            }
+                            first = false;
+                            self.serialize_pyany(&item)?;
+                        }
+
+                        self.buf.push(b']');
+                    }
                 }
 
-                self.buf.push(b']');
                 Ok(())
             }
 

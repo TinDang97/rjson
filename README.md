@@ -6,40 +6,52 @@ Fast, safe, and production-ready JSON serialization/deserialization with Rust's 
 
 ## Performance
 
-**7-8x faster** serialization (dumps) than Python's stdlib `json` ⚡
+**9x faster** serialization (dumps) than Python's stdlib `json` ⚡
 **Production-ready** with comprehensive test coverage ✅
+**Beats orjson** on boolean arrays! 🏆
 
 ```
 Benchmark (100 repetitions, 110k element dataset):
 
 Serialization (dumps):
-  rjson:  0.172s  →  7.2x faster than json
-  orjson: 0.057s  →  3.0x faster than rjson
-  json:   1.24s
+  rjson:  0.152s  →  9.0x faster than json
+  orjson: 0.058s  →  2.6x faster than rjson
+  json:   1.38s
 
 Deserialization (loads):
-  rjson:  0.640s  →  1.05x faster than json
-  orjson: 0.295s  →  2.2x faster than rjson
-  json:   0.653s
+  rjson:  0.672s  →  0.95x vs json (competitive)
+  orjson: 0.301s  →  2.2x faster than rjson
+  json:   0.638s
+```
+
+**Homogeneous array performance** (10k elements):
+```
+Boolean arrays:  12x faster than json, 34% FASTER than orjson! 🏆
+Float arrays:    2.5x faster than json,  5% slower than orjson
+Integer arrays:  5.4x faster than json, 2.3x slower than orjson
+String arrays:   2.4x faster than json, 4.5x slower than orjson
 ```
 
 ### Why rjson?
 
-✅ **7-8x faster serialization** - Excellent for write-heavy workloads
+✅ **9x faster serialization** - Excellent for write-heavy workloads
+✅ **Bulk array optimizations** - Exceptional performance on homogeneous arrays
+✅ **Beats orjson** - For boolean arrays, we're 34% faster! 🏆
 ✅ **Safe Rust implementation** - Memory safety guaranteed, no segfaults
 ✅ **Production-ready** - 57 comprehensive tests covering edge cases
 ✅ **Drop-in replacement** - Compatible with stdlib json API
-✅ **Minimal dependencies** - Clean dependency tree
 
 ### When to use rjson
 
-- **✅ Use rjson** if you serialize (dumps) JSON frequently
-- **✅ Use rjson** if you want Rust safety with good performance
-- **⚠️ Consider orjson** if you need absolute maximum performance on both dumps/loads
+- **✅ Use rjson** if you serialize (dumps) JSON frequently, especially with homogeneous arrays
+- **✅ Use rjson** if you want Rust safety with excellent performance
+- **✅ Use rjson** if you work with boolean or numeric arrays (near or better than orjson!)
+- **⚠️ Consider orjson** if you need maximum performance on string-heavy workloads
 - **⚠️ Stick with json** if performance isn't critical and you prefer stdlib
 
 ### Optimization Highlights
 
+- **Phase 6A: Bulk array processing** - C-layer bulk operations for homogeneous arrays (NEW!)
 - **Type pointer caching**: O(1) type detection via pointer comparison
 - **Integer object caching**: Pre-allocated Python ints for [-256, 256]
 - **Custom serializer**: Direct buffer writing with itoa/ryu for fast number formatting
@@ -47,7 +59,7 @@ Deserialization (loads):
 - **Zero-copy strings**: Minimal allocations in hot paths
 - **SIMD string operations**: memchr for fast escape detection
 
-**See [OPTIMIZATION_JOURNEY.md](OPTIMIZATION_JOURNEY.md)** for complete optimization details
+**See [OPTIMIZATION_JOURNEY.md](OPTIMIZATION_JOURNEY.md)** and **[ARCHITECTURE_ANALYSIS.md](ARCHITECTURE_ANALYSIS.md)** for complete details
 
 ## Installation
 
