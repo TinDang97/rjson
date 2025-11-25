@@ -434,21 +434,34 @@ impl JsonBuffer {
             }
 
             FastType::Int => {
-                let l_val = unsafe { obj.downcast_exact::<PyInt>().unwrap_unchecked() };
+                // PHASE 11 OPTIMIZATION: Use direct C API with overflow check
+                // This avoids PyO3's extract() overhead and uses PyLong_AsLongLongAndOverflow
+                // which is faster than checking PyErr_Occurred() after each call
+                unsafe {
+                    let int_ptr = obj.as_ptr();
+                    let mut overflow: std::ffi::c_int = 0;
+                    let val_i64 = ffi::PyLong_AsLongLongAndOverflow(int_ptr, &mut overflow);
 
-                // Try i64 first (most common)
-                if let Ok(val_i64) = l_val.extract::<i64>() {
-                    self.write_int_i64(val_i64);
-                    Ok(())
-                } else if let Ok(val_u64) = l_val.extract::<u64>() {
-                    self.write_int_u64(val_u64);
-                    Ok(())
-                } else {
-                    // Fallback for very large integers: convert to string
-                    let s = l_val.to_string();
-                    self.buf.extend_from_slice(s.as_bytes());
-                    Ok(())
+                    if overflow == 0 {
+                        // Fast path: Value fits in i64 (most common case)
+                        self.write_int_i64(val_i64);
+                    } else {
+                        // Overflow - try u64 for large positive numbers
+                        let val_u64 = ffi::PyLong_AsUnsignedLongLong(int_ptr);
+
+                        if val_u64 != u64::MAX || ffi::PyErr_Occurred().is_null() {
+                            ffi::PyErr_Clear();
+                            self.write_int_u64(val_u64);
+                        } else {
+                            // Very large int - fall back to string representation
+                            ffi::PyErr_Clear();
+                            let l_val = obj.downcast_exact::<PyInt>().unwrap_unchecked();
+                            let s = l_val.to_string();
+                            self.buf.extend_from_slice(s.as_bytes());
+                        }
+                    }
                 }
+                Ok(())
             }
 
             FastType::Float => {
