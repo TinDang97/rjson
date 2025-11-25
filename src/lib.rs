@@ -351,8 +351,24 @@ impl JsonBuffer {
 
             FastType::String => {
                 let s_val = unsafe { obj.downcast_exact::<PyString>().unwrap_unchecked() };
-                let s = s_val.to_str()?;
-                self.write_string(s);
+
+                // PHASE 3+ OPTIMIZATION: Zero-copy string extraction (no allocation)
+                unsafe {
+                    let str_ptr = s_val.as_ptr();
+                    let mut size: ffi::Py_ssize_t = 0;
+                    let data_ptr = ffi::PyUnicode_AsUTF8AndSize(str_ptr, &mut size);
+
+                    if data_ptr.is_null() {
+                        return Err(PyValueError::new_err("String must be valid UTF-8"));
+                    }
+
+                    // SAFETY: Python guarantees UTF-8 validity for PyUnicode objects
+                    let str_slice = std::slice::from_raw_parts(data_ptr as *const u8, size as usize);
+                    let str_ref = std::str::from_utf8_unchecked(str_slice);
+
+                    self.write_string(str_ref);
+                }
+
                 Ok(())
             }
 
@@ -392,15 +408,24 @@ impl JsonBuffer {
                     }
                     bulk::ArrayType::Mixed => {
                         // Fall back to normal per-element serialization
+                        // PHASE 3+ OPTIMIZATION: Direct C API list access (no bounds checking)
                         self.buf.push(b'[');
 
-                        let mut first = true;
-                        for item in list_val.iter() {
-                            if !first {
-                                self.buf.push(b',');
+                        unsafe {
+                            let list_ptr = list_val.as_ptr();
+                            let len = ffi::PyList_GET_SIZE(list_ptr);
+
+                            for i in 0..len {
+                                if i > 0 {
+                                    self.buf.push(b',');
+                                }
+
+                                // SAFETY: PyList_GET_ITEM returns borrowed reference (no refcount)
+                                // Index is guaranteed valid (0 <= i < len)
+                                let item_ptr = ffi::PyList_GET_ITEM(list_ptr, i);
+                                let item = Bound::from_borrowed_ptr(list_val.py(), item_ptr);
+                                self.serialize_pyany(&item)?;
                             }
-                            first = false;
-                            self.serialize_pyany(&item)?;
                         }
 
                         self.buf.push(b']');
@@ -412,15 +437,25 @@ impl JsonBuffer {
 
             FastType::Tuple => {
                 let tuple_val = unsafe { obj.downcast_exact::<PyTuple>().unwrap_unchecked() };
+
+                // PHASE 3+ OPTIMIZATION: Direct C API tuple access (no bounds checking)
                 self.buf.push(b'[');
 
-                let mut first = true;
-                for item in tuple_val.iter() {
-                    if !first {
-                        self.buf.push(b',');
+                unsafe {
+                    let tuple_ptr = tuple_val.as_ptr();
+                    let len = ffi::PyTuple_GET_SIZE(tuple_ptr);
+
+                    for i in 0..len {
+                        if i > 0 {
+                            self.buf.push(b',');
+                        }
+
+                        // SAFETY: PyTuple_GET_ITEM returns borrowed reference (no refcount)
+                        // Index is guaranteed valid (0 <= i < len)
+                        let item_ptr = ffi::PyTuple_GET_ITEM(tuple_ptr, i);
+                        let item = Bound::from_borrowed_ptr(tuple_val.py(), item_ptr);
+                        self.serialize_pyany(&item)?;
                     }
-                    first = false;
-                    self.serialize_pyany(&item)?;
                 }
 
                 self.buf.push(b']');
