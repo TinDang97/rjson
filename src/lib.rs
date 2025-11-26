@@ -29,7 +29,7 @@ static DIGITS: [u8; 10] = [b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8',
 
 // Performance optimizations module
 mod optimizations;
-use optimizations::{object_cache, type_cache, bulk, extreme, simd_parser, simd_escape, custom_parser, unlikely};
+use optimizations::{object_cache, type_cache, bulk, extreme, simd_parser, simd_escape, custom_parser, raw_parser, unlikely};
 use type_cache::FastType;
 
 // ============================================================================
@@ -355,11 +355,11 @@ impl<'de> de::DeserializeSeed<'de> for KeySeed {
 
 /// Parses a JSON string into a Python object.
 ///
-/// PHASE 20: Uses fully custom JSON parser that:
-/// - Bypasses serde_json entirely (no Visitor pattern overhead)
-/// - Uses O(1) lookup tables for character classification
-/// - Parses directly to Python objects (no intermediate representation)
-/// - Inline number parsing with DP lookup tables
+/// PHASE 21: Uses raw C API JSON parser that:
+/// - Direct CPython FFI calls (no PyO3 wrapper overhead)
+/// - Raw *mut PyObject pointers throughout parsing
+/// - O(1) lookup tables for character classification
+/// - Inline integer accumulation for fast number parsing
 ///
 /// # Arguments
 /// * `json_str` - The JSON string to parse.
@@ -368,6 +368,12 @@ impl<'de> de::DeserializeSeed<'de> for KeySeed {
 /// A PyObject representing the parsed JSON, or a PyValueError on error.
 #[pyfunction]
 fn loads(json_str: &str) -> PyResult<PyObject> {
+    raw_parser::loads_raw(json_str)
+}
+
+/// Custom parser (Phase 20) - uses object_cache helpers
+#[pyfunction]
+fn loads_custom(json_str: &str) -> PyResult<PyObject> {
     custom_parser::loads_custom(json_str)
 }
 
