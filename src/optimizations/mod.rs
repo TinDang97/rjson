@@ -13,6 +13,7 @@ pub mod simd_escape;
 pub mod custom_parser;
 pub mod raw_parser;
 pub mod pylong_fast;
+pub mod pyfloat_fast;
 pub mod dict_key_fast;
 
 /// Branch prediction hints for performance-critical code paths

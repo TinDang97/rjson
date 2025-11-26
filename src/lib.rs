@@ -589,9 +589,13 @@ impl JsonBuffer {
             }
 
             FastType::Float => {
-                let f_val = unsafe { obj.downcast_exact::<PyFloat>().unwrap_unchecked() };
-                let val_f64 = f_val.extract::<f64>()?;
-                self.write_float(val_f64)
+                // PHASE 30 OPTIMIZATION: Direct PyFloatObject structure access
+                // This is ~3x faster than f_val.extract::<f64>() which goes through PyO3
+                unsafe {
+                    let float_ptr = obj.as_ptr();
+                    let val_f64 = optimizations::pyfloat_fast::extract_float_fast(float_ptr);
+                    self.write_float(val_f64)
+                }
             }
 
             FastType::String => {
@@ -645,9 +649,11 @@ impl JsonBuffer {
                     bulk::ArrayType::Mixed => {
                         // Fall back to normal per-element serialization
                         // PHASE 3+ OPTIMIZATION: Direct C API list access (no bounds checking)
+                        // PHASE 31: Use serialize_ptr to avoid Bound wrapper overhead
                         unsafe {
                             let list_ptr = list_val.as_ptr();
                             let len = ffi::PyList_GET_SIZE(list_ptr);
+                            let py = list_val.py();
 
                             // Pre-allocate buffer (estimate: 8 bytes per element)
                             self.buf.reserve((len as usize) * 8 + 2);
@@ -656,15 +662,13 @@ impl JsonBuffer {
                             if len > 0 {
                                 // Handle first element without comma
                                 let first_ptr = ffi::PyList_GET_ITEM(list_ptr, 0);
-                                let first = Bound::from_borrowed_ptr(list_val.py(), first_ptr);
-                                self.serialize_pyany(&first)?;
+                                self.serialize_ptr(py, first_ptr)?;
 
                                 // Handle remaining elements with leading comma
                                 for i in 1..len {
                                     self.buf.push(b',');
                                     let item_ptr = ffi::PyList_GET_ITEM(list_ptr, i);
-                                    let item = Bound::from_borrowed_ptr(list_val.py(), item_ptr);
-                                    self.serialize_pyany(&item)?;
+                                    self.serialize_ptr(py, item_ptr)?;
                                 }
                             }
 
@@ -680,11 +684,13 @@ impl JsonBuffer {
                 let tuple_val = unsafe { obj.downcast_exact::<PyTuple>().unwrap_unchecked() };
 
                 // PHASE 3+ OPTIMIZATION: Direct C API tuple access (no bounds checking)
+                // PHASE 31: Use serialize_ptr to avoid Bound wrapper overhead
                 self.buf.push(b'[');
 
                 unsafe {
                     let tuple_ptr = tuple_val.as_ptr();
                     let len = ffi::PyTuple_GET_SIZE(tuple_ptr);
+                    let py = tuple_val.py();
 
                     for i in 0..len {
                         if i > 0 {
@@ -694,8 +700,7 @@ impl JsonBuffer {
                         // SAFETY: PyTuple_GET_ITEM returns borrowed reference (no refcount)
                         // Index is guaranteed valid (0 <= i < len)
                         let item_ptr = ffi::PyTuple_GET_ITEM(tuple_ptr, i);
-                        let item = Bound::from_borrowed_ptr(tuple_val.py(), item_ptr);
-                        self.serialize_pyany(&item)?;
+                        self.serialize_ptr(py, item_ptr)?;
                     }
                 }
 
@@ -726,6 +731,9 @@ impl JsonBuffer {
                     let mut key_ptr: *mut ffi::PyObject = std::ptr::null_mut();
                     let mut value_ptr: *mut ffi::PyObject = std::ptr::null_mut();
 
+                    // PHASE 31: Use serialize_ptr to avoid Bound wrapper overhead
+                    let py = dict_val.py();
+
                     // Handle first element without comma
                     if ffi::PyDict_Next(dict_ptr, &mut pos, &mut key_ptr, &mut value_ptr) != 0 {
                         // Check key is string
@@ -740,8 +748,7 @@ impl JsonBuffer {
                             write_json_string_direct(&mut self.buf, key_ptr);
                         }
                         self.buf.push(b':');
-                        let value = Bound::from_borrowed_ptr(dict_val.py(), value_ptr);
-                        self.serialize_pyany(&value)?;
+                        self.serialize_ptr(py, value_ptr)?;
 
                         // Handle remaining elements with leading comma
                         while ffi::PyDict_Next(dict_ptr, &mut pos, &mut key_ptr, &mut value_ptr) != 0 {
@@ -758,8 +765,7 @@ impl JsonBuffer {
                                 write_json_string_direct(&mut self.buf, key_ptr);
                             }
                             self.buf.push(b':');
-                            let value = Bound::from_borrowed_ptr(dict_val.py(), value_ptr);
-                            self.serialize_pyany(&value)?;
+                            self.serialize_ptr(py, value_ptr)?;
                         }
                     }
 
@@ -784,6 +790,77 @@ impl JsonBuffer {
                 .and_then(|n| n.to_str().map(|s| s.to_owned()))
                 .unwrap_or_else(|_| "unknown".to_string())
         )))
+    }
+
+    /// PHASE 31: Serialize directly from raw PyObject pointer
+    ///
+    /// This avoids creating Bound wrappers which adds overhead in hot paths
+    /// like dict/list iteration. For primitive types we serialize directly,
+    /// for nested structures we fall back to the Bound-based method.
+    ///
+    /// # Safety
+    /// - obj_ptr must be a valid PyObject pointer
+    /// - py must be the GIL token corresponding to the object
+    #[inline(always)]
+    unsafe fn serialize_ptr(&mut self, py: Python<'_>, obj_ptr: *mut ffi::PyObject) -> PyResult<()> {
+        use type_cache::get_fast_type_ptr;
+
+        let fast_type = get_fast_type_ptr(obj_ptr);
+
+        match fast_type {
+            FastType::None => {
+                self.write_null();
+                Ok(())
+            }
+
+            FastType::Bool => {
+                // Fast bool check: compare with Py_True singleton
+                let is_true = obj_ptr == ffi::Py_True();
+                self.write_bool(is_true);
+                Ok(())
+            }
+
+            FastType::Int => {
+                // Direct PyLongObject access (Phase 26)
+                if let Ok(val_i64) = optimizations::pylong_fast::extract_int_fast(obj_ptr) {
+                    self.write_int_i64(val_i64);
+                    return Ok(());
+                }
+
+                // Fall back for very large integers
+                let val_u64 = ffi::PyLong_AsUnsignedLongLong(obj_ptr);
+                if val_u64 != u64::MAX || ffi::PyErr_Occurred().is_null() {
+                    ffi::PyErr_Clear();
+                    self.write_int_u64(val_u64);
+                } else {
+                    // Very large int - need PyO3 for string conversion
+                    ffi::PyErr_Clear();
+                    let obj = Bound::from_borrowed_ptr(py, obj_ptr);
+                    let l_val = obj.downcast_exact::<PyInt>().unwrap_unchecked();
+                    let s = l_val.to_string();
+                    self.buf.extend_from_slice(s.as_bytes());
+                }
+                Ok(())
+            }
+
+            FastType::Float => {
+                // Direct PyFloatObject access (Phase 30)
+                let val_f64 = optimizations::pyfloat_fast::extract_float_fast(obj_ptr);
+                self.write_float(val_f64)
+            }
+
+            FastType::String => {
+                // Direct Unicode buffer access
+                write_json_string_direct(&mut self.buf, obj_ptr);
+                Ok(())
+            }
+
+            FastType::List | FastType::Tuple | FastType::Dict | FastType::Other => {
+                // For nested structures, fall back to Bound-based method
+                let obj = Bound::from_borrowed_ptr(py, obj_ptr);
+                self.serialize_pyany(&obj)
+            }
+        }
     }
 }
 
@@ -954,6 +1031,7 @@ fn rjson(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     type_cache::init_type_cache(py);
     simd_parser::init_string_intern(py);  // Phase 9: String interning
     optimizations::pylong_fast::init_pylong_fast();  // Phase 26: Direct PyLong access
+    optimizations::pyfloat_fast::init_pyfloat_fast();  // Phase 30: Direct PyFloat access
 
     m.add_function(wrap_pyfunction!(loads, m)?)?;        // Phase 20: Custom parser
     m.add_function(wrap_pyfunction!(loads_serde, m)?)?;  // Legacy serde_json

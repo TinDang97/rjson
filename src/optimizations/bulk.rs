@@ -386,7 +386,8 @@ pub unsafe fn serialize_float_array_bulk(list: &Bound<'_, PyList>, buf: &mut Vec
         }
 
         let item_ptr = ffi::PyList_GET_ITEM(list_ptr, i);
-        let val = ffi::PyFloat_AsDouble(item_ptr);
+        // PHASE 30 OPTIMIZATION: Direct PyFloatObject structure access
+        let val = super::pyfloat_fast::extract_float_fast(item_ptr);
 
         // Check for NaN/Infinity
         if !val.is_finite() {

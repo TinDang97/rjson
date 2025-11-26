@@ -127,6 +127,46 @@ pub fn get_type_cache() -> &'static TypeCache {
     TYPE_CACHE.get().expect("Type cache not initialized")
 }
 
+/// Get the fast type of a Python object from raw pointer
+///
+/// PHASE 31: This avoids creating Bound wrappers for type checking,
+/// which is significantly faster for hot paths like dict/list iteration.
+///
+/// # Safety
+/// - obj_ptr must be a valid PyObject pointer
+#[inline(always)]
+pub unsafe fn get_fast_type_ptr(obj_ptr: *mut ffi::PyObject) -> FastType {
+    // Check for None first (compare with singleton)
+    if obj_ptr == ffi::Py_None() {
+        return FastType::None;
+    }
+
+    // Get type pointer directly from PyObject
+    let type_ptr = (*obj_ptr).ob_type;
+
+    if let Some(cache) = TYPE_CACHE.get() {
+        if type_ptr == cache.bool_type {
+            FastType::Bool
+        } else if type_ptr == cache.int_type {
+            FastType::Int
+        } else if type_ptr == cache.float_type {
+            FastType::Float
+        } else if type_ptr == cache.string_type {
+            FastType::String
+        } else if type_ptr == cache.list_type {
+            FastType::List
+        } else if type_ptr == cache.tuple_type {
+            FastType::Tuple
+        } else if type_ptr == cache.dict_type {
+            FastType::Dict
+        } else {
+            FastType::Other
+        }
+    } else {
+        FastType::Other
+    }
+}
+
 /// Check if an object is of a specific FastType
 ///
 /// Convenience function that combines get_fast_type with comparison
