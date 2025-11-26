@@ -730,27 +730,8 @@ impl JsonBuffer {
                     let string_type = type_cache::get_type_cache().string_type as usize;
                     let mut first = true;
 
-                    // Try direct dict iteration (faster for combined dicts)
-                    if let Some(mut iter) = optimizations::dict_direct::DictDirectIter::new(dict_ptr) {
-                        while let Some((key_ptr, value_ptr)) = iter.next() {
-                            if !first {
-                                self.buf.push(b',');
-                            }
-                            first = false;
-
-                            if (*key_ptr).ob_type as usize != string_type {
-                                return Err(PyValueError::new_err(
-                                    "Dictionary keys must be strings for JSON serialization"
-                                ));
-                            }
-
-                            if !optimizations::dict_key_fast::write_dict_key_fast(&mut self.buf, key_ptr) {
-                                write_json_string_direct(&mut self.buf, key_ptr);
-                            }
-                            self.buf.push(b':');
-                            self.serialize_ptr(py, value_ptr)?;
-                        }
-                    } else {
+                    // DISABLED: Direct dict iteration was slower - always use PyDict_Next
+                    {
                         // Fall back to PyDict_Next for split dicts
                         let mut pos: ffi::Py_ssize_t = 0;
                         let mut key_ptr: *mut ffi::PyObject = std::ptr::null_mut();
@@ -953,32 +934,8 @@ impl JsonBuffer {
                 let string_type = cache.string_type as usize;
                 let mut first = true;
 
-                // Try direct dict iteration first (faster for combined dicts)
-                if let Some(mut iter) = optimizations::dict_direct::DictDirectIter::new(obj_ptr) {
-                    while let Some((key_ptr, value_ptr)) = iter.next() {
-                        if !first {
-                            self.buf.push(b',');
-                        }
-                        first = false;
-
-                        // Check key type
-                        if (*key_ptr).ob_type as usize != string_type {
-                            return Err(PyValueError::new_err(
-                                "Dictionary keys must be strings for JSON serialization"
-                            ));
-                        }
-
-                        // Serialize key
-                        if !optimizations::dict_key_fast::write_dict_key_fast(&mut self.buf, key_ptr) {
-                            write_json_string_direct(&mut self.buf, key_ptr);
-                        }
-                        self.buf.push(b':');
-
-                        // Serialize value
-                        self.serialize_ptr(py, value_ptr)?;
-                    }
-                } else {
-                    // Fall back to PyDict_Next for split dicts
+                // DISABLED: Direct dict iteration was slower - always use PyDict_Next
+                {
                     let mut pos: ffi::Py_ssize_t = 0;
                     let mut key_ptr: *mut ffi::PyObject = std::ptr::null_mut();
                     let mut value_ptr: *mut ffi::PyObject = std::ptr::null_mut();
