@@ -29,7 +29,7 @@ static DIGITS: [u8; 10] = [b'0', b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8',
 
 // Performance optimizations module
 mod optimizations;
-use optimizations::{object_cache, type_cache, bulk, extreme, simd_parser, simd_escape, unlikely};
+use optimizations::{object_cache, type_cache, bulk, extreme, simd_parser, simd_escape, custom_parser, unlikely};
 use type_cache::FastType;
 
 // ============================================================================
@@ -355,11 +355,11 @@ impl<'de> de::DeserializeSeed<'de> for KeySeed {
 
 /// Parses a JSON string into a Python object.
 ///
-/// Uses serde_json with direct Python object creation via Visitor pattern.
-/// This provides single-pass parsing without intermediate representations.
-///
-/// Note: simd-json was tested but the required input copy (to_vec()) for
-/// in-place parsing negates SIMD gains for this benchmark workload.
+/// PHASE 20: Uses fully custom JSON parser that:
+/// - Bypasses serde_json entirely (no Visitor pattern overhead)
+/// - Uses O(1) lookup tables for character classification
+/// - Parses directly to Python objects (no intermediate representation)
+/// - Inline number parsing with DP lookup tables
 ///
 /// # Arguments
 /// * `json_str` - The JSON string to parse.
@@ -368,6 +368,12 @@ impl<'de> de::DeserializeSeed<'de> for KeySeed {
 /// A PyObject representing the parsed JSON, or a PyValueError on error.
 #[pyfunction]
 fn loads(json_str: &str) -> PyResult<PyObject> {
+    custom_parser::loads_custom(json_str)
+}
+
+/// Legacy loads using serde_json (for comparison/fallback)
+#[pyfunction]
+fn loads_serde(json_str: &str) -> PyResult<PyObject> {
     Python::with_gil(|py| {
         let mut de = serde_json::Deserializer::from_str(json_str);
         DeserializeSeed::deserialize(PyObjectSeed { py }, &mut de)
@@ -904,8 +910,9 @@ fn rjson(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     type_cache::init_type_cache(py);
     simd_parser::init_string_intern(py);  // Phase 9: String interning
 
-    m.add_function(wrap_pyfunction!(loads, m)?)?;
-    m.add_function(wrap_pyfunction!(loads_simd, m)?)?;  // Phase 7: SIMD loads
+    m.add_function(wrap_pyfunction!(loads, m)?)?;        // Phase 20: Custom parser
+    m.add_function(wrap_pyfunction!(loads_serde, m)?)?;  // Legacy serde_json
+    m.add_function(wrap_pyfunction!(loads_simd, m)?)?;   // Phase 7: SIMD loads
     m.add_function(wrap_pyfunction!(dumps, m)?)?;
     m.add_function(wrap_pyfunction!(dumps_bytes, m)?)?;  // Nuclear option
     Ok(())

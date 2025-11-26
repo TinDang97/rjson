@@ -10,6 +10,7 @@ pub mod extreme;
 pub mod escape_lut;
 pub mod simd_parser;
 pub mod simd_escape;
+pub mod custom_parser;
 
 /// Branch prediction hints for performance-critical code paths
 ///
