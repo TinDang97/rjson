@@ -358,6 +358,9 @@ impl<'de> de::DeserializeSeed<'de> for KeySeed {
 /// Uses serde_json with direct Python object creation via Visitor pattern.
 /// This provides single-pass parsing without intermediate representations.
 ///
+/// Note: simd-json was tested but the required input copy (to_vec()) for
+/// in-place parsing negates SIMD gains for this benchmark workload.
+///
 /// # Arguments
 /// * `json_str` - The JSON string to parse.
 ///
