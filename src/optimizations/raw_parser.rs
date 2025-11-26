@@ -13,6 +13,7 @@ use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 
 use super::simd_parser::get_interned_string;
+use super::object_cache;
 
 // ============================================================================
 // Character Classification (same as custom_parser but kept local for inlining)
@@ -148,9 +149,8 @@ impl<'a, 'py> RawJsonParser<'a, 'py> {
             && self.input[self.pos + 3] == b'l'
         {
             self.pos += 4;
-            let none = ffi::Py_None();
-            ffi::Py_INCREF(none);
-            Ok(none)
+            // Use cached None (returns owned reference)
+            Ok(object_cache::get_none(self.py).into_ptr())
         } else {
             Err("Invalid literal, expected 'null'")
         }
@@ -165,9 +165,8 @@ impl<'a, 'py> RawJsonParser<'a, 'py> {
             && self.input[self.pos + 3] == b'e'
         {
             self.pos += 4;
-            let t = ffi::Py_True();
-            ffi::Py_INCREF(t);
-            Ok(t)
+            // Use cached True (returns owned reference)
+            Ok(object_cache::get_bool(self.py, true).into_ptr())
         } else {
             Err("Invalid literal, expected 'true'")
         }
@@ -183,9 +182,8 @@ impl<'a, 'py> RawJsonParser<'a, 'py> {
             && self.input[self.pos + 4] == b'e'
         {
             self.pos += 5;
-            let f = ffi::Py_False();
-            ffi::Py_INCREF(f);
-            Ok(f)
+            // Use cached False (returns owned reference)
+            Ok(object_cache::get_bool(self.py, false).into_ptr())
         } else {
             Err("Invalid literal, expected 'false'")
         }
@@ -252,7 +250,7 @@ impl<'a, 'py> RawJsonParser<'a, 'py> {
             // Parse as float using direct C API
             let num_str = std::str::from_utf8_unchecked(&self.input[start..self.pos]);
             match num_str.parse::<f64>() {
-                Ok(f) if f.is_finite() => Ok(ffi::PyFloat_FromDouble(f)),
+                Ok(f) if f.is_finite() => Ok(object_cache::create_float_direct(f)),
                 _ => Err("Invalid float"),
             }
         } else {
@@ -268,22 +266,31 @@ impl<'a, 'py> RawJsonParser<'a, 'py> {
 
                 if is_negative {
                     if value <= 9223372036854775808 {
-                        Ok(ffi::PyLong_FromLongLong(-(value as i64)))
+                        let signed = -(value as i64);
+                        // Use cache for small integers
+                        if signed >= -256 {
+                            Ok(object_cache::get_int(self.py, signed).into_ptr())
+                        } else {
+                            Ok(object_cache::create_int_i64_direct(signed))
+                        }
                     } else {
                         Err("Integer overflow")
                     }
+                } else if value <= 256 {
+                    // Use cache for small positive integers
+                    Ok(object_cache::get_int(self.py, value as i64).into_ptr())
                 } else if value <= i64::MAX as u64 {
-                    Ok(ffi::PyLong_FromLongLong(value as i64))
+                    Ok(object_cache::create_int_i64_direct(value as i64))
                 } else {
-                    Ok(ffi::PyLong_FromUnsignedLongLong(value))
+                    Ok(object_cache::create_int_u64_direct(value))
                 }
             } else {
                 // Large integer - use string parsing
                 let num_str = std::str::from_utf8_unchecked(&self.input[start..self.pos]);
                 match num_str.parse::<i64>() {
-                    Ok(n) => Ok(ffi::PyLong_FromLongLong(n)),
+                    Ok(n) => Ok(object_cache::create_int_i64_direct(n)),
                     Err(_) => match num_str.parse::<u64>() {
-                        Ok(n) => Ok(ffi::PyLong_FromUnsignedLongLong(n)),
+                        Ok(n) => Ok(object_cache::create_int_u64_direct(n)),
                         Err(_) => Err("Integer too large"),
                     },
                 }
@@ -509,14 +516,9 @@ impl<'a, 'py> RawJsonParser<'a, 'py> {
             return Ok(ffi::PyList_New(0));
         }
 
-        // Create list directly with reasonable initial capacity
-        // Use preallocated list and PyList_SET_ITEM for first N elements
-        let list = ffi::PyList_New(8);
-        if list.is_null() {
-            return Err("Failed to create list");
-        }
-
-        let mut count = 0usize;
+        // Collect elements into a Vec first, then create list with exact size
+        // Use larger initial capacity to reduce reallocations for large arrays
+        let mut elements: Vec<*mut ffi::PyObject> = Vec::with_capacity(128);
 
         loop {
             self.skip_whitespace();
@@ -524,30 +526,22 @@ impl<'a, 'py> RawJsonParser<'a, 'py> {
             let elem = match self.parse_value() {
                 Ok(e) => e,
                 Err(e) => {
-                    ffi::Py_DECREF(list);
+                    // Cleanup on error
+                    for ptr in &elements {
+                        ffi::Py_DECREF(*ptr);
+                    }
                     return Err(e);
                 }
             };
 
-            // For first 8 elements, use fast SET_ITEM (preallocated)
-            if count < 8 {
-                ffi::PyList_SET_ITEM(list, count as ffi::Py_ssize_t, elem);
-            } else {
-                // Beyond initial capacity, use Append
-                // PyList_Append doesn't steal reference, so we need to decref after
-                if ffi::PyList_Append(list, elem) < 0 {
-                    ffi::Py_DECREF(elem);
-                    ffi::Py_DECREF(list);
-                    return Err("Failed to append to list");
-                }
-                ffi::Py_DECREF(elem);
-            }
-            count += 1;
+            elements.push(elem);
 
             self.skip_whitespace();
 
             if self.pos >= self.input.len() {
-                ffi::Py_DECREF(list);
+                for ptr in &elements {
+                    ffi::Py_DECREF(*ptr);
+                }
                 return Err("Unterminated array");
             }
 
@@ -558,16 +552,26 @@ impl<'a, 'py> RawJsonParser<'a, 'py> {
             } else if c == b',' {
                 self.pos += 1;
             } else {
-                ffi::Py_DECREF(list);
+                for ptr in &elements {
+                    ffi::Py_DECREF(*ptr);
+                }
                 return Err("Expected ',' or ']'");
             }
         }
 
-        // Trim list if we preallocated more than needed
-        if count < 8 {
-            if ffi::PyList_SetSlice(list, count as ffi::Py_ssize_t, 8, std::ptr::null_mut()) < 0 {
-                // Non-critical: list just has None elements at the end
+        // Create list with exact size and use SET_ITEM for all elements
+        let len = elements.len();
+        let list = ffi::PyList_New(len as ffi::Py_ssize_t);
+        if list.is_null() {
+            for ptr in &elements {
+                ffi::Py_DECREF(*ptr);
             }
+            return Err("Failed to create list");
+        }
+
+        for (i, elem) in elements.into_iter().enumerate() {
+            // PyList_SET_ITEM steals the reference
+            ffi::PyList_SET_ITEM(list, i as ffi::Py_ssize_t, elem);
         }
 
         Ok(list)
