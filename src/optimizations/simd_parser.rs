@@ -60,7 +60,8 @@ impl StringInternCache {
 /// Initialize the string intern cache
 pub fn init_string_intern(py: Python) {
     STRING_INTERN.get_or_init(|| {
-        let mut cache = StringInternCache::new(1024);
+        // Larger cache to cover more unique keys (benchmark has 10k keys)
+        let mut cache = StringInternCache::new(16384);
 
         // Pre-intern common JSON keys
         const COMMON_KEYS: &[&str] = &[
