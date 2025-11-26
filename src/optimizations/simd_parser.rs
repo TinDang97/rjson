@@ -104,7 +104,12 @@ pub fn get_interned_string(py: Python, s: &str) -> PyObject {
         // Try read lock first (fast path for cached strings)
         if let Ok(guard) = intern.read() {
             if let Some(obj) = guard.cache.get(s) {
-                return obj.clone_ref(py);
+                // Fast path: increment refcount directly and return
+                unsafe {
+                    let ptr = obj.as_ptr();
+                    pyo3::ffi::Py_INCREF(ptr);
+                    return PyObject::from_owned_ptr(py, ptr);
+                }
             }
         }
 
