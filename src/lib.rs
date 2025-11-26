@@ -731,7 +731,7 @@ impl JsonBuffer {
                     let mut key_ptr: *mut ffi::PyObject = std::ptr::null_mut();
                     let mut value_ptr: *mut ffi::PyObject = std::ptr::null_mut();
 
-                    // PHASE 31: Use serialize_ptr to avoid Bound wrapper overhead
+                    // PHASE 31+33: Inline value serialization to eliminate call overhead
                     let py = dict_val.py();
 
                     // Handle first element without comma
@@ -861,6 +861,76 @@ impl JsonBuffer {
                 self.serialize_pyany(&obj)
             }
         }
+    }
+
+    /// PHASE 33: Ultra-inline value serialization for dict iteration
+    ///
+    /// This method inlines ALL type checks and primitive serialization directly,
+    /// avoiding any function calls for the common case of dicts containing
+    /// primitive values (int, float, string, bool, none).
+    ///
+    /// # Safety
+    /// - obj_ptr must be a valid PyObject pointer
+    /// - py must be the GIL token corresponding to the object
+    #[inline(always)]
+    unsafe fn serialize_value_inline(&mut self, py: Python<'_>, obj_ptr: *mut ffi::PyObject) -> PyResult<()> {
+        // Get type pointer directly (avoid any function call)
+        let type_ptr = (*obj_ptr).ob_type as usize;
+
+        // Get cached type pointers for direct comparison
+        let cache = type_cache::get_type_cache();
+
+        // Check most common types first (order matters for branch prediction)
+        // Int and String are most common in JSON data
+
+        // Check for Int first (most common in benchmarks)
+        if type_ptr == cache.int_type as usize {
+            if let Ok(val_i64) = optimizations::pylong_fast::extract_int_fast(obj_ptr) {
+                self.write_int_i64(val_i64);
+                return Ok(());
+            }
+            // Fall back for large ints
+            let val_u64 = ffi::PyLong_AsUnsignedLongLong(obj_ptr);
+            if val_u64 != u64::MAX || ffi::PyErr_Occurred().is_null() {
+                ffi::PyErr_Clear();
+                self.write_int_u64(val_u64);
+            } else {
+                ffi::PyErr_Clear();
+                let obj = Bound::from_borrowed_ptr(py, obj_ptr);
+                let l_val = obj.downcast_exact::<PyInt>().unwrap_unchecked();
+                self.buf.extend_from_slice(l_val.to_string().as_bytes());
+            }
+            return Ok(());
+        }
+
+        // Check for String (second most common)
+        if type_ptr == cache.string_type as usize {
+            write_json_string_direct(&mut self.buf, obj_ptr);
+            return Ok(());
+        }
+
+        // Check for Float
+        if type_ptr == cache.float_type as usize {
+            let val_f64 = optimizations::pyfloat_fast::extract_float_fast(obj_ptr);
+            return self.write_float(val_f64);
+        }
+
+        // Check for Bool
+        if type_ptr == cache.bool_type as usize {
+            let is_true = obj_ptr == ffi::Py_True();
+            self.write_bool(is_true);
+            return Ok(());
+        }
+
+        // Check for None
+        if obj_ptr == ffi::Py_None() {
+            self.write_null();
+            return Ok(());
+        }
+
+        // Nested structures - fall back to full path
+        let obj = Bound::from_borrowed_ptr(py, obj_ptr);
+        self.serialize_pyany(&obj)
     }
 }
 
