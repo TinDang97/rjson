@@ -842,6 +842,10 @@ fn estimate_json_size(obj: &Bound<'_, PyAny>) -> usize {
 /// - Thread-local buffer reuse to avoid repeated allocations
 /// - Buffer grows to max needed size and stays allocated
 ///
+/// PHASE 25 Optimization:
+/// - Use std::mem::take to avoid cloning the buffer
+/// - Swap empty buffer back into thread-local storage
+///
 /// # Arguments
 /// * `py` - The Python GIL token.
 /// * `data` - The Python object to serialize.
@@ -850,15 +854,45 @@ fn estimate_json_size(obj: &Bound<'_, PyAny>) -> usize {
 /// A JSON string, or a PyValueError on error.
 #[pyfunction]
 fn dumps(_py: Python, data: &Bound<'_, PyAny>) -> PyResult<String> {
-    // Allocate a new buffer each time - simpler and avoids clone overhead
-    // The allocation cost is minimal compared to serialization work
-    let capacity = estimate_json_size(data);
-    let mut buffer = JsonBuffer { buf: Vec::with_capacity(capacity) };
+    use std::cell::RefCell;
 
-    buffer.serialize_pyany(data)?;
+    thread_local! {
+        static BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(4096));
+    }
 
-    // SAFETY: We only write valid UTF-8 (JSON is always UTF-8)
-    Ok(unsafe { String::from_utf8_unchecked(buffer.buf) })
+    BUFFER.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        buf.clear();
+
+        // Ensure minimum capacity based on estimate
+        let capacity = estimate_json_size(data);
+        let current_cap = buf.capacity();
+        if current_cap < capacity {
+            buf.reserve(capacity - current_cap);
+        }
+
+        // Serialize using JsonBuffer API but with thread-local storage
+        let mut buffer = JsonBuffer { buf: std::mem::take(&mut *buf) };
+        let result = buffer.serialize_pyany(data);
+
+        match result {
+            Ok(()) => {
+                // SAFETY: We only write valid UTF-8 (JSON is always UTF-8)
+                let json = unsafe { String::from_utf8_unchecked(buffer.buf) };
+
+                // Put an empty buffer back for next call
+                // The thread-local will grow over time to max needed size
+                *buf = Vec::new();
+
+                Ok(json)
+            }
+            Err(e) => {
+                // On error, put the buffer back for reuse
+                *buf = buffer.buf;
+                Err(e)
+            }
+        }
+    })
 }
 
 /// EXTREME OPTIMIZATION: dumps_bytes() - The "Nuclear Option"
