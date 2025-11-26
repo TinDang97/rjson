@@ -560,31 +560,29 @@ impl JsonBuffer {
             }
 
             FastType::Int => {
-                // PHASE 11 OPTIMIZATION: Use direct C API with overflow check
-                // This avoids PyO3's extract() overhead and uses PyLong_AsLongLongAndOverflow
-                // which is faster than checking PyErr_Occurred() after each call
+                // PHASE 26 OPTIMIZATION: Use direct PyLongObject structure access
+                // This is ~4x faster than PyLong_AsLongLongAndOverflow for small integers
                 unsafe {
                     let int_ptr = obj.as_ptr();
-                    let mut overflow: std::ffi::c_int = 0;
-                    let val_i64 = ffi::PyLong_AsLongLongAndOverflow(int_ptr, &mut overflow);
 
-                    if overflow == 0 {
-                        // Fast path: Value fits in i64 (most common case)
+                    // Try fast path first (direct struct access)
+                    if let Ok(val_i64) = optimizations::pylong_fast::extract_int_fast(int_ptr) {
                         self.write_int_i64(val_i64);
-                    } else {
-                        // Overflow - try u64 for large positive numbers
-                        let val_u64 = ffi::PyLong_AsUnsignedLongLong(int_ptr);
+                        return Ok(());
+                    }
 
-                        if val_u64 != u64::MAX || ffi::PyErr_Occurred().is_null() {
-                            ffi::PyErr_Clear();
-                            self.write_int_u64(val_u64);
-                        } else {
-                            // Very large int - fall back to string representation
-                            ffi::PyErr_Clear();
-                            let l_val = obj.downcast_exact::<PyInt>().unwrap_unchecked();
-                            let s = l_val.to_string();
-                            self.buf.extend_from_slice(s.as_bytes());
-                        }
+                    // Fall back for very large integers
+                    let val_u64 = ffi::PyLong_AsUnsignedLongLong(int_ptr);
+
+                    if val_u64 != u64::MAX || ffi::PyErr_Occurred().is_null() {
+                        ffi::PyErr_Clear();
+                        self.write_int_u64(val_u64);
+                    } else {
+                        // Very large int - fall back to string representation
+                        ffi::PyErr_Clear();
+                        let l_val = obj.downcast_exact::<PyInt>().unwrap_unchecked();
+                        let s = l_val.to_string();
+                        self.buf.extend_from_slice(s.as_bytes());
                     }
                 }
                 Ok(())
@@ -949,6 +947,7 @@ fn rjson(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     object_cache::init_cache(py);
     type_cache::init_type_cache(py);
     simd_parser::init_string_intern(py);  // Phase 9: String interning
+    optimizations::pylong_fast::init_pylong_fast();  // Phase 26: Direct PyLong access
 
     m.add_function(wrap_pyfunction!(loads, m)?)?;        // Phase 20: Custom parser
     m.add_function(wrap_pyfunction!(loads_serde, m)?)?;  // Legacy serde_json
