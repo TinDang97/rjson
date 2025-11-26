@@ -34,14 +34,19 @@ struct PyDictUnicodeEntry {
 /// PyDictKeysObject header (simplified - we only need the header fields)
 /// Python 3.11+ layout: 32 bytes on 64-bit
 ///
-/// IMPORTANT: In Python 3.11+, the index byte size is calculated based on
-/// the number of entries, NOT stored in a field. For dicts with <= 128 entries,
-/// indices are 1 byte. For <= 32768 entries, indices are 2 bytes, etc.
+/// Layout in memory:
+/// - dk_refcnt: 8 bytes
+/// - dk_log2_size, dk_log2_index_bytes, dk_kind, dk_version: 4 bytes total
+/// - padding: 4 bytes for alignment
+/// - dk_usable: 8 bytes
+/// - dk_nentries: 8 bytes
+/// - dk_indices: variable (dk_size * index_bytes)
+/// - dk_entries: variable
 #[repr(C)]
 struct PyDictKeysObject {
     dk_refcnt: isize,         // Py_ssize_t (8 bytes)
     dk_log2_size: u8,         // Log2 of dk_size (1 byte)
-    dk_log2_index_bytes: u8,  // Log2 of index entry size (1 byte) - but often miscalculated!
+    dk_log2_index_bytes: u8,  // Log2 of index entry size (1 byte)
     dk_kind: u8,              // DICT_KEYS_GENERAL, DICT_KEYS_UNICODE, DICT_KEYS_SPLIT (1 byte)
     dk_version: u8,           // Version for PEP 659 (1 byte)
     _padding: [u8; 4],        // Padding to align dk_usable (4 bytes)
@@ -99,20 +104,22 @@ impl DictDirectIter {
         let dk_nentries = (*keys).dk_nentries;
         let dk_log2_size = (*keys).dk_log2_size;
 
-        // Calculate index byte size based on dk_size (number of slots)
-        // Python uses the minimum bytes needed to index all slots:
-        // - dk_size <= 256 (2^8): 1-byte indices
-        // - dk_size <= 65536 (2^16): 2-byte indices
-        // - Otherwise: 4-byte indices (or 8 for very large dicts)
+        // Calculate index bytes based on dk_size (number of slots)
+        // Python uses minimum bytes needed to index all slots:
+        // - dk_size <= 256: 1-byte indices (can index 0-255)
+        // - dk_size <= 65536: 2-byte indices
+        // - dk_size <= 2^32: 4-byte indices
+        // - Otherwise: 8-byte indices
+        // Note: Don't trust dk_log2_index_bytes - it may have different meaning in Python 3.13
         let dk_size = 1usize << dk_log2_size;
-        let index_bytes = if dk_size <= 0x80 {
-            1  // 1 byte for up to 128 slots (common case)
-        } else if dk_size <= 0x8000 {
-            2  // 2 bytes for up to 32768 slots
-        } else if dk_size <= 0x80000000 {
-            4  // 4 bytes for larger dicts
+        let index_bytes = if dk_size <= 0x100 {
+            1
+        } else if dk_size <= 0x10000 {
+            2
+        } else if dk_size <= 0x100000000 {
+            4
         } else {
-            8  // 8 bytes for huge dicts (rare)
+            8
         };
 
         // Calculate offset to entries array
