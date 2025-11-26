@@ -87,12 +87,41 @@ pub fn get_int(py: Python, value: i64) -> PyObject {
         if let Some(cache) = OBJECT_CACHE.get() {
             let index = (value + INT_CACHE_OFFSET) as usize;
             // SAFETY: Index is guaranteed to be in bounds by the if condition above
-            return cache.integers[index].clone_ref(py);
+            // Use direct Py_INCREF for maximum performance
+            unsafe {
+                let ptr = cache.integers[index].as_ptr();
+                ffi::Py_INCREF(ptr);
+                return PyObject::from_owned_ptr(py, ptr);
+            }
         }
     }
 
     // Slow path: create new object for large integers
     value.to_object(py)
+}
+
+/// Get a cached integer as raw pointer (Phase 24 optimization)
+///
+/// Returns a new reference (caller must DECREF)
+/// For integers in range [-256, 256], returns cached pointer with INCREF.
+/// For integers outside this range, creates a new Python object.
+///
+/// # Safety
+/// - Returns owned reference that must be DECREFed by caller
+#[inline(always)]
+pub unsafe fn get_int_ptr(value: i64) -> *mut ffi::PyObject {
+    // Fast path: check if in cache range
+    if value >= -INT_CACHE_OFFSET && value <= INT_CACHE_OFFSET {
+        if let Some(cache) = OBJECT_CACHE.get() {
+            let index = (value + INT_CACHE_OFFSET) as usize;
+            let ptr = cache.integers[index].as_ptr();
+            ffi::Py_INCREF(ptr);
+            return ptr;
+        }
+    }
+
+    // Slow path: create new object for large integers
+    ffi::PyLong_FromLongLong(value)
 }
 
 /// Get cached None singleton
@@ -105,10 +134,26 @@ pub fn get_int(py: Python, value: i64) -> PyObject {
 #[inline(always)]
 pub fn get_none(py: Python) -> PyObject {
     if let Some(cache) = OBJECT_CACHE.get() {
-        cache.none.clone_ref(py)
+        // Use direct Py_INCREF for maximum performance
+        unsafe {
+            let ptr = cache.none.as_ptr();
+            ffi::Py_INCREF(ptr);
+            PyObject::from_owned_ptr(py, ptr)
+        }
     } else {
         py.None()
     }
+}
+
+/// Get cached None singleton as raw pointer (Phase 24 optimization)
+///
+/// # Safety
+/// - Returns owned reference that must be DECREFed by caller
+#[inline(always)]
+pub unsafe fn get_none_ptr_incref() -> *mut ffi::PyObject {
+    let ptr = ffi::Py_None();
+    ffi::Py_INCREF(ptr);
+    ptr
 }
 
 /// Get cached boolean singleton
@@ -122,14 +167,41 @@ pub fn get_none(py: Python) -> PyObject {
 #[inline(always)]
 pub fn get_bool(py: Python, value: bool) -> PyObject {
     if let Some(cache) = OBJECT_CACHE.get() {
-        if value {
-            cache.true_obj.clone_ref(py)
-        } else {
-            cache.false_obj.clone_ref(py)
+        // Use direct Py_INCREF for maximum performance
+        unsafe {
+            let ptr = if value {
+                cache.true_obj.as_ptr()
+            } else {
+                cache.false_obj.as_ptr()
+            };
+            ffi::Py_INCREF(ptr);
+            PyObject::from_owned_ptr(py, ptr)
         }
     } else {
         value.to_object(py)
     }
+}
+
+/// Get cached True singleton as raw pointer (Phase 24 optimization)
+///
+/// # Safety
+/// - Returns owned reference that must be DECREFed by caller
+#[inline(always)]
+pub unsafe fn get_true_ptr_incref() -> *mut ffi::PyObject {
+    let ptr = ffi::Py_True();
+    ffi::Py_INCREF(ptr);
+    ptr
+}
+
+/// Get cached False singleton as raw pointer (Phase 24 optimization)
+///
+/// # Safety
+/// - Returns owned reference that must be DECREFed by caller
+#[inline(always)]
+pub unsafe fn get_false_ptr_incref() -> *mut ffi::PyObject {
+    let ptr = ffi::Py_False();
+    ffi::Py_INCREF(ptr);
+    ptr
 }
 
 // ============================================================================

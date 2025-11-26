@@ -11,6 +11,7 @@
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
+use smallvec::SmallVec;
 
 use super::simd_parser::get_interned_string;
 use super::object_cache;
@@ -149,8 +150,8 @@ impl<'a, 'py> RawJsonParser<'a, 'py> {
             && self.input[self.pos + 3] == b'l'
         {
             self.pos += 4;
-            // Use cached None (returns owned reference)
-            Ok(object_cache::get_none(self.py).into_ptr())
+            // Phase 24: Direct pointer with INCREF (no PyObject wrapper overhead)
+            Ok(object_cache::get_none_ptr_incref())
         } else {
             Err("Invalid literal, expected 'null'")
         }
@@ -165,8 +166,8 @@ impl<'a, 'py> RawJsonParser<'a, 'py> {
             && self.input[self.pos + 3] == b'e'
         {
             self.pos += 4;
-            // Use cached True (returns owned reference)
-            Ok(object_cache::get_bool(self.py, true).into_ptr())
+            // Phase 24: Direct pointer with INCREF (no PyObject wrapper overhead)
+            Ok(object_cache::get_true_ptr_incref())
         } else {
             Err("Invalid literal, expected 'true'")
         }
@@ -182,8 +183,8 @@ impl<'a, 'py> RawJsonParser<'a, 'py> {
             && self.input[self.pos + 4] == b'e'
         {
             self.pos += 5;
-            // Use cached False (returns owned reference)
-            Ok(object_cache::get_bool(self.py, false).into_ptr())
+            // Phase 24: Direct pointer with INCREF (no PyObject wrapper overhead)
+            Ok(object_cache::get_false_ptr_incref())
         } else {
             Err("Invalid literal, expected 'false'")
         }
@@ -247,9 +248,9 @@ impl<'a, 'py> RawJsonParser<'a, 'py> {
         }
 
         if is_float {
-            // Parse as float using direct C API
-            let num_str = std::str::from_utf8_unchecked(&self.input[start..self.pos]);
-            match num_str.parse::<f64>() {
+            // Phase 24: Use fast_float for ~4x faster float parsing
+            let num_bytes = &self.input[start..self.pos];
+            match fast_float::parse::<f64, _>(num_bytes) {
                 Ok(f) if f.is_finite() => Ok(object_cache::create_float_direct(f)),
                 _ => Err("Invalid float"),
             }
@@ -267,9 +268,9 @@ impl<'a, 'py> RawJsonParser<'a, 'py> {
                 if is_negative {
                     if value <= 9223372036854775808 {
                         let signed = -(value as i64);
-                        // Use cache for small integers
+                        // Phase 24: Use direct pointer for cached integers
                         if signed >= -256 {
-                            Ok(object_cache::get_int(self.py, signed).into_ptr())
+                            Ok(object_cache::get_int_ptr(signed))
                         } else {
                             Ok(object_cache::create_int_i64_direct(signed))
                         }
@@ -277,8 +278,8 @@ impl<'a, 'py> RawJsonParser<'a, 'py> {
                         Err("Integer overflow")
                     }
                 } else if value <= 256 {
-                    // Use cache for small positive integers
-                    Ok(object_cache::get_int(self.py, value as i64).into_ptr())
+                    // Phase 24: Use direct pointer for cached integers
+                    Ok(object_cache::get_int_ptr(value as i64))
                 } else if value <= i64::MAX as u64 {
                     Ok(object_cache::create_int_i64_direct(value as i64))
                 } else {
@@ -355,7 +356,8 @@ impl<'a, 'py> RawJsonParser<'a, 'py> {
     unsafe fn parse_key_with_escapes(&mut self, start: usize) -> Result<PyObject, &'static str> {
         // Reset position to start and decode with escapes
         self.pos = start;
-        let mut result = Vec::with_capacity(32);
+        // Use SmallVec for stack allocation of short escaped strings
+        let mut result: SmallVec<[u8; 64]> = SmallVec::new();
 
         while self.pos < self.input.len() {
             let c = self.input[self.pos];
@@ -417,7 +419,8 @@ impl<'a, 'py> RawJsonParser<'a, 'py> {
     unsafe fn parse_string_with_escapes(&mut self, start: usize) -> Result<*mut ffi::PyObject, &'static str> {
         // Reset position to start and decode with escapes
         self.pos = start;
-        let mut result = Vec::with_capacity(64);
+        // Use SmallVec for stack allocation of short escaped strings
+        let mut result: SmallVec<[u8; 128]> = SmallVec::new();
 
         while self.pos < self.input.len() {
             let c = self.input[self.pos];
@@ -516,9 +519,9 @@ impl<'a, 'py> RawJsonParser<'a, 'py> {
             return Ok(ffi::PyList_New(0));
         }
 
-        // Collect elements into a Vec first, then create list with exact size
-        // Use larger initial capacity to reduce reallocations for large arrays
-        let mut elements: Vec<*mut ffi::PyObject> = Vec::with_capacity(128);
+        // Use SmallVec for stack allocation of small arrays (< 32 elements)
+        // This avoids heap allocation for common small arrays
+        let mut elements: SmallVec<[*mut ffi::PyObject; 32]> = SmallVec::new();
 
         loop {
             self.skip_whitespace();
