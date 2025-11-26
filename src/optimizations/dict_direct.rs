@@ -105,18 +105,17 @@ impl DictDirectIter {
         let dk_log2_size = (*keys).dk_log2_size;
 
         // Calculate index bytes based on dk_size (number of slots)
-        // Python uses minimum bytes needed to index all slots:
-        // - dk_size <= 256: 1-byte indices (can index 0-255)
-        // - dk_size <= 65536: 2-byte indices
-        // - dk_size <= 2^32: 4-byte indices
+        // Python 3.13 uses these thresholds (from calculate_log2_index_bytes):
+        // - dk_size <= 128 (0x80): 1-byte indices
+        // - dk_size <= 32768 (0x8000): 2-byte indices
+        // - dk_size <= 2147483648 (0x80000000): 4-byte indices
         // - Otherwise: 8-byte indices
-        // Note: Don't trust dk_log2_index_bytes - it may have different meaning in Python 3.13
         let dk_size = 1usize << dk_log2_size;
-        let index_bytes = if dk_size <= 0x100 {
+        let index_bytes = if dk_size <= 0x80 {
             1
-        } else if dk_size <= 0x10000 {
+        } else if dk_size <= 0x8000 {
             2
-        } else if dk_size <= 0x100000000 {
+        } else if dk_size <= 0x80000000 {
             4
         } else {
             8
