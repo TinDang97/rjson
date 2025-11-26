@@ -11,15 +11,22 @@ use pyo3::prelude::*;
 use pyo3::types::PyString;
 use pyo3::exceptions::PyValueError;
 use ahash::AHashMap;
-use std::sync::RwLock;
 use std::sync::OnceLock;
+use std::cell::UnsafeCell;
 use simd_json::prelude::*;
 
 use crate::optimizations::object_cache;
 
+/// Wrapper to make UnsafeCell Sync (safe because Python GIL ensures single-threaded access)
+struct GilProtectedCache(UnsafeCell<StringInternCache>);
+
+// SAFETY: Python GIL ensures only one thread accesses this at a time
+unsafe impl Sync for GilProtectedCache {}
+
 /// Global string intern cache for common JSON keys
 /// Uses AHashMap for 2x faster hashing than std HashMap
-static STRING_INTERN: OnceLock<RwLock<StringInternCache>> = OnceLock::new();
+/// Note: Uses UnsafeCell instead of RwLock since Python GIL ensures single-threaded access
+static STRING_INTERN: OnceLock<GilProtectedCache> = OnceLock::new();
 
 /// String interning cache with LRU-like behavior
 struct StringInternCache {
@@ -80,7 +87,7 @@ pub fn init_string_intern(py: Python) {
             cache.cache.insert(key.to_owned(), py_str);
         }
 
-        RwLock::new(cache)
+        GilProtectedCache(UnsafeCell::new(cache))
     });
 }
 
@@ -101,23 +108,20 @@ pub fn get_interned_string(py: Python, s: &str) -> PyObject {
     }
 
     if let Some(intern) = STRING_INTERN.get() {
-        // Try read lock first (fast path for cached strings)
-        if let Ok(guard) = intern.read() {
-            if let Some(obj) = guard.cache.get(s) {
-                // Fast path: increment refcount directly and return
-                unsafe {
-                    let ptr = obj.as_ptr();
-                    pyo3::ffi::Py_INCREF(ptr);
-                    return PyObject::from_owned_ptr(py, ptr);
-                }
-            }
-        }
+        // SAFETY: Python GIL ensures single-threaded access
+        unsafe {
+            let cache = &mut *intern.0.get();
 
-        // Only take write lock for very short strings (common keys like "id", "name")
-        // to minimize lock contention
-        if s.len() <= 8 {
-            if let Ok(mut guard) = intern.write() {
-                return guard.get_or_intern(py, s);
+            // Fast path: check if already interned
+            if let Some(obj) = cache.cache.get(s) {
+                let ptr = obj.as_ptr();
+                pyo3::ffi::Py_INCREF(ptr);
+                return PyObject::from_owned_ptr(py, ptr);
+            }
+
+            // Only cache short strings (common keys like "id", "name")
+            if s.len() <= 8 {
+                return cache.get_or_intern(py, s);
             }
         }
     }
