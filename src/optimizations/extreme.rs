@@ -445,6 +445,13 @@ impl DirectSerializer {
             Py::from_owned_ptr(py, bytes_ptr)
         }
     }
+
+    /// Convert buffer to String (zero-copy if valid UTF-8)
+    #[inline(always)]
+    pub fn into_string(self) -> String {
+        // SAFETY: We only write valid UTF-8 JSON
+        unsafe { String::from_utf8_unchecked(self.buf) }
+    }
 }
 
 /// Estimate buffer size for allocation
