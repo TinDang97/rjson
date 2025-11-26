@@ -735,7 +735,10 @@ impl JsonBuffer {
                             ));
                         }
 
-                        write_json_string_direct(&mut self.buf, key_ptr);
+                        // PHASE 29: Try fast ASCII key path first
+                        if !optimizations::dict_key_fast::write_dict_key_fast(&mut self.buf, key_ptr) {
+                            write_json_string_direct(&mut self.buf, key_ptr);
+                        }
                         self.buf.push(b':');
                         let value = Bound::from_borrowed_ptr(dict_val.py(), value_ptr);
                         self.serialize_pyany(&value)?;
@@ -750,7 +753,10 @@ impl JsonBuffer {
                                 ));
                             }
 
-                            write_json_string_direct(&mut self.buf, key_ptr);
+                            // PHASE 29: Try fast ASCII key path first
+                            if !optimizations::dict_key_fast::write_dict_key_fast(&mut self.buf, key_ptr) {
+                                write_json_string_direct(&mut self.buf, key_ptr);
+                            }
                             self.buf.push(b':');
                             let value = Bound::from_borrowed_ptr(dict_val.py(), value_ptr);
                             self.serialize_pyany(&value)?;
