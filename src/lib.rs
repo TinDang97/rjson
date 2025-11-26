@@ -711,8 +711,7 @@ impl JsonBuffer {
             FastType::Dict => {
                 let dict_val = unsafe { obj.downcast_exact::<PyDict>().unwrap_unchecked() };
 
-                // PHASE 3 OPTIMIZATION: Direct C API dict iteration
-                // PyDict_Next is 2-3x faster than PyO3's iterator
+                // PHASE 40: Direct dict internal access (bypasses PyDict_Next overhead)
                 unsafe {
                     let dict_ptr = dict_val.as_ptr();
                     let dict_len = ffi::PyDict_Size(dict_ptr);
@@ -727,43 +726,48 @@ impl JsonBuffer {
                     self.buf.reserve((dict_len as usize) * 20);
                     self.buf.push(b'{');
 
-                    let mut pos: ffi::Py_ssize_t = 0;
-                    let mut key_ptr: *mut ffi::PyObject = std::ptr::null_mut();
-                    let mut value_ptr: *mut ffi::PyObject = std::ptr::null_mut();
-
-                    // PHASE 31+33+36: Inline value serialization with fast type checks
                     let py = dict_val.py();
-                    // PHASE 36: Use cached type pointer for fast string check
                     let string_type = type_cache::get_type_cache().string_type as usize;
+                    let mut first = true;
 
-                    // Handle first element without comma
-                    if ffi::PyDict_Next(dict_ptr, &mut pos, &mut key_ptr, &mut value_ptr) != 0 {
-                        // PHASE 36: Fast type pointer check (faster than PyUnicode_Check)
-                        if (*key_ptr).ob_type as usize != string_type {
-                            return Err(PyValueError::new_err(
-                                "Dictionary keys must be strings for JSON serialization"
-                            ));
-                        }
+                    // Try direct dict iteration (faster for combined dicts)
+                    if let Some(mut iter) = optimizations::dict_direct::DictDirectIter::new(dict_ptr) {
+                        while let Some((key_ptr, value_ptr)) = iter.next() {
+                            if !first {
+                                self.buf.push(b',');
+                            }
+                            first = false;
 
-                        // PHASE 29: Try fast ASCII key path first
-                        if !optimizations::dict_key_fast::write_dict_key_fast(&mut self.buf, key_ptr) {
-                            write_json_string_direct(&mut self.buf, key_ptr);
-                        }
-                        self.buf.push(b':');
-                        self.serialize_ptr(py, value_ptr)?;
-
-                        // Handle remaining elements with leading comma
-                        while ffi::PyDict_Next(dict_ptr, &mut pos, &mut key_ptr, &mut value_ptr) != 0 {
-                            self.buf.push(b',');
-
-                            // PHASE 36: Fast type pointer check
                             if (*key_ptr).ob_type as usize != string_type {
                                 return Err(PyValueError::new_err(
                                     "Dictionary keys must be strings for JSON serialization"
                                 ));
                             }
 
-                            // PHASE 29: Try fast ASCII key path first
+                            if !optimizations::dict_key_fast::write_dict_key_fast(&mut self.buf, key_ptr) {
+                                write_json_string_direct(&mut self.buf, key_ptr);
+                            }
+                            self.buf.push(b':');
+                            self.serialize_ptr(py, value_ptr)?;
+                        }
+                    } else {
+                        // Fall back to PyDict_Next for split dicts
+                        let mut pos: ffi::Py_ssize_t = 0;
+                        let mut key_ptr: *mut ffi::PyObject = std::ptr::null_mut();
+                        let mut value_ptr: *mut ffi::PyObject = std::ptr::null_mut();
+
+                        while ffi::PyDict_Next(dict_ptr, &mut pos, &mut key_ptr, &mut value_ptr) != 0 {
+                            if !first {
+                                self.buf.push(b',');
+                            }
+                            first = false;
+
+                            if (*key_ptr).ob_type as usize != string_type {
+                                return Err(PyValueError::new_err(
+                                    "Dictionary keys must be strings for JSON serialization"
+                                ));
+                            }
+
                             if !optimizations::dict_key_fast::write_dict_key_fast(&mut self.buf, key_ptr) {
                                 write_json_string_direct(&mut self.buf, key_ptr);
                             }
@@ -935,7 +939,7 @@ impl JsonBuffer {
             }
 
             FastType::Dict => {
-                // PHASE 39: Direct dict serialization
+                // PHASE 40: Direct dict internal access (bypasses PyDict_Next overhead)
                 let dict_len = ffi::PyDict_Size(obj_ptr);
                 if dict_len == 0 {
                     self.buf.extend_from_slice(b"{}");
@@ -947,33 +951,56 @@ impl JsonBuffer {
 
                 let cache = type_cache::get_type_cache();
                 let string_type = cache.string_type as usize;
-
-                let mut pos: ffi::Py_ssize_t = 0;
-                let mut key_ptr: *mut ffi::PyObject = std::ptr::null_mut();
-                let mut value_ptr: *mut ffi::PyObject = std::ptr::null_mut();
                 let mut first = true;
 
-                while ffi::PyDict_Next(obj_ptr, &mut pos, &mut key_ptr, &mut value_ptr) != 0 {
-                    if !first {
-                        self.buf.push(b',');
-                    }
-                    first = false;
+                // Try direct dict iteration first (faster for combined dicts)
+                if let Some(mut iter) = optimizations::dict_direct::DictDirectIter::new(obj_ptr) {
+                    while let Some((key_ptr, value_ptr)) = iter.next() {
+                        if !first {
+                            self.buf.push(b',');
+                        }
+                        first = false;
 
-                    // Check key type
-                    if (*key_ptr).ob_type as usize != string_type {
-                        return Err(PyValueError::new_err(
-                            "Dictionary keys must be strings for JSON serialization"
-                        ));
-                    }
+                        // Check key type
+                        if (*key_ptr).ob_type as usize != string_type {
+                            return Err(PyValueError::new_err(
+                                "Dictionary keys must be strings for JSON serialization"
+                            ));
+                        }
 
-                    // Serialize key
-                    if !optimizations::dict_key_fast::write_dict_key_fast(&mut self.buf, key_ptr) {
-                        write_json_string_direct(&mut self.buf, key_ptr);
-                    }
-                    self.buf.push(b':');
+                        // Serialize key
+                        if !optimizations::dict_key_fast::write_dict_key_fast(&mut self.buf, key_ptr) {
+                            write_json_string_direct(&mut self.buf, key_ptr);
+                        }
+                        self.buf.push(b':');
 
-                    // Serialize value
-                    self.serialize_ptr(py, value_ptr)?;
+                        // Serialize value
+                        self.serialize_ptr(py, value_ptr)?;
+                    }
+                } else {
+                    // Fall back to PyDict_Next for split dicts
+                    let mut pos: ffi::Py_ssize_t = 0;
+                    let mut key_ptr: *mut ffi::PyObject = std::ptr::null_mut();
+                    let mut value_ptr: *mut ffi::PyObject = std::ptr::null_mut();
+
+                    while ffi::PyDict_Next(obj_ptr, &mut pos, &mut key_ptr, &mut value_ptr) != 0 {
+                        if !first {
+                            self.buf.push(b',');
+                        }
+                        first = false;
+
+                        if (*key_ptr).ob_type as usize != string_type {
+                            return Err(PyValueError::new_err(
+                                "Dictionary keys must be strings for JSON serialization"
+                            ));
+                        }
+
+                        if !optimizations::dict_key_fast::write_dict_key_fast(&mut self.buf, key_ptr) {
+                            write_json_string_direct(&mut self.buf, key_ptr);
+                        }
+                        self.buf.push(b':');
+                        self.serialize_ptr(py, value_ptr)?;
+                    }
                 }
 
                 self.buf.push(b'}');

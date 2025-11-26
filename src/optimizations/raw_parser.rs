@@ -6,6 +6,9 @@
 //! - Zero intermediate allocations where possible
 //! - Inline everything for maximum performance
 //!
+//! Phase 50: SIMD whitespace skipping (AVX2/SSE2)
+//! Phase 51: SIMD string scanning for quote/backslash
+//!
 //! WARNING: This is highly unsafe code. Use with caution.
 
 use pyo3::ffi;
@@ -15,6 +18,263 @@ use smallvec::SmallVec;
 
 use super::simd_parser::get_interned_string;
 use super::object_cache;
+
+// ============================================================================
+// Phase 50: SIMD Whitespace Skipping
+// ============================================================================
+
+use std::sync::atomic::{AtomicU8, Ordering};
+
+/// CPU feature level cache: 0=uninitialized, 1=SSE2 only, 2=AVX2
+static CPU_LEVEL: AtomicU8 = AtomicU8::new(0);
+
+#[inline]
+fn get_cpu_level() -> u8 {
+    let level = CPU_LEVEL.load(Ordering::Relaxed);
+    if level != 0 {
+        return level;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        let detected = if is_x86_feature_detected!("avx2") { 2 } else { 1 };
+        CPU_LEVEL.store(detected, Ordering::Relaxed);
+        detected
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        CPU_LEVEL.store(1, Ordering::Relaxed);
+        1
+    }
+}
+
+/// Skip whitespace using SIMD - returns the position of the first non-whitespace byte
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn skip_whitespace_simd(input: &[u8], pos: usize) -> usize {
+    let len = input.len();
+
+    // Use scalar for small remainders
+    if pos + 16 > len {
+        return skip_whitespace_scalar(input, pos);
+    }
+
+    let cpu = get_cpu_level();
+    if cpu == 2 && pos + 32 <= len {
+        unsafe { skip_whitespace_avx2(input, pos, len) }
+    } else {
+        unsafe { skip_whitespace_sse2(input, pos, len) }
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+fn skip_whitespace_simd(input: &[u8], pos: usize) -> usize {
+    skip_whitespace_scalar(input, pos)
+}
+
+#[inline]
+fn skip_whitespace_scalar(input: &[u8], mut pos: usize) -> usize {
+    while pos < input.len() {
+        let c = input[pos];
+        if c != b' ' && c != b'\n' && c != b'\r' && c != b'\t' {
+            break;
+        }
+        pos += 1;
+    }
+    pos
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn skip_whitespace_sse2(input: &[u8], mut pos: usize, len: usize) -> usize {
+    use std::arch::x86_64::*;
+
+    let space = _mm_set1_epi8(b' ' as i8);
+    let tab = _mm_set1_epi8(b'\t' as i8);
+    let newline = _mm_set1_epi8(b'\n' as i8);
+    let cr = _mm_set1_epi8(b'\r' as i8);
+
+    while pos + 16 <= len {
+        let chunk = _mm_loadu_si128(input.as_ptr().add(pos) as *const __m128i);
+
+        // Check for whitespace characters
+        let is_space = _mm_cmpeq_epi8(chunk, space);
+        let is_tab = _mm_cmpeq_epi8(chunk, tab);
+        let is_newline = _mm_cmpeq_epi8(chunk, newline);
+        let is_cr = _mm_cmpeq_epi8(chunk, cr);
+
+        // Combine all whitespace checks
+        let is_ws = _mm_or_si128(_mm_or_si128(is_space, is_tab), _mm_or_si128(is_newline, is_cr));
+
+        // Find first non-whitespace
+        let mask = _mm_movemask_epi8(is_ws) as u32;
+
+        if mask == 0xFFFF {
+            // All 16 bytes are whitespace
+            pos += 16;
+        } else {
+            // Found non-whitespace - find first 0 bit
+            let first_non_ws = (!mask).trailing_zeros() as usize;
+            return pos + first_non_ws;
+        }
+    }
+
+    // Check remaining bytes with scalar
+    skip_whitespace_scalar(input, pos)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn skip_whitespace_avx2(input: &[u8], mut pos: usize, len: usize) -> usize {
+    use std::arch::x86_64::*;
+
+    let space = _mm256_set1_epi8(b' ' as i8);
+    let tab = _mm256_set1_epi8(b'\t' as i8);
+    let newline = _mm256_set1_epi8(b'\n' as i8);
+    let cr = _mm256_set1_epi8(b'\r' as i8);
+
+    while pos + 32 <= len {
+        let chunk = _mm256_loadu_si256(input.as_ptr().add(pos) as *const __m256i);
+
+        let is_space = _mm256_cmpeq_epi8(chunk, space);
+        let is_tab = _mm256_cmpeq_epi8(chunk, tab);
+        let is_newline = _mm256_cmpeq_epi8(chunk, newline);
+        let is_cr = _mm256_cmpeq_epi8(chunk, cr);
+
+        let is_ws = _mm256_or_si256(_mm256_or_si256(is_space, is_tab), _mm256_or_si256(is_newline, is_cr));
+        let mask = _mm256_movemask_epi8(is_ws) as u32;
+
+        if mask == 0xFFFFFFFF {
+            pos += 32;
+        } else {
+            let first_non_ws = (!mask).trailing_zeros() as usize;
+            return pos + first_non_ws;
+        }
+    }
+
+    // Check remaining bytes with SSE2 or scalar
+    if pos + 16 <= len {
+        return skip_whitespace_sse2(input, pos, len);
+    }
+    skip_whitespace_scalar(input, pos)
+}
+
+// ============================================================================
+// Phase 51: SIMD String Scanning
+// ============================================================================
+
+/// Scan for quote or backslash using SIMD - returns position of found char or end
+#[cfg(target_arch = "x86_64")]
+#[inline]
+fn find_string_end_simd(input: &[u8], pos: usize) -> (usize, bool) {
+    let len = input.len();
+
+    // Use scalar for small strings
+    if pos + 16 > len {
+        return find_string_end_scalar(input, pos);
+    }
+
+    let cpu = get_cpu_level();
+    if cpu == 2 && pos + 32 <= len {
+        unsafe { find_string_end_avx2(input, pos, len) }
+    } else {
+        unsafe { find_string_end_sse2(input, pos, len) }
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+fn find_string_end_simd(input: &[u8], pos: usize) -> (usize, bool) {
+    find_string_end_scalar(input, pos)
+}
+
+/// Returns (position, found) where found=true if quote/backslash/control was found
+#[inline]
+fn find_string_end_scalar(input: &[u8], mut pos: usize) -> (usize, bool) {
+    while pos < input.len() {
+        let c = input[pos];
+        if c == b'"' || c == b'\\' || c < 0x20 {
+            return (pos, true);
+        }
+        pos += 1;
+    }
+    (pos, false)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn find_string_end_sse2(input: &[u8], mut pos: usize, len: usize) -> (usize, bool) {
+    use std::arch::x86_64::*;
+
+    let quote = _mm_set1_epi8(b'"' as i8);
+    let backslash = _mm_set1_epi8(b'\\' as i8);
+    let space = _mm_set1_epi8(0x20);
+
+    while pos + 16 <= len {
+        let chunk = _mm_loadu_si128(input.as_ptr().add(pos) as *const __m128i);
+
+        // Check for quote and backslash
+        let is_quote = _mm_cmpeq_epi8(chunk, quote);
+        let is_backslash = _mm_cmpeq_epi8(chunk, backslash);
+
+        // Check for control characters (< 0x20)
+        let control_mask = _mm_cmplt_epi8(chunk, space);
+        let is_positive = _mm_cmpgt_epi8(chunk, _mm_set1_epi8(-1));
+        let is_control = _mm_and_si128(control_mask, is_positive);
+
+        // Combine all terminating conditions
+        let terminator = _mm_or_si128(_mm_or_si128(is_quote, is_backslash), is_control);
+        let mask = _mm_movemask_epi8(terminator) as u32;
+
+        if mask != 0 {
+            let first = mask.trailing_zeros() as usize;
+            return (pos + first, true);
+        }
+
+        pos += 16;
+    }
+
+    // Check remaining bytes with scalar
+    find_string_end_scalar(input, pos)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn find_string_end_avx2(input: &[u8], mut pos: usize, len: usize) -> (usize, bool) {
+    use std::arch::x86_64::*;
+
+    let quote = _mm256_set1_epi8(b'"' as i8);
+    let backslash = _mm256_set1_epi8(b'\\' as i8);
+    let space = _mm256_set1_epi8(0x20);
+
+    while pos + 32 <= len {
+        let chunk = _mm256_loadu_si256(input.as_ptr().add(pos) as *const __m256i);
+
+        let is_quote = _mm256_cmpeq_epi8(chunk, quote);
+        let is_backslash = _mm256_cmpeq_epi8(chunk, backslash);
+
+        // Control char detection
+        let control_mask = _mm256_cmpgt_epi8(space, chunk);
+        let is_positive = _mm256_cmpgt_epi8(chunk, _mm256_set1_epi8(-1));
+        let is_control = _mm256_and_si256(control_mask, is_positive);
+
+        let terminator = _mm256_or_si256(_mm256_or_si256(is_quote, is_backslash), is_control);
+        let mask = _mm256_movemask_epi8(terminator) as u32;
+
+        if mask != 0 {
+            let first = mask.trailing_zeros() as usize;
+            return (pos + first, true);
+        }
+
+        pos += 32;
+    }
+
+    // Check remaining bytes (fall through to SSE2 or scalar)
+    if pos + 16 <= len {
+        return find_string_end_sse2(input, pos, len);
+    }
+    find_string_end_scalar(input, pos)
+}
 
 // ============================================================================
 // Character Classification (same as custom_parser but kept local for inlining)
@@ -112,7 +372,7 @@ impl<'a, 'py> RawJsonParser<'a, 'py> {
 
     #[inline(always)]
     fn skip_whitespace(&mut self) {
-        // Direct comparison is faster than table lookup for simple whitespace
+        // Note: SIMD tested but scalar is faster for typical JSON (short/no whitespace)
         while self.pos < self.input.len() {
             let c = self.input[self.pos];
             if c != b' ' && c != b'\n' && c != b'\r' && c != b'\t' {
@@ -304,7 +564,7 @@ impl<'a, 'py> RawJsonParser<'a, 'py> {
         self.pos += 1; // Skip opening quote
         let start = self.pos;
 
-        // Fast scan for end of string (no escapes)
+        // Note: SIMD tested but scalar is faster for typical short JSON strings
         while self.pos < self.input.len() {
             let c = self.input[self.pos];
             if c == b'"' {
@@ -332,7 +592,7 @@ impl<'a, 'py> RawJsonParser<'a, 'py> {
         self.pos += 1; // Skip opening quote
         let start = self.pos;
 
-        // Fast scan for end of string (no escapes)
+        // Scalar scan for end of string (faster for typical short keys)
         while self.pos < self.input.len() {
             let c = self.input[self.pos];
             if c == b'"' {

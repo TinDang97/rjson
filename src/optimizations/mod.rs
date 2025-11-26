@@ -16,6 +16,7 @@ pub mod pylong_fast;
 pub mod pyfloat_fast;
 pub mod dict_key_fast;
 pub mod raw_serialize;  // Phase 39: Raw C API serialization
+pub mod dict_direct;    // Phase 40: Direct dict internal access
 
 /// Branch prediction hints for performance-critical code paths
 ///
