@@ -11,7 +11,7 @@
 
 use pyo3::prelude::*;
 use pyo3::ffi;
-use pyo3::types::{PyList, PyInt, PyFloat, PyString, PyBool};
+use pyo3::types::PyList;  // Phase 38: Removed unused PyInt, PyFloat, PyString, PyBool
 
 // ============================================================================
 // DYNAMIC PROGRAMMING: Precomputed digit lookup tables
@@ -142,11 +142,12 @@ pub fn detect_array_type(list: &Bound<'_, PyList>) -> ArrayType {
         let first_ptr = ffi::PyList_GET_ITEM(list_ptr, 0);
         let first_type = (*first_ptr).ob_type;
 
-        // Check what type the first element is
-        let int_type = PyInt::new(list.py(), 0).get_type().as_type_ptr();
-        let float_type = PyFloat::new(list.py(), 0.0).get_type().as_type_ptr();
-        let str_type = PyString::new(list.py(), "").get_type().as_type_ptr();
-        let bool_type = PyBool::new(list.py(), true).get_type().as_type_ptr();
+        // PHASE 38: Use cached type pointers (avoids creating temporary Python objects)
+        let type_cache = super::type_cache::get_type_cache();
+        let int_type = type_cache.int_type;
+        let float_type = type_cache.float_type;
+        let str_type = type_cache.string_type;
+        let bool_type = type_cache.bool_type;
 
         let expected_array_type = if first_type == int_type {
             ArrayType::AllInts
@@ -418,8 +419,8 @@ pub unsafe fn serialize_bool_array_bulk(list: &Bound<'_, PyList>, buf: &mut Vec<
 
     buf.push(b'[');
 
-    // Get True singleton pointer for comparison
-    let true_ptr = PyBool::new(list.py(), true).as_ptr();
+    // PHASE 38: Use Py_True() directly (avoids creating temporary Python object)
+    let true_ptr = ffi::Py_True();
 
     for i in 0..size {
         if i > 0 {
