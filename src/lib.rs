@@ -858,10 +858,130 @@ impl JsonBuffer {
                 Ok(())
             }
 
-            FastType::List | FastType::Tuple | FastType::Dict | FastType::Other => {
-                // For nested structures, fall back to Bound-based method
-                let obj = Bound::from_borrowed_ptr(py, obj_ptr);
-                self.serialize_pyany(&obj)
+            FastType::List => {
+                // PHASE 39: Direct list serialization without Bound wrapper
+                let len = ffi::PyList_GET_SIZE(obj_ptr);
+                if len == 0 {
+                    self.buf.extend_from_slice(b"[]");
+                    return Ok(());
+                }
+
+                // Check for homogeneous int array
+                let cache = type_cache::get_type_cache();
+                let first_ptr = ffi::PyList_GET_ITEM(obj_ptr, 0);
+                let first_type = (*first_ptr).ob_type;
+
+                if first_type == cache.int_type && len >= 8 {
+                    // Check if all elements are ints (sample first 16)
+                    let mut all_ints = true;
+                    let check_count = std::cmp::min(len, 16);
+                    for i in 1..check_count {
+                        let item = ffi::PyList_GET_ITEM(obj_ptr, i);
+                        if (*item).ob_type != cache.int_type {
+                            all_ints = false;
+                            break;
+                        }
+                    }
+
+                    if all_ints {
+                        // Bulk int serialization
+                        self.buf.reserve((len as usize) * 10 + 2);
+                        self.buf.push(b'[');
+                        if let Ok(val) = optimizations::pylong_fast::extract_int_fast(first_ptr) {
+                            self.write_int_i64(val);
+                        }
+                        for i in 1..len {
+                            self.buf.push(b',');
+                            let item = ffi::PyList_GET_ITEM(obj_ptr, i);
+                            if let Ok(val) = optimizations::pylong_fast::extract_int_fast(item) {
+                                self.write_int_i64(val);
+                            }
+                        }
+                        self.buf.push(b']');
+                        return Ok(());
+                    }
+                }
+
+                // Generic list path
+                self.buf.push(b'[');
+                self.serialize_ptr(py, first_ptr)?;
+                for i in 1..len {
+                    self.buf.push(b',');
+                    let item = ffi::PyList_GET_ITEM(obj_ptr, i);
+                    self.serialize_ptr(py, item)?;
+                }
+                self.buf.push(b']');
+                Ok(())
+            }
+
+            FastType::Tuple => {
+                // PHASE 39: Direct tuple serialization
+                let len = ffi::PyTuple_GET_SIZE(obj_ptr);
+                if len == 0 {
+                    self.buf.extend_from_slice(b"[]");
+                    return Ok(());
+                }
+
+                self.buf.push(b'[');
+                let first = ffi::PyTuple_GET_ITEM(obj_ptr, 0);
+                self.serialize_ptr(py, first)?;
+                for i in 1..len {
+                    self.buf.push(b',');
+                    let item = ffi::PyTuple_GET_ITEM(obj_ptr, i);
+                    self.serialize_ptr(py, item)?;
+                }
+                self.buf.push(b']');
+                Ok(())
+            }
+
+            FastType::Dict => {
+                // PHASE 39: Direct dict serialization
+                let dict_len = ffi::PyDict_Size(obj_ptr);
+                if dict_len == 0 {
+                    self.buf.extend_from_slice(b"{}");
+                    return Ok(());
+                }
+
+                self.buf.reserve((dict_len as usize) * 20);
+                self.buf.push(b'{');
+
+                let cache = type_cache::get_type_cache();
+                let string_type = cache.string_type as usize;
+
+                let mut pos: ffi::Py_ssize_t = 0;
+                let mut key_ptr: *mut ffi::PyObject = std::ptr::null_mut();
+                let mut value_ptr: *mut ffi::PyObject = std::ptr::null_mut();
+                let mut first = true;
+
+                while ffi::PyDict_Next(obj_ptr, &mut pos, &mut key_ptr, &mut value_ptr) != 0 {
+                    if !first {
+                        self.buf.push(b',');
+                    }
+                    first = false;
+
+                    // Check key type
+                    if (*key_ptr).ob_type as usize != string_type {
+                        return Err(PyValueError::new_err(
+                            "Dictionary keys must be strings for JSON serialization"
+                        ));
+                    }
+
+                    // Serialize key
+                    if !optimizations::dict_key_fast::write_dict_key_fast(&mut self.buf, key_ptr) {
+                        write_json_string_direct(&mut self.buf, key_ptr);
+                    }
+                    self.buf.push(b':');
+
+                    // Serialize value
+                    self.serialize_ptr(py, value_ptr)?;
+                }
+
+                self.buf.push(b'}');
+                Ok(())
+            }
+
+            FastType::Other => {
+                Err(PyValueError::new_err("Unsupported type for JSON serialization"))
             }
         }
     }
@@ -1007,7 +1127,7 @@ fn estimate_json_size(obj: &Bound<'_, PyAny>) -> usize {
 /// # Returns
 /// A JSON string, or a PyValueError on error.
 #[pyfunction]
-fn dumps(_py: Python, data: &Bound<'_, PyAny>) -> PyResult<String> {
+fn dumps(py: Python, data: &Bound<'_, PyAny>) -> PyResult<String> {
     use std::cell::RefCell;
 
     thread_local! {
@@ -1025,9 +1145,9 @@ fn dumps(_py: Python, data: &Bound<'_, PyAny>) -> PyResult<String> {
             buf.reserve(capacity - current_cap);
         }
 
-        // Serialize using JsonBuffer API but with thread-local storage
+        // PHASE 39: Use raw pointer path directly to skip Bound<> creation
         let mut buffer = JsonBuffer { buf: std::mem::take(&mut *buf) };
-        let result = buffer.serialize_pyany(data);
+        let result = unsafe { buffer.serialize_ptr(py, data.as_ptr()) };
 
         match result {
             Ok(()) => {
@@ -1086,6 +1206,15 @@ fn dumps_bytes(py: Python, data: &Bound<'_, PyAny>) -> PyResult<Py<PyBytes>> {
     }
 }
 
+/// PHASE 39: Raw C API dumps with raw buffer manipulation
+///
+/// Uses direct C API calls and raw buffer manipulation for maximum performance.
+/// No PyO3 abstractions in the hot path.
+#[pyfunction]
+fn dumps_raw(py: Python, data: &Bound<'_, PyAny>) -> PyResult<String> {
+    optimizations::raw_serialize::dumps_raw(py, data)
+}
+
 /// Python module definition for rjson.
 ///
 /// Provides optimized JSON parsing (`loads`) and serialization (`dumps`) functions.
@@ -1095,6 +1224,7 @@ fn dumps_bytes(py: Python, data: &Bound<'_, PyAny>) -> PyResult<Py<PyBytes>> {
 /// Phase 7: SIMD-accelerated parsing with simd-json
 /// Phase 8: GIL batching (parse to IR, then batch-create Python objects)
 /// Phase 9: String interning for common dict keys
+/// Phase 39: Raw C API serialization with raw buffer manipulation
 ///
 /// Performance: 8-9x faster dumps, 1.5-2x faster loads vs stdlib json
 #[pymodule]
@@ -1110,6 +1240,7 @@ fn rjson(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(loads_serde, m)?)?;  // Legacy serde_json
     m.add_function(wrap_pyfunction!(loads_simd, m)?)?;   // Phase 7: SIMD loads
     m.add_function(wrap_pyfunction!(dumps, m)?)?;
+    m.add_function(wrap_pyfunction!(dumps_raw, m)?)?;    // Phase 39: Raw C API
     m.add_function(wrap_pyfunction!(dumps_bytes, m)?)?;  // Nuclear option
     Ok(())
 }
