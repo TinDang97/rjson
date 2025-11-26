@@ -731,13 +731,15 @@ impl JsonBuffer {
                     let mut key_ptr: *mut ffi::PyObject = std::ptr::null_mut();
                     let mut value_ptr: *mut ffi::PyObject = std::ptr::null_mut();
 
-                    // PHASE 31+33: Inline value serialization to eliminate call overhead
+                    // PHASE 31+33+36: Inline value serialization with fast type checks
                     let py = dict_val.py();
+                    // PHASE 36: Use cached type pointer for fast string check
+                    let string_type = type_cache::get_type_cache().string_type as usize;
 
                     // Handle first element without comma
                     if ffi::PyDict_Next(dict_ptr, &mut pos, &mut key_ptr, &mut value_ptr) != 0 {
-                        // Check key is string
-                        if ffi::PyUnicode_Check(key_ptr) == 0 {
+                        // PHASE 36: Fast type pointer check (faster than PyUnicode_Check)
+                        if (*key_ptr).ob_type as usize != string_type {
                             return Err(PyValueError::new_err(
                                 "Dictionary keys must be strings for JSON serialization"
                             ));
@@ -754,7 +756,8 @@ impl JsonBuffer {
                         while ffi::PyDict_Next(dict_ptr, &mut pos, &mut key_ptr, &mut value_ptr) != 0 {
                             self.buf.push(b',');
 
-                            if ffi::PyUnicode_Check(key_ptr) == 0 {
+                            // PHASE 36: Fast type pointer check
+                            if (*key_ptr).ob_type as usize != string_type {
                                 return Err(PyValueError::new_err(
                                     "Dictionary keys must be strings for JSON serialization"
                                 ));
