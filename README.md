@@ -10,14 +10,17 @@ rjson time ÷ orjson time on standard corpora (**< 1.00 = rjson faster**), geome
 twitter, citm_catalog, canada, github and six synthetic cases. Full table, methodology and
 remaining gaps: [docs/PERFORMANCE_REVIEW.md](docs/PERFORMANCE_REVIEW.md).
 
-| | CPython 3.11 (PGO build) | CPython 3.13 (plain release build) |
-|---|---|---|
-| `loads` | **0.74x** | **0.98x** |
-| `dumps_bytes` (→ `bytes`, like `orjson.dumps`) | **0.82x** | **0.71x** |
-| `dumps` (→ `str`) | 1.00x | **0.83x** |
+| | CPython 3.11 | CPython 3.13 | cases faster than orjson (3.13) |
+|---|---|---|---|
+| `loads` | **0.63x** | **0.81x** | 10 / 10 |
+| `dumps_bytes` (→ `bytes`, like `orjson.dumps`) | **0.71x** | **0.71x** | 10 / 10 |
+| `dumps` (→ `str`) | **0.82x** | **0.82x** | 8 / 10 |
 
-Largest gaps remaining: `dumps` → `str` on non-ASCII text (a `str` result must be built
-in UCS2/UCS4), `loads` of escape-heavy strings and float arrays.
+Plain release builds (no PGO) on x86_64. The 3.11 `loads` figure includes pausing the cyclic
+GC during parsing, which CPython 3.12+ does not need; 3.13 is the like-for-like comparison.
+`dumps` → `str` still trails on twitter (1.09x) and non-ASCII-heavy text (2.3x), because a `str`
+containing non-Latin-1 characters must be stored as UCS2/UCS4; against the equivalent
+`orjson.dumps(x).decode()` it is 2–8x faster on those cases.
 
 Reproduce with `benches/fetch_corpus.sh && python benches/corpus_benchmark.py`.
 
