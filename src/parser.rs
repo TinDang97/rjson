@@ -756,8 +756,72 @@ impl<'a> Parser<'a> {
 
     #[inline(always)]
     fn parse_number(&mut self) -> PResult<*mut ffi::PyObject> {
-        let buf = self.buf;
         let start = self.pos;
+        if start + NUM_FAST_LOOKAHEAD <= self.buf.len() {
+            // SAFETY: the fast path reads at most NUM_FAST_LOOKAHEAD bytes
+            // from `start`.
+            if let Some(r) = unsafe { self.parse_number_fast(start) } {
+                return r;
+            }
+        }
+        self.parse_number_general(start)
+    }
+
+    /// One-pass fast path for the common number shapes: `-?\d{1,15}` and
+    /// `-?\d{1,15}\.\d{1,15}` with at most 19 digits in total and no
+    /// exponent. Integer and fraction digits are each read as two 8-byte
+    /// words. Returns None (without consuming anything) for every other
+    /// shape, including all invalid ones, so the general parser keeps sole
+    /// ownership of error reporting and of the rare shapes.
+    ///
+    /// SAFETY: `start + NUM_FAST_LOOKAHEAD <= self.buf.len()`.
+    #[inline(always)]
+    unsafe fn parse_number_fast(&mut self, start: usize) -> Option<PResult<*mut ffi::PyObject>> {
+        let p = self.buf.as_ptr();
+        let neg = *p.add(start) == b'-';
+        let i = start + neg as usize;
+        let (int, n1) = digits16(p.add(i))?;
+        // No digit, or a leading zero ("01"): the general parser reports it.
+        if n1 == 0 || (n1 > 1 && *p.add(i) == b'0') {
+            return None;
+        }
+        let mut j = i + n1;
+        let c = *p.add(j);
+        if c == b'.' {
+            let (frac, n2) = digits16(p.add(j + 1))?;
+            if n2 == 0 || n1 + n2 > 19 {
+                return None;
+            }
+            j += 1 + n2;
+            if (*p.add(j) | 0x20) == b'e' {
+                return None;
+            }
+            // < 10^19: exact in a u64.
+            let mant = int * POW10_U64[n2] + frac;
+            let v = if mant <= (1u64 << 53) {
+                // Clinger: exact mantissa and power of ten (n2 <= 15 <= 22),
+                // so one correctly rounded division.
+                mant as f64 / POW10[n2]
+            } else {
+                crate::lemire::compute_float64(-(n2 as i64), mant)?
+            };
+            self.pos = j;
+            let r = ffi::PyFloat_FromDouble(if neg { -v } else { v });
+            return Some(if r.is_null() { self.err_oom() } else { Ok(r) });
+        }
+        if (c | 0x20) == b'e' {
+            return None;
+        }
+        self.pos = j;
+        // At most 15 digits: fits an i64.
+        let v = int as i64;
+        let r = ffi::PyLong_FromLongLong(if neg { -v } else { v });
+        Some(if r.is_null() { self.err_oom() } else { Ok(r) })
+    }
+
+    #[inline(never)]
+    fn parse_number_general(&mut self, start: usize) -> PResult<*mut ffi::PyObject> {
+        let buf = self.buf;
         let mut i = start;
         let neg = unsafe { *buf.get_unchecked(i) } == b'-';
         i += neg as usize;
@@ -937,12 +1001,64 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Bytes `parse_number_fast` may read from the start of the number: sign,
+/// 16 integer-digit bytes, '.', 16 fraction-digit bytes, and the byte after.
+const NUM_FAST_LOOKAHEAD: usize = 40;
+
+/// Number of leading ASCII digits in the 8 bytes of `w` (little endian).
 #[inline(always)]
-fn parse_8digits(mut v: u64) -> u64 {
+fn digit_run(w: u64) -> usize {
+    let non_digit = (w.wrapping_sub(0x3030_3030_3030_3030) | w.wrapping_add(0x4646_4646_4646_4646))
+        & 0x8080_8080_8080_8080;
+    (non_digit.trailing_zeros() / 8) as usize
+}
+
+/// Value of the first `n` (0..=8) ASCII digits of `w`.
+#[inline(always)]
+fn parse_digits_prefix(w: u64, n: usize) -> u64 {
+    // Convert to digit values first (the low `n` bytes are digits, so no
+    // borrow reaches them), then shift the digits to the top: the vacated
+    // low bytes become leading zeros. Two shifts keep n == 0 (a total shift
+    // of 64) well defined.
+    let half = 4 * (8 - n) as u32;
+    let d = (w.wrapping_sub(0x3030_3030_3030_3030) << half) << half;
+    digits8_value(d)
+}
+
+/// Leading decimal digits at `p`: (value, count) for up to 15 digits, None
+/// for 16 or more.
+///
+/// SAFETY: `p..p+16` readable.
+#[inline(always)]
+unsafe fn digits16(p: *const u8) -> Option<(u64, usize)> {
+    let w1 = u64::from_le(ptr::read_unaligned(p as *const u64));
+    let na = digit_run(w1);
+    if na < 8 {
+        return Some((parse_digits_prefix(w1, na), na));
+    }
+    let w2 = u64::from_le(ptr::read_unaligned(p.add(8) as *const u64));
+    let nb = digit_run(w2);
+    if nb == 8 {
+        return None;
+    }
+    Some((
+        parse_8digits(w1) * POW10_U64[nb] + parse_digits_prefix(w2, nb),
+        8 + nb,
+    ))
+}
+
+#[inline(always)]
+fn parse_8digits(v: u64) -> u64 {
+    digits8_value(v - 0x3030_3030_3030_3030)
+}
+
+/// Value of 8 digit values (0..=9, one per byte, most significant first in
+/// memory order).
+#[inline(always)]
+fn digits8_value(mut v: u64) -> u64 {
     const MASK: u64 = 0x0000_00FF_0000_00FF;
     const MUL1: u64 = 0x000F_4240_0000_0064;
     const MUL2: u64 = 0x0000_2710_0000_0001;
-    v -= 0x3030_3030_3030_3030;
     v = (v * 10) + (v >> 8);
     let v1 = (v & MASK).wrapping_mul(MUL1);
     let v2 = ((v >> 16) & MASK).wrapping_mul(MUL2);
@@ -1188,17 +1304,15 @@ unsafe fn escape_blocks_avx2(buf: &[u8], out: &mut Vec<u8>, st: &mut EscState) {
     escape_blocks(buf, out, st, masks, copy32)
 }
 
-const POW10_U64: [u64; 9] = [
-    1,
-    10,
-    100,
-    1_000,
-    10_000,
-    100_000,
-    1_000_000,
-    10_000_000,
-    100_000_000,
-];
+const POW10_U64: [u64; 20] = {
+    let mut t = [1u64; 20];
+    let mut k = 1;
+    while k < 20 {
+        t[k] = t[k - 1] * 10;
+        k += 1;
+    }
+    t
+};
 
 const POW10: [f64; 23] = [
     1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,

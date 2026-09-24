@@ -438,6 +438,35 @@ class TestLoadsParser:
                   "0.1", "123456789012345678901234567890.5", "1e-400"]:
             assert rjson.loads(s) == json.loads(s), s
 
+    def test_number_digit_counts(self):
+        # The one-pass fast path reads up to 15 integer and 15 fraction
+        # digits as 8-byte words, needs <= 19 digits in total, and is only
+        # used with >= 40 bytes of input left; every other shape goes through
+        # the general parser. Check all digit-count combinations both ways.
+        import json
+        import random
+        rnd = random.Random(7)
+        pad = " " * 45
+        for n1 in range(1, 22):
+            for n2 in range(0, 22):
+                for _ in range(3):
+                    ip = str(rnd.randint(1, 9)) + "".join(rnd.choice("0123456789") for _ in range(n1 - 1))
+                    fp = "".join(rnd.choice("0123456789") for _ in range(n2))
+                    for s in (ip, "-" + ip, ip + "." + fp, "-" + ip + "." + fp, "0." + fp, "-0." + fp):
+                        if s.endswith("."):
+                            continue
+                        exp = json.loads(s)
+                        for doc in (s, "[" + s + "]", "[" + s + pad + "]", "[" + s + "," + s + pad + "]"):
+                            got = rjson.loads(doc)
+                            got = got if not isinstance(got, list) else got[0]
+                            assert type(got) is type(exp) and got == exp, doc
+        for bad in ("01", "-01", "00.5", "1.", "-", "-.5", "1.e5", "1e", "1e+", "01.5"):
+            for doc in ("[" + bad + pad + "]", "[" + bad + "]"):
+                with pytest.raises(ValueError):
+                    rjson.loads(doc)
+        assert rjson.loads("[1.5e3" + pad + "]") == [1500.0]
+        assert rjson.loads("[123456789012345.25" + pad + "]") == [123456789012345.25]
+
     def test_float_overflow_rejected(self):
         with pytest.raises(ValueError):
             rjson.loads("1e400")
