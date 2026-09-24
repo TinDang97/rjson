@@ -47,6 +47,18 @@ class TestStrings:
         s = "\x01" * 70000 + '"' * 70000
         assert both([s, s]) == ref([s, s])
 
+    def test_large_strings_with_tight_buffer(self):
+        # The buffer is sized from the previous result; >64 KiB strings are
+        # escaped in room-bounded pieces and reserve exactly near the end.
+        plain = "a" * 300000
+        for tail in ("", "\n" * 10, "\x01" * 70000, '"' * 200000):
+            for body in (plain, "\xe9" * 150000, "\u65e5" * 100000, "b\\" * 100000):
+                s = body + tail
+                for f in (rjson.dumps, rjson.dumps_bytes):
+                    f(plain)  # size hint = len(plain)
+                assert both(s) == ref(s)
+                assert both([plain, s]) == ref([plain, s])
+
     def test_all_control_chars(self):
         s = "".join(chr(i) for i in range(0x80))
         assert both(s) == ref(s)

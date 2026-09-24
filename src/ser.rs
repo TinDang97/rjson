@@ -1476,12 +1476,20 @@ impl Serializer {
     unsafe fn escape_chunked(&mut self, mut p: Cur, src: *const u8, len: usize) -> Cur {
         let mut off = 0;
         while off < len {
-            let n = (len - off).min(ESCAPE_CHUNK);
-            if self.room(p) < n * 6 + 32 {
-                // Reserve only what this chunk needs: reserving the 6x worst
-                // case near the end of a buffer sized from the previous
-                // result forced a doubling realloc (and a shrink) per call.
-                p = self.reserve(p, n + 5 * count_escapes(src.add(off), n) + 32);
+            let mut n = (len - off).min(ESCAPE_CHUNK);
+            let room = self.room(p);
+            if room < n * 6 + 32 {
+                // Escape as much as the room surely holds; only near the end
+                // reserve exactly what the rest needs. Reserving the 6x
+                // worst case in a buffer sized from the previous result
+                // forced a doubling realloc (and a shrink) per call, and
+                // counting every chunk's escapes cost an extra pass.
+                let safe = room.saturating_sub(32) / 6;
+                if safe >= 4096 {
+                    n = n.min(safe);
+                } else {
+                    p = self.reserve(p, n + 5 * count_escapes(src.add(off), n) + 32);
+                }
             }
             p = escape_body(p, src.add(off), n);
             off += n;
