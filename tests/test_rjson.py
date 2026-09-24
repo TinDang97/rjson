@@ -464,6 +464,20 @@ class TestLoadsParser:
             for doc in ("[" + bad + pad + "]", "[" + bad + "]"):
                 with pytest.raises(ValueError):
                     rjson.loads(doc)
+        for mant in ("1", "0", "-0", "12", "1.5", "-1.25", "123456789012345.6", "9007199254740993", "4.9406564584124654"):
+            for exp in ("e0", "E5", "e+5", "e-5", "e22", "e-22", "e23", "e308", "e-324", "e-400", "e0400", "e1234", "e-9999"):
+                s = mant + exp
+                exp_val = json.loads(s)
+                for doc in ("[" + s + pad + "]", "[" + s + "]"):
+                    if exp_val in (float("inf"), float("-inf")):
+                        with pytest.raises(ValueError):
+                            rjson.loads(doc)
+                    else:
+                        got = rjson.loads(doc)[0]
+                        assert got == exp_val and repr(got) == repr(exp_val), doc
+        for bad in ("1e", "1e+", "1e-", "1.5E", "1ee5", "1e5.5", "1e+-5"):
+            with pytest.raises(ValueError):
+                rjson.loads("[" + bad + pad + "]")
         assert rjson.loads("[1.5e3" + pad + "]") == [1500.0]
         assert rjson.loads("[123456789012345.25" + pad + "]") == [123456789012345.25]
 

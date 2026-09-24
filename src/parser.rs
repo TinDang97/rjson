@@ -741,56 +741,110 @@ impl<'a> Parser<'a> {
         self.parse_number_general(start)
     }
 
-    /// One-pass fast path for the common number shapes: `-?\d{1,15}` and
-    /// `-?\d{1,15}\.\d{1,15}` with at most 19 digits in total and no
-    /// exponent. Integer and fraction digits are each read as two 8-byte
-    /// words. Returns None (without consuming anything) for every other
-    /// shape, including all invalid ones, so the general parser keeps sole
-    /// ownership of error reporting and of the rare shapes.
+    /// Fast path for the common number shapes: `-?\d{1,15}(\.\d{1,15})?`
+    /// with at most 19 digits in total, optionally followed by an exponent
+    /// of at most 4 digits. Returns None (without consuming anything) for
+    /// every other shape, including all invalid ones, so the general parser
+    /// keeps sole ownership of error reporting and of the rare shapes.
     ///
-    /// SAFETY: `start + NUM_FAST_LOOKAHEAD <= self.buf.len()`.
+    /// The integer part uses a scalar loop: it is usually short and its
+    /// length predictable, and with predicted branches the rest of the
+    /// parse doesn't wait on a data-dependent digit count. The fraction is
+    /// read as two 8-byte words (branch-free over its length, which varies
+    /// unpredictably in real data).
+    ///
+    /// SAFETY: `start + NUM_FAST_LOOKAHEAD <= self.buf.len()`, and the input
+    /// is followed by a NUL byte (bounds the integer loop).
     #[inline(always)]
     unsafe fn parse_number_fast(&mut self, start: usize) -> Option<PResult<*mut ffi::PyObject>> {
         let p = self.buf.as_ptr();
         let neg = *p.add(start) == b'-';
         let i = start + neg as usize;
-        let (int, n1) = digits16(p.add(i))?;
-        // No digit, or a leading zero ("01"): the general parser reports it.
-        if n1 == 0 || (n1 > 1 && *p.add(i) == b'0') {
+        let mut j = i;
+        let mut int: u64 = 0;
+        loop {
+            let d = (*p.add(j)).wrapping_sub(b'0');
+            if d >= 10 {
+                break;
+            }
+            int = int.wrapping_mul(10).wrapping_add(d as u64);
+            j += 1;
+        }
+        let n1 = j - i;
+        // No digit, too long, or a leading zero ("01"): the general parser
+        // handles / reports it. From here on j <= start + 16.
+        if n1 == 0 || n1 > 15 || (n1 > 1 && *p.add(i) == b'0') {
             return None;
         }
-        let mut j = i + n1;
-        let c = *p.add(j);
+        let mut c = *p.add(j);
+        if c != b'.' && (c | 0x20) != b'e' {
+            self.pos = j;
+            // At most 15 digits: fits an i64.
+            let v = int as i64;
+            let r = ffi::PyLong_FromLongLong(if neg { -v } else { v });
+            return Some(if r.is_null() { self.err_oom() } else { Ok(r) });
+        }
+        let mut mant = int;
+        let mut n2 = 0;
         if c == b'.' {
-            let (frac, n2) = digits16(p.add(j + 1))?;
-            if n2 == 0 || n1 + n2 > 19 {
+            let (frac, n) = digits16(p.add(j + 1))?;
+            if n == 0 || n1 + n > 19 {
                 return None;
             }
-            j += 1 + n2;
-            if (*p.add(j) | 0x20) == b'e' {
-                return None;
-            }
-            // < 10^19: exact in a u64.
-            let mant = int * POW10_U64[n2] + frac;
-            let v = if mant <= (1u64 << 53) {
+            // <= 19 digits: exact in a u64.
+            mant = int * POW10_U64[n] + frac;
+            n2 = n;
+            j += 1 + n; // <= start + 32
+            c = *p.add(j);
+        }
+        let v = if (c | 0x20) != b'e' {
+            if mant <= (1u64 << 53) {
                 // Clinger: exact mantissa and power of ten (n2 <= 15 <= 22),
                 // so one correctly rounded division.
                 mant as f64 / POW10[n2]
             } else {
                 // n2 in 1..=15 and mant > 2^53: within the specialised range.
                 crate::lemire::compute_float64_small(-(n2 as i64), mant)
-            };
-            self.pos = j;
-            let r = ffi::PyFloat_FromDouble(if neg { -v } else { v });
-            return Some(if r.is_null() { self.err_oom() } else { Ok(r) });
-        }
-        if (c | 0x20) == b'e' {
-            return None;
-        }
+            }
+        } else {
+            // Exponent: optional sign and 1..=4 digits (reads <= start + 38).
+            j += 1;
+            let s = *p.add(j);
+            let eneg = s == b'-';
+            j += (s == b'-' || s == b'+') as usize;
+            let es = j;
+            let mut ev: i64 = 0;
+            while j - es < 4 {
+                let d = (*p.add(j)).wrapping_sub(b'0');
+                if d >= 10 {
+                    break;
+                }
+                ev = ev * 10 + d as i64;
+                j += 1;
+            }
+            if j == es || (*p.add(j)).wrapping_sub(b'0') < 10 {
+                return None;
+            }
+            let e = if eneg { -ev } else { ev } - n2 as i64;
+            if mant == 0 {
+                0.0
+            } else if mant <= (1u64 << 53) && (-22..=22).contains(&e) {
+                let m = mant as f64;
+                if e >= 0 {
+                    m * POW10[e as usize]
+                } else {
+                    m / POW10[(-e) as usize]
+                }
+            } else {
+                // Undecidable rounding or overflow: the general parser.
+                match crate::lemire::compute_float64(e, mant) {
+                    Some(v) if v.is_finite() => v,
+                    _ => return None,
+                }
+            }
+        };
         self.pos = j;
-        // At most 15 digits: fits an i64.
-        let v = int as i64;
-        let r = ffi::PyLong_FromLongLong(if neg { -v } else { v });
+        let r = ffi::PyFloat_FromDouble(if neg { -v } else { v });
         Some(if r.is_null() { self.err_oom() } else { Ok(r) })
     }
 
@@ -966,7 +1020,8 @@ impl<'a> Parser<'a> {
 }
 
 /// Bytes `parse_number_fast` may read from the start of the number: sign,
-/// 16 integer-digit bytes, '.', 16 fraction-digit bytes, and the byte after.
+/// up to 16 integer-digit bytes, '.', 16 fraction-digit bytes, and an
+/// exponent ('e', sign, 4 digits and the byte after).
 const NUM_FAST_LOOKAHEAD: usize = 40;
 
 /// Number of leading ASCII digits in the 8 bytes of `w` (little endian).
