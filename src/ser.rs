@@ -808,6 +808,63 @@ mod kscan {
         i != bytes && _mm_movemask_epi8(block16::<K>(p.add(bytes - 16))) != 0
     }
 
+    /// Copies `bytes >= 128` bytes of `K`-byte units from `src` to `dst`
+    /// (same kind) while checking them: one pass over the source instead of
+    /// a scan and a memcpy. Returns true (with `dst` partially written) if a
+    /// unit needs escaping. AVX2 only.
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn copy_scan_avx2<const K: usize>(
+        src: *const u8,
+        dst: *mut u8,
+        bytes: usize,
+    ) -> bool {
+        #[inline(always)]
+        unsafe fn esc8(v: __m256i) -> __m256i {
+            _mm256_or_si256(
+                _mm256_or_si256(
+                    _mm256_cmpeq_epi8(v, _mm256_set1_epi8(0x22)),
+                    _mm256_cmpeq_epi8(v, _mm256_set1_epi8(0x5c)),
+                ),
+                _mm256_cmpeq_epi8(_mm256_min_epu8(v, _mm256_set1_epi8(0x1f)), v),
+            )
+        }
+        #[inline(always)]
+        unsafe fn n2(a: __m256i, b: __m256i) -> __m256i {
+            let ff = _mm256_set1_epi16(0xff);
+            _mm256_packus_epi16(_mm256_min_epu16(a, ff), _mm256_min_epu16(b, ff))
+        }
+        #[inline(always)]
+        unsafe fn block<const K: usize>(s: *const u8, d: *mut u8) -> __m256i {
+            let a = super::load256(s);
+            let b = super::load256(s.add(32));
+            let c = super::load256(s.add(64));
+            let e = super::load256(s.add(96));
+            super::store256(d, a);
+            super::store256(d.add(32), b);
+            super::store256(d.add(64), c);
+            super::store256(d.add(96), e);
+            if K == 1 {
+                _mm256_or_si256(
+                    _mm256_or_si256(esc8(a), esc8(b)),
+                    _mm256_or_si256(esc8(c), esc8(e)),
+                )
+            } else if K == 2 {
+                _mm256_or_si256(esc8(n2(a, b)), esc8(n2(c, e)))
+            } else {
+                esc8(n2(_mm256_packus_epi32(a, b), _mm256_packus_epi32(c, e)))
+            }
+        }
+        let mut i = 0;
+        while i + 128 <= bytes {
+            if _mm256_movemask_epi8(block::<K>(src.add(i), dst.add(i))) != 0 {
+                return true;
+            }
+            i += 128;
+        }
+        i != bytes
+            && _mm256_movemask_epi8(block::<K>(src.add(bytes - 128), dst.add(bytes - 128))) != 0
+    }
+
     /// AVX2 version of the 64-byte loop, 128 bytes per check. `bytes >= 128`.
     #[target_feature(enable = "avx2")]
     unsafe fn scan_avx2<const K: usize>(p: *const u8, bytes: usize) -> bool {
@@ -1802,13 +1859,42 @@ impl Serializer {
             let d = ffi::PyUnicode_DATA(seg.obj);
             let kind = ffi::PyUnicode_KIND(seg.obj);
             let n = seg.nchars;
-            if check && kind_needs_escape(kind, d as *const u8, n) {
+            let bytes = n * kind as usize;
+            // Large same-kind strings are checked while being copied.
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
+            let fused =
+                check && std::mem::size_of::<D>() == kind as usize && bytes >= 512 && HAS_AVX2;
+            #[cfg(not(all(target_arch = "x86_64", target_feature = "sse4.1")))]
+            let fused = false;
+            if check && !fused && kind_needs_escape(kind, d as *const u8, n) {
                 *st = FillState { seg: i, o, prev };
                 return false;
             }
+            let before = FillState { seg: i, o, prev };
             widen(buf.add(prev), out.add(o), seg.pos - prev);
             o += seg.pos - prev;
             prev = seg.pos;
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
+            if fused {
+                let dst = out.add(o) as *mut u8;
+                let esc = match kind {
+                    ffi::PyUnicode_1BYTE_KIND => {
+                        kscan::copy_scan_avx2::<1>(d as *const u8, dst, bytes)
+                    }
+                    ffi::PyUnicode_2BYTE_KIND => {
+                        kscan::copy_scan_avx2::<2>(d as *const u8, dst, bytes)
+                    }
+                    _ => kscan::copy_scan_avx2::<4>(d as *const u8, dst, bytes),
+                };
+                if esc {
+                    // What was written from `before.o` on is rewritten later.
+                    *st = before;
+                    return false;
+                }
+                o += n;
+                i += 1;
+                continue;
+            }
             if seg.extra == 0 {
                 match kind {
                     ffi::PyUnicode_1BYTE_KIND => widen(d as *const u8, out.add(o), n),

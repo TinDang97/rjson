@@ -66,7 +66,7 @@ class TestStrings:
         # or whose sign bit is set (U+8000) must not be flagged, and a real
         # escape must be found at every position and length.
         lookalikes = "\u0122\u015c\u0100\u8000\U00010022\U0001005c\u2028"
-        for n in list(range(0, 70)) + [127, 128, 129, 255, 256, 257, 1000]:
+        for n in list(range(0, 70)) + [127, 128, 129, 255, 256, 257, 511, 512, 513, 600, 640, 641, 1000]:
             plain = (base + lookalikes) * (n // 8 + 1)
             plain = plain[:n] if n else base
             assert both([plain]) == ref([plain])
