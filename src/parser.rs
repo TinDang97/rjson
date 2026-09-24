@@ -4,26 +4,30 @@
 //!
 //! * Input is borrowed: `str` via `PyUnicode_AsUTF8AndSize` (zero-copy for
 //!   compact ASCII strings, cached UTF-8 otherwise), `bytes`/`bytearray`
-//!   directly, `memoryview` via `PyObject_GetBuffer`. Bytes input is validated
-//!   once up front with `simdutf8`.
+//!   directly; `memoryview` is copied. All of these are followed by a NUL
+//!   byte, so `peek()` needs no bounds check (see `parse`). Bytes input is
+//!   validated once up front with `simdutf8`.
 //! * Recursive descent with one value stack (`Vec<*mut PyObject>`, pooled
 //!   across calls). Array elements and object key/value pairs are pushed on
 //!   the stack; the container is created at the closing bracket with its
-//!   exact size (`PyList_New(n)` + memcpy of the item pointers). No
-//!   per-container heap allocation besides the Python object itself. On
+//!   exact size (lists: a `PyMem_Malloc` item array attached to an empty
+//!   list; dicts: `_PyDict_FromItems` on 3.13, else `PyDict_SetItem`). On
 //!   error, every reference still on the stack is released: no leaks.
 //! * Strings: SSE2 scan for `"`, `\\` and control characters that also
 //!   detects non-ASCII bytes. ASCII strings are `PyUnicode_New(len, 127)` plus
 //!   memcpy. Non-ASCII strings are decoded from UTF-8 straight into the final
-//!   UCS1/UCS2/UCS4 buffer (one SIMD counting pass, one write pass).
+//!   UCS1/UCS2/UCS4 buffer (one SIMD counting pass, one write pass). Strings
+//!   with escapes go through a 32-byte block kernel (SSE2 / AVX2 at runtime)
+//!   that handles every escape of a block from its bitmask.
 //! * Object keys go through a direct-mapped cache (`KEY_CACHE`) keyed on the
 //!   raw key bytes. Cached keys are reused across calls, carry a precomputed
 //!   hash, and are compared byte-for-byte on lookup (no false hits).
-//! * Numbers: SWAR digit parsing (8 digits per step). Integers up to 19
-//!   digits are machine ints; longer ones become exact Python ints via
-//!   `PyLong_FromString`. Floats use Clinger's exact fast path, then
-//!   Eisel-Lemire (`crate::lemire`), then `fast_float` for >19 digits; all
-//!   are correctly rounded.
+//! * Numbers: a fast path for `-?d{1,15}(.d{1,15})?(e[+-]?d{1,4})?` with
+//!   <= 19 digits (scalar integer part, 8-byte SWAR fraction words), Clinger's
+//!   exact path or Eisel-Lemire (`crate::lemire`); everything else, and every
+//!   error, goes through the general parser (big ints exact via
+//!   `PyLong_FromString`, >19-digit floats via `fast_float`). All floats are
+//!   correctly rounded.
 //! * Nesting depth is limited to 1024 (same as orjson).
 //! * On CPython 3.10/3.11 the cyclic GC is paused while parsing (see
 //!   `pause_gc`).
