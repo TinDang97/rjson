@@ -360,12 +360,12 @@ unsafe fn escape_avx512vl(mut dst: *mut u8, mut src: *const u8, len: usize) -> *
     let x20 = _mm256_set1_epi8(0x20);
     let end = src.add(len);
     while end.offset_from(src) >= 32 {
-        let v = _mm256_loadu_si256(src as *const __m256i);
+        let v = load256(src);
         let m = _mm256_cmpeq_epi8_mask(v, quote)
             | _mm256_cmpeq_epi8_mask(v, bslash)
             | _mm256_cmplt_epu8_mask(v, x20);
         if m == 0 {
-            _mm256_storeu_si256(dst as *mut __m256i, v);
+            store256(dst, v);
             dst = dst.add(32);
         } else {
             dst = escape_block(dst, src, 32, m);
@@ -381,13 +381,46 @@ unsafe fn escape_avx512vl(mut dst: *mut u8, mut src: *const u8, len: usize) -> *
             | _mm256_cmplt_epu8_mask(v, x20))
             & k;
         if m == 0 {
-            _mm256_storeu_si256(dst as *mut __m256i, v);
+            store256(dst, v);
             dst = dst.add(rem);
         } else {
             dst = escape_block(dst, src, rem, m);
         }
     }
     dst
+}
+
+/// Unaligned 32-byte load/store as single instructions. The crate is built
+/// for x86-64-v2, whose generic tuning makes LLVM split every unaligned
+/// 256-bit access into two 128-bit halves plus an insert/extract, even in
+/// functions compiled with AVX2/AVX-512 enabled; that doubled the uops of
+/// the escape loops.
+///
+/// Only called from functions with AVX enabled.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+#[inline]
+unsafe fn load256(p: *const u8) -> std::arch::x86_64::__m256i {
+    let v;
+    std::arch::asm!(
+        "vmovdqu {v}, ymmword ptr [{p}]",
+        p = in(reg) p,
+        v = out(ymm_reg) v,
+        options(pure, readonly, nostack, preserves_flags)
+    );
+    v
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+#[inline]
+unsafe fn store256(p: *mut u8, v: std::arch::x86_64::__m256i) {
+    std::arch::asm!(
+        "vmovdqu ymmword ptr [{p}], {v}",
+        p = in(reg) p,
+        v = in(ymm_reg) v,
+        options(nostack, preserves_flags)
+    );
 }
 
 #[inline(always)]
@@ -501,10 +534,10 @@ unsafe fn escape_long_impl<const AVX2: bool>(
 
     if AVX2 {
         while end.offset_from(src) >= 32 {
-            let v = _mm256_loadu_si256(src as *const __m256i);
+            let v = load256(src);
             let m = x86::mask32(v);
             if m == 0 {
-                _mm256_storeu_si256(dst as *mut __m256i, v);
+                store256(dst, v);
                 dst = dst.add(32);
             } else {
                 dst = escape_block(dst, src, 32, m);
