@@ -68,6 +68,37 @@ pub fn compute_float64(q: i64, mut w: u64) -> Option<f64> {
     Some(assemble(mantissa, power2))
 }
 
+/// `compute_float64` specialised for the parser's fast path: `q` in
+/// -22..=22 and `w != 0`, so the result is a normal finite number (between
+/// 1e-22 and 1.9e41) and the 128-bit product is always precise enough (the
+/// full algorithm only gives up outside q in -27..=55). This drops the range,
+/// subnormal, ambiguity and infinity checks of the general version.
+#[inline(always)]
+pub fn compute_float64_small(q: i64, mut w: u64) -> f64 {
+    debug_assert!((-22..=22).contains(&q) && w != 0);
+    let lz = w.leading_zeros();
+    w <<= lz;
+    let (lo, hi) = compute_product_approx(q, w, MANTISSA_EXPLICIT_BITS as usize + 3);
+    let upperbit = (hi >> 63) as i32;
+    let mut mantissa = hi >> (upperbit + 64 - MANTISSA_EXPLICIT_BITS - 3);
+    let mut power2 = power(q as i32) + upperbit - lz as i32 - MINIMUM_EXPONENT;
+    if lo <= 1
+        && (MIN_EXPONENT_ROUND_TO_EVEN..=MAX_EXPONENT_ROUND_TO_EVEN).contains(&q)
+        && mantissa & 3 == 1
+        && (mantissa << (upperbit + 64 - MANTISSA_EXPLICIT_BITS - 3)) == hi
+    {
+        mantissa &= !1_u64;
+    }
+    mantissa += mantissa & 1;
+    mantissa >>= 1;
+    if mantissa >= (2_u64 << MANTISSA_EXPLICIT_BITS) {
+        mantissa = 1_u64 << MANTISSA_EXPLICIT_BITS;
+        power2 += 1;
+    }
+    mantissa &= !(1_u64 << MANTISSA_EXPLICIT_BITS);
+    assemble(mantissa, power2)
+}
+
 #[inline(always)]
 fn assemble(mantissa: u64, power2: i32) -> f64 {
     f64::from_bits(mantissa | ((power2 as u64) << MANTISSA_EXPLICIT_BITS))

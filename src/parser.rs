@@ -803,7 +803,8 @@ impl<'a> Parser<'a> {
                 // so one correctly rounded division.
                 mant as f64 / POW10[n2]
             } else {
-                crate::lemire::compute_float64(-(n2 as i64), mant)?
+                // n2 in 1..=15 and mant > 2^53: within the specialised range.
+                crate::lemire::compute_float64_small(-(n2 as i64), mant)
             };
             self.pos = j;
             let r = ffi::PyFloat_FromDouble(if neg { -v } else { v });
