@@ -19,8 +19,11 @@ src/
   ser.rs      # dumps/dumps_bytes: direct serializer writing into the result object
 build.rs      # pyo3_build_config::use_pyo3_cfgs() -> Py_3_10/Py_3_12... cfgs
 tests/        # test_rjson.py (general + regressions), test_dumps.py (serializer)
-benches/corpus_benchmark.py   # reference benchmark vs orjson (ratio, same process)
-scripts/build_pgo.sh, scripts/pgo_train.py   # PGO wheel build
+benches/corpus_benchmark.py   # reference benchmark vs orjson (ratio, same process; --output-json)
+benches/fetch_corpus.sh       # download the corpora (sha256-pinned) into benches/data/
+benches/perf_gate.py          # compare base/head benchmark runs, fail on >5% geomean regression
+scripts/build_pgo.sh, scripts/pgo_train.py   # PGO wheel build; training is synthetic, disjoint from the benchmark
+.github/workflows/            # ci.yml (clippy + tests), wheels.yml (PGO wheels), perf.yml (perf gate, label `perf`)
 docs/PERFORMANCE_REVIEW.md    # review findings, results, ranked roadmap
 .cargo/config.toml            # x86-64-v2 target (never target-cpu=native)
 ```
@@ -54,6 +57,7 @@ docs/PERFORMANCE_REVIEW.md    # review findings, results, ranked roadmap
 - **Only take the ASCII fast path for exact, compact ASCII `str`**; subclasses are not compact.
 - **Check every C-API NULL return** and propagate the Python error; never return success with an exception set.
 - **Never set `target-cpu=native`** or global `+avx2`: use `#[target_feature]` + runtime detection.
+- **Never pass extra flags via `RUSTFLAGS`**: it silently replaces `.cargo/config.toml`'s rustflags (x86-64-v2). Use `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`, which cargo merges (the old PGO script built x86-64 v1 wheels this way).
 - Keep the module GIL-only (no free-threading declaration) until borrowed list/dict iteration is audited.
 - `panic = "abort"` is set: a panic kills the interpreter, so do not `unwrap` on Python-derived data.
 
@@ -63,9 +67,10 @@ docs/PERFORMANCE_REVIEW.md    # review findings, results, ranked roadmap
 uv venv .venv -p 3.11 && . .venv/bin/activate
 uv pip install maturin orjson pytest
 maturin develop --release          # build + install into the venv
-python -m pytest tests -q          # must pass on 3.11, 3.12, 3.13
-RJSON_BENCH_DATA=<corpus dir> python benches/corpus_benchmark.py
-scripts/build_pgo.sh python3.11    # PGO wheel -> target/wheels/
+python -m pytest tests -q          # must pass on 3.9-3.13 (CI runs all of them)
+benches/fetch_corpus.sh            # corpora -> benches/data/ (default --data)
+python benches/corpus_benchmark.py
+scripts/build_pgo.sh python3.11 python3.13   # PGO wheels -> target/wheels/
 cargo clippy --release
 ```
 

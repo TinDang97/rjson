@@ -39,7 +39,7 @@ Numbers are rjson time divided by orjson time on the same run, so **below 1.00 m
 | `dumps` of a 79 MB output, peak memory | 3N | ~1N (writes into the result object) | 1N |
 | memory held after a large `dumps` | 77 MB per thread, forever | 0 | 0 |
 | per-call time, `loads('1')` / `dumps(None)` | 41 / 55 ns | ~25 / ~35 ns | 67 / 53 ns |
-| Python versions verified | 3.11 only (3.12+ crashed) | 3.11, 3.12, 3.13 | 3.9–3.14 |
+| Python versions verified | 3.11 only (3.12+ crashed) | 3.8–3.13 x86_64; 3.9, 3.12 aarch64 (qemu); 3.14 needs PyO3 upgrade (§4) | 3.9–3.14 |
 
 ## 2. Correctness and safety defects found (all fixed on this branch)
 
@@ -86,7 +86,16 @@ Dropping serde for a hand-written single-pass parser took the geomean from 1.48 
 - **Raw `METH_O` entry points** replace `#[pyfunction]`, saving about 8 ns per call. They keep PyO3's trampoline so panics are caught and PyO3's GIL bookkeeping stays correct.
 - **No debug info in release builds**, which shrinks the `.so` about 10×.
 - **All ~3.6k lines of the old `src/` replaced** (including dead or slower code: `lib_backup.rs`, `extreme.rs`, `simd_parser.rs`/`loads_simd`, `bulk.rs`, `type_cache.rs`, the old escaper) by ~3.7k lines in five files. The serde, simd-json, ahash, smallvec and memchr dependencies went with it.
-- **`scripts/build_pgo.sh`** does instrument → train (`scripts/pgo_train.py`) → merge → rebuild. It is worth −7 to −10% on dumps. The training set overlaps the benchmark corpus, so the PGO numbers above are an upper bound.
+- **`scripts/build_pgo.sh`** does instrument → train (`scripts/pgo_train.py`) → merge → rebuild, one profile per interpreter. The "3.11 PGO" columns in §1 were built by an earlier version of the script that had two flaws: it trained on the benchmark itself (corpora and the benchmark's synthetic cases), and it passed the PGO flags through `RUSTFLAGS`, which silently replaced `.cargo/config.toml`'s `target-cpu=x86-64-v2`, so those wheels were baseline x86-64. Both are fixed: flags go through `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` (merged with the config), and training uses seeded synthetic documents of other shapes that read no corpus file.
+
+  **PGO gain, re-measured** (geomean of rjson/orjson over the 10 benchmark cases vs a plain release build; 5 interleaved rounds, median per case; CPython 3.13 / 3.11; noisy shared host, so ±2–3% on a geomean is noise):
+
+  | profile | loads | dumps | dumps_bytes |
+  |---|---|---|---|
+  | disjoint synthetic training (current) | −0.2% / −2.2% | −0.2% / −2.2% | −4.3% / −2.6% |
+  | old, trained on the benchmark | 0.0% / −3.7% | −3.7% / −3.8% | −5.0% / −4.6% |
+
+  PGO is worth about 0–4% once it cannot see the benchmark, not the −7 to −10% measured before. Most of the difference is on cases the old profile trained on verbatim: int_array `dumps` on 3.11 is 0.83× orjson with the old profile, 1.00× plain and 1.01× with the disjoint one. A first draft of the disjoint set, whose documents were almost all non-ASCII, made citm `dumps` (pure ASCII `str` output) 20% slower; the current set is mostly ASCII, like most real JSON.
 
 ## 4. Remaining gaps, ranked
 
@@ -98,8 +107,8 @@ Dropping serde for a hand-written single-pass parser took the geomean from 1.48 
 | 4 | `loads` float_array 1.13×, canada 1.02× | Parse integer and fraction digits in one pass; fast path for the `d+.d{1,15}` shape (≈150 → ≈90 instructions per float). | ~0.9× | low |
 | 5 | `loads` on 3.12+ is at parity on twitter/records/canada | `_PyDict_SetItem_KnownHash` with the cached key hash; inline key comparison instead of `memcmp`; for `str` input, parse non-ASCII directly from its internal form. | −5–10% | low |
 | 6 | `dumps` int_array 1.21× | Homogeneous-list loop with a per-item exact type check (the correct version of the old bulk path). | ~1.0× | low |
-| 7 | Release wheels without PGO | Build PGO wheels in CI for every Python version, and train on a separate workload so the benchmark isn't overfitted. | −7–10% | build-only |
-| 8 | Non-x86 | NEON kernels for escaping and whitespace. The SWAR fallback is untested on aarch64. | parity on Apple Silicon / Graviton | medium |
+| 7 | Release wheels without PGO | **Done** (`.github/workflows/wheels.yml`): PGO wheels per interpreter for manylinux2014/musllinux x86_64+aarch64, macOS arm64/x86_64, Windows, trained on a workload disjoint from the benchmark. | −0–4% (re-measured, §3) | build-only |
+| 8 | Non-x86 | The scalar/SWAR fallbacks now pass the full suite on aarch64 (3.9, 3.12 under qemu; CI runs native arm64 Linux and macOS). NEON kernels would replace the scalar loops at the four `#[cfg(target_arch = "x86_64")]` SSE2 sites in `parser.rs` (`skip_ws_slow`, `scan_special`, the escaped-string copy loop, `utf8_count_and_max`) and the SWAR `escape_long` / scalar `kind_needs_escape` in `ser.rs`; each maps to `vceqq_u8` + a narrowing-shift movemask. Needs native arm64 hardware to measure. | parity on Apple Silicon / Graviton | medium |
 
 ### Threading and I/O (researched, mostly not applicable)
 
@@ -110,10 +119,10 @@ Dropping serde for a hand-written single-pass parser took the geomean from 1.48 
 
 ### Platform and tooling
 
-- **PyO3 upgrade.** Upgrading from 0.24 is required for Python 3.14 support. It costs nothing per call now that the entry points are raw, but deprecated APIs (`to_object`/`into_py`) need replacing.
+- **PyO3 upgrade (0.24 → 0.29.2, the latest).** Required for 3.14: pyo3-ffi 0.24 refuses to build for Python > 3.13. A working prototype fixes 9 compile errors with ~25 changed lines plus a ~100-line `compat.rs`: `binaryfunc(module, arg, f)` became the `get_trampoline_function!(binaryfunc, f)` macro, `downcast_into` → `cast_into`, `GILOnceCell` → `PyOnceLock`, and `ffi::_PyBytes_Resize` / `ffi::_PyDict_NewPresized` are no longer re-exported (declare them `extern "C"`; both are still exported by 3.13 and 3.14). On 3.14, pyo3-ffi also drops `PyUnicode_IS_ASCII` / `IS_COMPACT` / `IS_COMPACT_ASCII` and turns `PyUnicode_KIND` / `PyUnicode_DATA` into out-of-line libpython calls, because the free-threaded build changed the `state` bitfield. The GIL build keeps the 3.12/3.13 layout, so the prototype reads the bitfield itself on 3.14 behind an import-time self-test against libpython's exported functions, and refuses to compile for `Py_GIL_DISABLED`. With it, all 212 tests pass on 3.8–3.14 (3.14.0rc2) and per-call time is unchanged (`loads('1')` ~36 ns, `dumps(None)` ~43 ns on 3.13, both versions). It touches `parser.rs` and `ser.rs` (7 and 12 lines, mostly mechanical `ffi::` → `crate::compat::`), so land it when those files are quiet.
 - **Free-threaded builds (3.13t/3.14t).** Keep the module marked as GIL-requiring. The serializer iterates lists and dicts through borrowed references and would need critical sections before it could drop that. orjson doesn't support free-threading either.
-- **CI.** Add a maturin-action matrix: 3.9–3.14; manylinux, musllinux, macOS universal2 and Windows; x86_64 and aarch64. Run pytest on every Python version; the 3.12 layout bug is why.
-- **Performance regression gate.** Compare against orjson in the same process, interleaved and median-of-N; fail CI if either geomean gets more than 5% worse than main. Also track per-call time on tiny documents, `.so` size, import time and peak memory.
+- **CI.** `.github/workflows/ci.yml`: clippy, then build + pytest on 3.9–3.13 (ubuntu x86_64), a no-AVX-512 variant, ubuntu-24.04-arm (3.9, 3.13), macos-14 and Windows (3.13). `cargo fmt --check` is not enforced yet (`entry.rs` and `parser.rs` are not rustfmt-clean) and clippy warnings are not fatal (two in `ser.rs`; five more dead-code/unused warnings only on aarch64). Add 3.14 with the PyO3 upgrade.
+- **Performance regression gate.** `.github/workflows/perf.yml` (PRs labelled `perf`, or manual): builds base and head in one job, runs `corpus_benchmark.py --output-json` for both, interleaved ×5 on 3.11 and 3.13, and `benches/perf_gate.py` fails if any geomean is more than 5% worse. Corpora come from `benches/fetch_corpus.sh` (sha256-pinned). On this dev host, two runs of the same build differ by 1–3% in geomean, so 5% with 5 rounds is about the floor. Still to add: per-call time on tiny documents, `.so` size, import time and peak memory.
 - **Fuzzing.** Add a differential fuzzer for `dumps` against `json.dumps` (the loads review already fuzzed `loads`), plus a random-structure fuzzer under ASan in CI.
 - **Feature parity.** orjson also offers indent, sorted keys, `default=`, and serialization of datetime, UUID, dataclasses and numpy. Add them behind `METH_FASTCALL|METH_KEYWORDS` with hand-parsed keyword names, resolving those types lazily so import time stays low.
 
@@ -130,8 +139,9 @@ uv venv .venv -p 3.11 && . .venv/bin/activate
 uv pip install maturin orjson pytest
 maturin develop --release
 python -m pytest tests -q                      # 212 tests
-# corpora: twitter/citm_catalog/canada from serde-rs/json-benchmark data/,
-# github.json from ijl/orjson data/github.json.xz
-RJSON_BENCH_DATA=/path/to/corpus python benches/corpus_benchmark.py
-RJSON_BENCH_DATA=/path/to/corpus scripts/build_pgo.sh python3.11   # PGO wheel -> target/wheels/
+benches/fetch_corpus.sh                        # corpora -> benches/data/ (sha256-pinned)
+python benches/corpus_benchmark.py [--output-json results.json]
+scripts/build_pgo.sh python3.11 python3.13     # PGO wheels -> target/wheels/
+python benches/perf_gate.py --base base-*.json --head head-*.json
+scripts/test_aarch64_qemu.sh 3.9 3.12          # aarch64 cross-build + tests under qemu
 ```

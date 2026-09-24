@@ -19,7 +19,7 @@ remaining gaps: [docs/PERFORMANCE_REVIEW.md](docs/PERFORMANCE_REVIEW.md).
 Largest gaps remaining: `dumps` → `str` on non-ASCII text (a `str` result must be built
 in UCS2/UCS4), `loads` of escape-heavy strings and float arrays.
 
-Reproduce with `python benches/corpus_benchmark.py` (see the review doc for the corpora).
+Reproduce with `benches/fetch_corpus.sh && python benches/corpus_benchmark.py`.
 
 ## API
 
@@ -40,7 +40,7 @@ rjson.dumps_bytes(obj)   # -> bytes (UTF-8; fastest, same type as orjson.dumps)
 
 ## Installation
 
-Ensure you have Rust and Python (3.11–3.13 tested) installed and that your Python interpreter matches your system architecture (e.g., arm64 for Apple Silicon Macs).
+Ensure you have Rust and Python (3.9–3.13) installed and that your Python interpreter matches your system architecture (e.g., arm64 for Apple Silicon Macs).
 
 1. **Install Maturin**:
 
@@ -115,7 +115,8 @@ if __name__ == "__main__":
 - `/tests/`: pytest suites
 - `/docs/`: performance review and roadmap
 - `/benches/`: benchmarks (`corpus_benchmark.py` is the reference)
-- `/scripts/build_pgo.sh`: PGO wheel build
+- `/scripts/build_pgo.sh`: PGO wheel build (training workload: `scripts/pgo_train.py`)
+- `/.github/workflows/`: CI, PGO release wheels, opt-in perf regression gate
 - `Cargo.toml`: Rust package manifest
 - `pyproject.toml`: Python project configuration
 
@@ -124,7 +125,8 @@ if __name__ == "__main__":
 - High-performance JSON serialization and deserialization
 - Rust-backed core for speed and safety
 - Pythonic API: `loads` and `dumps` functions
-- Tested on CPython 3.11, 3.12, 3.13
+- Tested in CI on CPython 3.9–3.13: Linux x86_64 and aarch64, macOS arm64, Windows x86_64
+  (3.14 needs a PyO3 upgrade)
 - Supports `dict`, `list`, `tuple`, `str`, `int`, `float`, `bool`, `None` and subclasses
 - Simple installation with Maturin
 
