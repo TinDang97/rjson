@@ -1175,8 +1175,11 @@ struct Out {
 }
 
 thread_local! {
-    /// Size of the previous output on this thread (capacity hint).
-    static LAST_LEN: Cell<usize> = const { Cell::new(0) };
+    /// Size of the previous output buffer on this thread, per mode ([bytes,
+    /// str]): the capacity hint. Kept per mode because a str-mode buffer
+    /// holds only the ASCII parts of non-ASCII output, so a shared hint made
+    /// alternating dumps/dumps_bytes calls grow and then shrink the buffer.
+    static LAST_LEN: [Cell<usize>; 2] = const { [Cell::new(0), Cell::new(0)] };
 }
 
 const MIN_CAPACITY: usize = 128;
@@ -1186,7 +1189,7 @@ const SHRINK_COPY_THRESHOLD: usize = 64 * 1024;
 
 impl Out {
     unsafe fn new(unicode: bool) -> Out {
-        let hint = LAST_LEN.with(|c| c.get());
+        let hint = LAST_LEN.with(|c| c[unicode as usize].get());
         // Headroom stays below the shrink threshold in `into_object`, so a
         // steady workload never shrinks (see there).
         let cap = (hint + hint / 16 + 16).max(MIN_CAPACITY);
@@ -1278,7 +1281,7 @@ impl Out {
 
     /// Shrinks to the written length and hands the object over.
     unsafe fn into_object(&mut self) -> *mut ffi::PyObject {
-        LAST_LEN.with(|c| c.set(self.len));
+        LAST_LEN.with(|c| c[self.unicode as usize].set(self.len));
         if self.cap > SHRINK_COPY_THRESHOLD && self.len < self.cap / 4 {
             let small = Self::alloc(self.len, self.unicode);
             ptr::copy_nonoverlapping(self.data, Self::data_of(small, self.unicode), self.len);
@@ -1317,7 +1320,7 @@ impl Out {
 impl Drop for Out {
     fn drop(&mut self) {
         if !self.obj.is_null() {
-            LAST_LEN.with(|c| c.set(self.len));
+            LAST_LEN.with(|c| c[self.unicode as usize].set(self.len));
             unsafe { ffi::Py_DECREF(self.obj) };
         }
     }
@@ -1960,7 +1963,7 @@ impl Serializer {
         }
         // Non-ASCII: the buffer holds the ASCII parts; build the final string
         // with the exact kind and drop the buffer.
-        LAST_LEN.with(|c| c.set(len));
+        LAST_LEN.with(|c| c[1].set(len));
         let mut total = len + self.seg_chars;
         let maxchar = match self.max_kind {
             1 => 0xff,
