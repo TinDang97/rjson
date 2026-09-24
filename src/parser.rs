@@ -58,25 +58,54 @@ const EMPTY_KEY: KeyEntry = KeyEntry { obj: ptr::null_mut(), len: 0, bytes: [0; 
 /// GIL-enabled CPython builds.
 static mut KEY_CACHE: [KeyEntry; KEY_CACHE_SIZE] = [EMPTY_KEY; KEY_CACHE_SIZE];
 
+/// Key-cache hash of the `n <= 64` key bytes at `p`: a folded 64x64->128
+/// multiply of the first and last 8 bytes (overlapping for n >= 8; zero
+/// padded below) and the length. It doesn't cover the middle of keys longer
+/// than 16 bytes; lookups compare all bytes, so a collision only costs a
+/// cache miss.
+///
+/// SAFETY: `p..p+KEY_CACHE_MAX_LEN` readable.
 #[inline(always)]
-fn hash_key(b: &[u8]) -> u64 {
-    // FxHash-style word-at-a-time hash; keys are <= 64 bytes.
-    const K: u64 = 0x517c_c1b7_2722_0a95;
-    let mut h: u64 = b.len() as u64;
-    let mut chunks = b.chunks_exact(8);
-    for c in &mut chunks {
-        let w = u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
-        h = (h.rotate_left(5) ^ w).wrapping_mul(K);
-    }
-    let rem = chunks.remainder();
-    if !rem.is_empty() {
-        let mut w = 0u64;
-        for (i, &x) in rem.iter().enumerate() {
-            w |= (x as u64) << (i * 8);
+unsafe fn hash_key(p: *const u8, n: usize) -> u64 {
+    let first = u64::from_le(ptr::read_unaligned(p as *const u64));
+    let (a, b) = if n >= 8 {
+        (first, u64::from_le(ptr::read_unaligned(p.add(n - 8) as *const u64)))
+    } else {
+        // Keep the low n bytes (n * 8 < 64).
+        (first & ((1u64 << (8 * n)) - 1), 0)
+    };
+    let x = ((a ^ 0x243F_6A88_85A3_08D3) as u128) * ((b ^ (n as u64) ^ 0x1319_8A2E_0370_7344) as u128);
+    (x as u64) ^ ((x >> 64) as u64)
+}
+
+/// Whether the `n <= 64` bytes at `a` and `b` are equal.
+///
+/// SAFETY: `a..a+64` and `b..b+64` readable.
+#[inline(always)]
+unsafe fn key_bytes_eq(a: *const u8, b: *const u8, n: usize) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::x86_64::*;
+        let mut off = 0;
+        loop {
+            let eq = _mm_movemask_epi8(_mm_cmpeq_epi8(
+                _mm_loadu_si128(a.add(off) as *const __m128i),
+                _mm_loadu_si128(b.add(off) as *const __m128i),
+            )) as u32;
+            if n - off <= 16 {
+                let need = (1u32 << (n - off)) - 1;
+                return eq & need == need;
+            }
+            if eq != 0xFFFF {
+                return false;
+            }
+            off += 16;
         }
-        h = (h.rotate_left(5) ^ w).wrapping_mul(K);
     }
-    h ^ (h >> 29)
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        std::slice::from_raw_parts(a, n) == std::slice::from_raw_parts(b, n)
+    }
 }
 
 // ============================================================================
@@ -454,12 +483,20 @@ impl<'a> Parser<'a> {
 
     #[inline(always)]
     fn cached_key(&mut self, start: usize, end: usize, non_ascii: bool) -> PResult<*mut ffi::PyObject> {
-        let raw = unsafe { self.buf.get_unchecked(start..end) };
+        let n = end - start;
         unsafe {
-            let idx = (hash_key(raw) as usize) & (KEY_CACHE_SIZE - 1);
+            // The hash and compare read 64 bytes from the key start; near the
+            // end of the input, work on a zero-padded copy instead (same hash).
+            let mut tmp = [0u8; KEY_CACHE_MAX_LEN];
+            let p = if start + KEY_CACHE_MAX_LEN <= self.buf.len() {
+                self.buf.as_ptr().add(start)
+            } else {
+                tmp.get_unchecked_mut(..n).copy_from_slice(self.buf.get_unchecked(start..end));
+                tmp.as_ptr()
+            };
+            let idx = (hash_key(p, n) as usize) & (KEY_CACHE_SIZE - 1);
             let entry = &mut *ptr::addr_of_mut!(KEY_CACHE[idx]);
-            if !entry.obj.is_null() && entry.len as usize == raw.len() && entry.bytes.get_unchecked(..raw.len()) == raw
-            {
+            if !entry.obj.is_null() && entry.len as usize == n && key_bytes_eq(entry.bytes.as_ptr(), p, n) {
                 ffi::Py_INCREF(entry.obj);
                 return Ok(entry.obj);
             }
@@ -471,8 +508,8 @@ impl<'a> Parser<'a> {
             let old = entry.obj;
             ffi::Py_INCREF(s);
             entry.obj = s;
-            entry.len = raw.len() as u32;
-            entry.bytes.get_unchecked_mut(..raw.len()).copy_from_slice(raw);
+            entry.len = n as u32;
+            entry.bytes.get_unchecked_mut(..n).copy_from_slice(self.buf.get_unchecked(start..end));
             if !old.is_null() {
                 ffi::Py_DECREF(old);
             }

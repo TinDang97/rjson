@@ -568,6 +568,27 @@ class TestLoadsParser:
         t = '{"a": 1, "b": {"c": [1]}, "a": 3, "b": 4}'
         assert list(rjson.loads(t).items()) == [("a", 3), ("b", 4)]
 
+    def test_key_cache_lengths_and_collisions(self):
+        # The key cache hashes only the first/last 8 bytes and the length, and
+        # compares 16 bytes at a time; keys that differ only in the middle, and
+        # keys near the end of the input (zero-padded copy), must stay distinct.
+        import json
+        keys = []
+        for n in range(0, 70):
+            keys.append("k" * n)
+            if n >= 17:
+                mid = n // 2
+                keys.append("k" * mid + "X" + "k" * (n - mid - 1))
+                keys.append("k" * mid + "é" + "k" * (n - mid - 2))
+        doc = {k: i for i, k in enumerate(keys)}
+        text = json.dumps(doc, ensure_ascii=False)
+        for _ in range(3):
+            assert rjson.loads(text) == doc
+            for k, i in doc.items():
+                small = json.dumps({k: i}, ensure_ascii=False)
+                assert rjson.loads(small) == {k: i}
+                assert rjson.loads(small.encode()) == {k: i}
+
     def test_long_and_escaped_keys(self):
         k = "k" * 100
         assert rjson.loads('{"%s": 1, "a\\nb": 2}' % k) == {k: 1, "a\nb": 2}
