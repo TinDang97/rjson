@@ -841,7 +841,7 @@ impl<'a> Parser<'a> {
             }
         };
         self.pos = j;
-        let r = ffi::PyFloat_FromDouble(if neg { -v } else { v });
+        let r = new_float(if neg { -v } else { v });
         Some(if r.is_null() { self.err_oom() } else { Ok(r) })
     }
 
@@ -1316,6 +1316,28 @@ const POW10: [f64; 23] = [
     1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20,
     1e21, 1e22,
 ];
+
+// ============================================================================
+// Float construction
+// ============================================================================
+
+/// `PyFloat_FromDouble` without the free-list probe: while building a
+/// document the float free list (<= 100 entries) is empty after the first
+/// few floats, so every call pays for the probe and then allocates anyway.
+/// Allocates with `PyObject_Malloc` and initialises with `PyObject_Init`,
+/// exactly as `PyFloat_FromDouble` does on a free-list miss (float_dealloc
+/// frees with `PyObject_Free` or recycles into the free list either way).
+/// `PyFloatObject` is public CPython (non-limited) API.
+#[inline(always)]
+unsafe fn new_float(v: f64) -> *mut ffi::PyObject {
+    let op = ffi::PyObject_Malloc(std::mem::size_of::<ffi::PyFloatObject>()) as *mut ffi::PyObject;
+    if op.is_null() {
+        return op;
+    }
+    ffi::PyObject_Init(op, ptr::addr_of_mut!(ffi::PyFloat_Type));
+    (*(op as *mut ffi::PyFloatObject)).ob_fval = v;
+    op
+}
 
 // ============================================================================
 // List construction
