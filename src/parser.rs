@@ -107,7 +107,9 @@ fn raise_decode_error(py: Python<'_>, msg: &str, doc: &[u8], pos: usize) -> PyEr
     let full = format!("JSON parsing error: {msg}");
     let ty = JSON_DECODE_ERROR.get_or_try_init(py, || -> PyResult<Py<PyType>> {
         let m = py.import("json")?;
-        Ok(m.getattr("JSONDecodeError")?.downcast_into::<PyType>()?.unbind())
+        Ok(m.getattr("JSONDecodeError")?
+            .downcast_into::<PyType>()?
+            .unbind())
     });
     match ty {
         Ok(ty) => PyErr::from_type(ty.bind(py).clone(), (full, doc_str.into_owned(), char_pos)),
@@ -234,7 +236,11 @@ impl<'a> Parser<'a> {
     }
 
     #[inline(always)]
-    fn parse_literal(&mut self, lit: &'static [u8], obj: *mut ffi::PyObject) -> PResult<*mut ffi::PyObject> {
+    fn parse_literal(
+        &mut self,
+        lit: &'static [u8],
+        obj: *mut ffi::PyObject,
+    ) -> PResult<*mut ffi::PyObject> {
         let end = self.pos + lit.len();
         if end <= self.buf.len() && &self.buf[self.pos..end] == lit {
             self.pos = end;
@@ -483,12 +489,20 @@ impl<'a> Parser<'a> {
     }
 
     #[inline(always)]
-    fn cached_key(&mut self, start: usize, end: usize, non_ascii: bool) -> PResult<*mut ffi::PyObject> {
+    fn cached_key(
+        &mut self,
+        start: usize,
+        end: usize,
+        non_ascii: bool,
+    ) -> PResult<*mut ffi::PyObject> {
         let raw = unsafe { self.buf.get_unchecked(start..end) };
         unsafe {
             let idx = (hash_key(raw) as usize) & (KEY_CACHE_SIZE - 1);
             let entry = &mut *ptr::addr_of_mut!(KEY_CACHE[idx]);
-            if !entry.obj.is_null() && entry.len as usize == raw.len() && entry.bytes.get_unchecked(..raw.len()) == raw {
+            if !entry.obj.is_null()
+                && entry.len as usize == raw.len()
+                && entry.bytes.get_unchecked(..raw.len()) == raw
+            {
                 ffi::Py_INCREF(entry.obj);
                 return Ok(entry.obj);
             }
@@ -501,7 +515,10 @@ impl<'a> Parser<'a> {
             ffi::Py_INCREF(s);
             entry.obj = s;
             entry.len = raw.len() as u32;
-            entry.bytes.get_unchecked_mut(..raw.len()).copy_from_slice(raw);
+            entry
+                .bytes
+                .get_unchecked_mut(..raw.len())
+                .copy_from_slice(raw);
             if !old.is_null() {
                 ffi::Py_DECREF(old);
             }
@@ -534,111 +551,54 @@ impl<'a> Parser<'a> {
         self.err("out of memory", self.pos)
     }
 
-    /// Slow path for strings containing escapes. `start` is the first content
-    /// byte, `i` the first backslash. Decodes in a single pass into the
-    /// scratch buffer and leaves `self.pos` after the closing quote. Plain runs
-    /// are copied with unconditional 16-byte stores and the output is written
-    /// through a raw pointer; capacity is checked once per escape / chunk.
+    /// Strings containing escapes. `start` is the first content byte, `i`
+    /// the first backslash, `non_ascii` whether `buf[start..i]` has non-ASCII
+    /// bytes. Decodes into the scratch buffer and leaves `self.pos` after the
+    /// closing quote.
+    ///
+    /// The bulk of the string goes through a block kernel (`escape_block_*`)
+    /// that classifies 32 input bytes at once and then handles every escape
+    /// in the block from the bitmask. Anything unusual (control characters,
+    /// invalid escapes, lone surrogates) and the last few bytes of the input
+    /// are handed to the scalar `parse_escaped_tail`, which also produces
+    /// every error message, so error semantics don't depend on the kernel.
     #[inline(never)]
-    fn parse_escaped(&mut self, start: usize, mut i: usize, mut non_ascii: bool) -> PResult<*mut ffi::PyObject> {
+    fn parse_escaped(
+        &mut self,
+        start: usize,
+        i: usize,
+        non_ascii: bool,
+    ) -> PResult<*mut ffi::PyObject> {
         let buf = self.buf;
-        let len = buf.len();
         let mut out = std::mem::take(&mut self.scratch);
         out.clear();
+        out.reserve(i - start + 256);
         out.extend_from_slice(&buf[start..i]);
-        let mut olen = out.len();
-        let r = 'outer: loop {
-            // Invariant: buf[i] == b'\\'. Ensure room for the escape (<= 4
-            // bytes) plus one 16-byte store.
-            if out.capacity() - olen < 32 {
-                unsafe { out.set_len(olen) };
-                out.reserve(64);
-            }
-            let c = self.peek_at(i + 1);
-            let e = ESCAPE_LUT[c as usize];
-            if e != 0 {
-                unsafe { *out.as_mut_ptr().add(olen) = e };
-                olen += 1;
-                i += 2;
-            } else if c == b'u' {
-                unsafe { out.set_len(olen) };
-                match self.unescape_unicode(i, &mut out) {
-                    Ok((next, na)) => {
-                        i = next;
-                        non_ascii |= na;
-                        olen = out.len();
-                    }
-                    Err(e) => break Err(e),
-                }
-            } else if i + 1 >= len {
-                break self.err("unexpected end of data in string", i + 1);
-            } else {
-                break self.err("invalid escaped sequence in string", i);
-            }
-            // Copy the following plain run.
-            #[cfg(target_arch = "x86_64")]
-            unsafe {
-                use std::arch::x86_64::*;
-                let quote = _mm_set1_epi8(b'"' as i8);
-                let bslash = _mm_set1_epi8(b'\\' as i8);
-                let ctl = _mm_set1_epi8(0x1F);
-                while i + 16 <= len {
-                    let v = _mm_loadu_si128(buf.as_ptr().add(i) as *const __m128i);
-                    _mm_storeu_si128(out.as_mut_ptr().add(olen) as *mut __m128i, v);
-                    let m = _mm_or_si128(
-                        _mm_or_si128(_mm_cmpeq_epi8(v, quote), _mm_cmpeq_epi8(v, bslash)),
-                        _mm_cmpeq_epi8(_mm_max_epu8(v, ctl), ctl),
-                    );
-                    let mask = _mm_movemask_epi8(m) as u32;
-                    let hi = _mm_movemask_epi8(v) as u32;
-                    if mask == 0 {
-                        non_ascii |= hi != 0;
-                        olen += 16;
-                        i += 16;
-                        if out.capacity() - olen < 32 {
-                            out.set_len(olen);
-                            out.reserve(64);
-                        }
-                        continue;
-                    }
-                    let tz = mask.trailing_zeros();
-                    non_ascii |= (hi & ((1u32 << tz) - 1)) != 0;
-                    olen += tz as usize;
-                    i += tz as usize;
-                    match *buf.get_unchecked(i) {
-                        b'"' => {
-                            self.pos = i + 1;
-                            break 'outer Ok(());
-                        }
-                        b'\\' => continue 'outer,
-                        _ => break 'outer self.err_string(i),
-                    }
-                }
-            }
-            // Scalar tail near the end of the input (and non-x86 path).
-            unsafe { out.set_len(olen) };
-            while i < len {
-                let b = unsafe { *buf.get_unchecked(i) };
-                if b == b'"' || b == b'\\' || b < 0x20 {
-                    break;
-                }
-                non_ascii |= b >= 0x80;
-                out.push(b);
-                i += 1;
-            }
-            olen = out.len();
-            match self.peek_at(i) {
-                b'"' => {
-                    self.pos = i + 1;
-                    break Ok(());
-                }
-                b'\\' => {}
-                _ => break self.err_string(i),
-            }
+        let mut st = EscState {
+            i,
+            olen: out.len(),
+            non_ascii,
+            done: false,
         };
-        unsafe { out.set_len(olen) };
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            // SAFETY: the kernels only read `buf` while `i + ESC_LOOKAHEAD <=
+            // buf.len()` and reserve their worst-case output first.
+            if std::arch::is_x86_feature_detected!("avx2") {
+                escape_blocks_avx2(buf, &mut out, &mut st);
+            } else {
+                escape_blocks_sse2(buf, &mut out, &mut st);
+            }
+        }
+        unsafe { out.set_len(st.olen) };
+        let r = if st.done {
+            self.pos = st.i;
+            Ok(())
+        } else {
+            self.parse_escaped_tail(st.i, &mut out, &mut st.non_ascii)
+        };
         let res = r.and_then(|()| {
-            let s = if !non_ascii {
+            let s = if !st.non_ascii {
                 unsafe { new_ascii_str(&out) }
             } else {
                 if !self.utf8_valid && std::str::from_utf8(&out).is_err() {
@@ -653,6 +613,48 @@ impl<'a> Parser<'a> {
         });
         self.scratch = out;
         res
+    }
+
+    /// Scalar continuation of `parse_escaped` from input position `i` (any
+    /// byte); `out` holds everything decoded so far. Used near the end of the
+    /// input and for every error.
+    #[inline(never)]
+    fn parse_escaped_tail(
+        &mut self,
+        mut i: usize,
+        out: &mut Vec<u8>,
+        non_ascii: &mut bool,
+    ) -> PResult<()> {
+        let buf = self.buf;
+        let len = buf.len();
+        loop {
+            let b = self.peek_at(i);
+            if b == b'"' {
+                self.pos = i + 1;
+                return Ok(());
+            } else if b == b'\\' {
+                let c = self.peek_at(i + 1);
+                let e = ESCAPE_LUT[c as usize];
+                if e != 0 {
+                    out.push(e);
+                    i += 2;
+                } else if c == b'u' {
+                    let (next, na) = self.unescape_unicode(i, out)?;
+                    i = next;
+                    *non_ascii |= na;
+                } else if i + 1 >= len {
+                    return self.err("unexpected end of data in string", i + 1);
+                } else {
+                    return self.err("invalid escaped sequence in string", i);
+                }
+            } else if b < 0x20 {
+                return self.err_string(i);
+            } else {
+                *non_ascii |= b >= 0x80;
+                out.push(b);
+                i += 1;
+            }
+        }
     }
 
     #[inline(never)]
@@ -711,8 +713,10 @@ impl<'a> Parser<'a> {
         // SWAR: classify 8 bytes at once and convert the leading digit run
         // (1..=8 digits) with a single multiply-based conversion.
         while *i + 8 <= len {
-            let w = u64::from_le(unsafe { ptr::read_unaligned(buf.as_ptr().add(*i) as *const u64) });
-            let non_digit = (w.wrapping_sub(0x3030_3030_3030_3030) | w.wrapping_add(0x4646_4646_4646_4646))
+            let w =
+                u64::from_le(unsafe { ptr::read_unaligned(buf.as_ptr().add(*i) as *const u64) });
+            let non_digit = (w.wrapping_sub(0x3030_3030_3030_3030)
+                | w.wrapping_add(0x4646_4646_4646_4646))
                 & 0x8080_8080_8080_8080;
             if non_digit == 0 {
                 if *nd + 8 > 19 {
@@ -796,7 +800,14 @@ impl<'a> Parser<'a> {
     }
 
     #[inline(always)]
-    fn parse_float_tail(&mut self, start: usize, mut i: usize, neg: bool, mut mant: u64, mut nd: usize) -> PResult<*mut ffi::PyObject> {
+    fn parse_float_tail(
+        &mut self,
+        start: usize,
+        mut i: usize,
+        neg: bool,
+        mut mant: u64,
+        mut nd: usize,
+    ) -> PResult<*mut ffi::PyObject> {
         let buf = self.buf;
         let len = buf.len();
         let mut frac_digits: i64 = 0;
@@ -852,7 +863,11 @@ impl<'a> Parser<'a> {
             // single correctly rounded operation.
             let v = if mant <= (1u64 << 53) && (-22..=22).contains(&e) {
                 let m = mant as f64;
-                Some(if e >= 0 { m * POW10[e as usize] } else { m / POW10[(-e) as usize] })
+                Some(if e >= 0 {
+                    m * POW10[e as usize]
+                } else {
+                    m / POW10[(-e) as usize]
+                })
             } else {
                 crate::lemire::compute_float64(e, mant)
             };
@@ -897,7 +912,10 @@ impl<'a> Parser<'a> {
         let s = &self.buf[start..end];
         // 20 digits may still fit in a u64.
         if s.len() == 20 && s[0] != b'-' {
-            if let Some(v) = std::str::from_utf8(s).ok().and_then(|t| t.parse::<u64>().ok()) {
+            if let Some(v) = std::str::from_utf8(s)
+                .ok()
+                .and_then(|t| t.parse::<u64>().ok())
+            {
                 return unsafe { Ok(ffi::PyLong_FromUnsignedLongLong(v)) };
             }
         }
@@ -905,7 +923,11 @@ impl<'a> Parser<'a> {
         tmp.extend_from_slice(s);
         tmp.push(0);
         unsafe {
-            let r = ffi::PyLong_FromString(tmp.as_ptr() as *const std::os::raw::c_char, ptr::null_mut(), 10);
+            let r = ffi::PyLong_FromString(
+                tmp.as_ptr() as *const std::os::raw::c_char,
+                ptr::null_mut(),
+                10,
+            );
             if r.is_null() {
                 ffi::PyErr_Clear();
                 return self.err("invalid number", start);
@@ -942,7 +964,241 @@ const ESCAPE_LUT: [u8; 256] = {
     t
 };
 
-const POW10_U64: [u64; 9] = [1, 10, 100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000, 100_000_000];
+/// Hex digit value, or 0xFF for a non-hex byte.
+const HEX_LUT: [u8; 256] = {
+    let mut t = [0xFFu8; 256];
+    let mut c = 0;
+    while c < 10 {
+        t[b'0' as usize + c] = c as u8;
+        c += 1;
+    }
+    let mut c = 0;
+    while c < 6 {
+        t[b'a' as usize + c] = 10 + c as u8;
+        t[b'A' as usize + c] = 10 + c as u8;
+        c += 1;
+    }
+    t
+};
+
+/// State shared between `parse_escaped`, the block kernels and the scalar
+/// tail. `i`: next unprocessed input byte; `olen`: bytes written to the
+/// output (the Vec's len is not kept in sync inside the kernels); `done`: the
+/// closing quote was consumed and `i` is the position after it.
+struct EscState {
+    i: usize,
+    olen: usize,
+    non_ascii: bool,
+    done: bool,
+}
+
+/// Input bytes a kernel block may touch past its start: the 32-byte block,
+/// a 32-byte copy starting anywhere in it, and a surrogate-pair escape
+/// (12 bytes) starting at its last byte.
+#[cfg(target_arch = "x86_64")]
+const ESC_LOOKAHEAD: usize = 64;
+/// Output bytes a kernel block may write past `olen` at block start: up to
+/// 32 + 12 bytes consumed (output never exceeds input), plus a 32-byte copy
+/// overrun or a 4-byte store.
+#[cfg(target_arch = "x86_64")]
+const ESC_OUT_MARGIN: usize = 96;
+
+/// Decode `\uXXXX` (or a surrogate pair) at `p` into UTF-8 at `o`, writing 4
+/// bytes unconditionally. Returns (input consumed, output bytes), or None
+/// for anything invalid (the scalar tail then reports the error).
+///
+/// SAFETY: `p..p+12` readable, `o..o+4` writable.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn unescape_u_fast(p: *const u8, o: *mut u8) -> Option<(usize, usize)> {
+    #[inline(always)]
+    unsafe fn hex4(p: *const u8) -> Option<u32> {
+        let a = HEX_LUT[*p as usize] as u32;
+        let b = HEX_LUT[*p.add(1) as usize] as u32;
+        let c = HEX_LUT[*p.add(2) as usize] as u32;
+        let d = HEX_LUT[*p.add(3) as usize] as u32;
+        if (a | b | c | d) & 0xF0 != 0 {
+            return None;
+        }
+        Some((a << 12) | (b << 8) | (c << 4) | d)
+    }
+    let cp = hex4(p.add(2))?;
+    let (w, n, consumed): (u32, usize, usize) = if cp < 0x80 {
+        (cp, 1, 6)
+    } else if cp < 0x800 {
+        (0x80C0 | (cp >> 6) | ((cp & 0x3F) << 8), 2, 6)
+    } else if !(0xD800..0xE000).contains(&cp) {
+        (
+            0x8080E0 | (cp >> 12) | (((cp >> 6) & 0x3F) << 8) | ((cp & 0x3F) << 16),
+            3,
+            6,
+        )
+    } else {
+        if cp >= 0xDC00 || *p.add(6) != b'\\' || *p.add(7) != b'u' {
+            return None;
+        }
+        let lo = hex4(p.add(8))?;
+        if !(0xDC00..0xE000).contains(&lo) {
+            return None;
+        }
+        let c = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+        (
+            0x808080F0
+                | (c >> 18)
+                | (((c >> 12) & 0x3F) << 8)
+                | (((c >> 6) & 0x3F) << 16)
+                | ((c & 0x3F) << 24),
+            4,
+            12,
+        )
+    };
+    ptr::write_unaligned(o as *mut u32, w.to_le());
+    Some((consumed, n))
+}
+
+/// Block kernel body shared by the SSE2 and AVX2 variants. `masks(src)`
+/// returns (special, high) bitmasks for the 32 bytes at `src`: bit k of
+/// `special` is set for `"`, `\\` or a control character at `src+k`, bit k of
+/// `high` for a byte >= 0x80. `copy32(src, dst)` copies 32 bytes.
+///
+/// Every escape in a block is handled from its bitmask without re-scanning:
+/// the plain run before it is copied with one unconditional 32-byte copy.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+unsafe fn escape_blocks<M, C>(buf: &[u8], out: &mut Vec<u8>, st: &mut EscState, masks: M, copy32: C)
+where
+    M: Fn(*const u8) -> (u32, u32),
+    C: Fn(*const u8, *mut u8),
+{
+    let len = buf.len();
+    let mut i = st.i;
+    let mut olen = st.olen;
+    let mut high_acc = 0u32;
+    'blocks: while i + ESC_LOOKAHEAD <= len {
+        if out.capacity() - olen < ESC_OUT_MARGIN {
+            out.set_len(olen);
+            out.reserve(ESC_OUT_MARGIN * 4);
+        }
+        let src = buf.as_ptr().add(i);
+        let dst = out.as_mut_ptr();
+        let (special, high) = masks(src);
+        let special = special as u64;
+        let mut p = 0usize; // offset of the next unprocessed byte in the block
+        loop {
+            let rem = special & (!0u64 << p);
+            if rem == 0 {
+                if p < 32 {
+                    copy32(src.add(p), dst.add(olen));
+                    olen += 32 - p;
+                    p = 32;
+                }
+                high_acc |= high;
+                i += p;
+                continue 'blocks;
+            }
+            let t = rem.trailing_zeros() as usize;
+            copy32(src.add(p), dst.add(olen));
+            olen += t - p;
+            let c = *src.add(t);
+            if c == b'\\' {
+                let e = ESCAPE_LUT[*src.add(t + 1) as usize];
+                if e != 0 {
+                    *dst.add(olen) = e;
+                    olen += 1;
+                    p = t + 2;
+                    continue;
+                }
+                if *src.add(t + 1) == b'u' {
+                    if let Some((consumed, n)) = unescape_u_fast(src.add(t), dst.add(olen)) {
+                        st.non_ascii |= n > 1;
+                        olen += n;
+                        p = t + consumed;
+                        continue;
+                    }
+                }
+            } else if c == b'"' {
+                high_acc |= high & ((1u32 << t) - 1);
+                st.i = i + t + 1;
+                st.done = true;
+                break 'blocks;
+            }
+            // Invalid escape or control character: the scalar tail reports it.
+            high_acc |= high & ((1u32 << t) - 1);
+            i += t;
+            break 'blocks;
+        }
+    }
+    if !st.done {
+        st.i = i;
+    }
+    st.olen = olen;
+    st.non_ascii |= high_acc != 0;
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(never)]
+unsafe fn escape_blocks_sse2(buf: &[u8], out: &mut Vec<u8>, st: &mut EscState) {
+    use std::arch::x86_64::*;
+    let quote = _mm_set1_epi8(b'"' as i8);
+    let bslash = _mm_set1_epi8(b'\\' as i8);
+    let ctl = _mm_set1_epi8(0x1F);
+    let masks = |src: *const u8| {
+        let m16 = |v: __m128i| {
+            let m = _mm_or_si128(
+                _mm_or_si128(_mm_cmpeq_epi8(v, quote), _mm_cmpeq_epi8(v, bslash)),
+                _mm_cmpeq_epi8(_mm_max_epu8(v, ctl), ctl),
+            );
+            (_mm_movemask_epi8(m) as u32, _mm_movemask_epi8(v) as u32)
+        };
+        let (s0, h0) = m16(_mm_loadu_si128(src as *const __m128i));
+        let (s1, h1) = m16(_mm_loadu_si128(src.add(16) as *const __m128i));
+        (s0 | (s1 << 16), h0 | (h1 << 16))
+    };
+    let copy32 = |s: *const u8, d: *mut u8| {
+        let a = _mm_loadu_si128(s as *const __m128i);
+        let b = _mm_loadu_si128(s.add(16) as *const __m128i);
+        _mm_storeu_si128(d as *mut __m128i, a);
+        _mm_storeu_si128(d.add(16) as *mut __m128i, b);
+    };
+    escape_blocks(buf, out, st, masks, copy32)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline(never)]
+#[target_feature(enable = "avx2")]
+unsafe fn escape_blocks_avx2(buf: &[u8], out: &mut Vec<u8>, st: &mut EscState) {
+    use std::arch::x86_64::*;
+    let quote = _mm256_set1_epi8(b'"' as i8);
+    let bslash = _mm256_set1_epi8(b'\\' as i8);
+    let ctl = _mm256_set1_epi8(0x1F);
+    let masks = |src: *const u8| {
+        let v = _mm256_loadu_si256(src as *const __m256i);
+        let m = _mm256_or_si256(
+            _mm256_or_si256(_mm256_cmpeq_epi8(v, quote), _mm256_cmpeq_epi8(v, bslash)),
+            _mm256_cmpeq_epi8(_mm256_max_epu8(v, ctl), ctl),
+        );
+        (
+            _mm256_movemask_epi8(m) as u32,
+            _mm256_movemask_epi8(v) as u32,
+        )
+    };
+    let copy32 = |s: *const u8, d: *mut u8| {
+        _mm256_storeu_si256(d as *mut __m256i, _mm256_loadu_si256(s as *const __m256i));
+    };
+    escape_blocks(buf, out, st, masks, copy32)
+}
+
+const POW10_U64: [u64; 9] = [
+    1,
+    10,
+    100,
+    1_000,
+    10_000,
+    100_000,
+    1_000_000,
+    10_000_000,
+    100_000_000,
+];
 
 const POW10: [f64; 23] = [
     1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
@@ -958,7 +1214,11 @@ const POW10: [f64; 23] = [
 unsafe fn new_ascii_str(bytes: &[u8]) -> *mut ffi::PyObject {
     let s = ffi::PyUnicode_New(bytes.len() as ffi::Py_ssize_t, 127);
     if !s.is_null() {
-        ptr::copy_nonoverlapping(bytes.as_ptr(), ffi::PyUnicode_DATA(s) as *mut u8, bytes.len());
+        ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            ffi::PyUnicode_DATA(s) as *mut u8,
+            bytes.len(),
+        );
     }
     s
 }
@@ -1073,7 +1333,9 @@ unsafe fn decode_into<T: CodeUnit>(bytes: &[u8], mut out: *mut T) {
             i += 2;
             c
         } else if b0 < 0xF0 {
-            let c = ((b0 & 0x0F) << 12) | ((*p.add(i + 1) as u32 & 0x3F) << 6) | (*p.add(i + 2) as u32 & 0x3F);
+            let c = ((b0 & 0x0F) << 12)
+                | ((*p.add(i + 1) as u32 & 0x3F) << 6)
+                | (*p.add(i + 2) as u32 & 0x3F);
             i += 3;
             c
         } else {
@@ -1115,9 +1377,19 @@ pub(crate) unsafe fn get_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyRes
         let p = ffi::PyUnicode_AsUTF8AndSize(obj, &mut size);
         if p.is_null() {
             ffi::PyErr_Clear();
-            return Err(raise_decode_error(py, "str is not valid UTF-8: surrogates not allowed", b"", 0));
+            return Err(raise_decode_error(
+                py,
+                "str is not valid UTF-8: surrogates not allowed",
+                b"",
+                0,
+            ));
         }
-        return Ok(Input { ptr: p as *const u8, len: size as usize, utf8_valid: true, view: None });
+        return Ok(Input {
+            ptr: p as *const u8,
+            len: size as usize,
+            utf8_valid: true,
+            view: None,
+        });
     }
     if ffi::PyBytes_Check(obj) != 0 {
         return Ok(Input {
@@ -1147,7 +1419,9 @@ pub(crate) unsafe fn get_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyRes
         }
         return Err(PyErr::fetch(py));
     }
-    Err(PyTypeError::new_err("Input must be bytes, bytearray, memoryview, or str"))
+    Err(PyTypeError::new_err(
+        "Input must be bytes, bytearray, memoryview, or str",
+    ))
 }
 
 #[inline(always)]

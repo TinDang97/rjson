@@ -465,6 +465,37 @@ class TestLoadsParser:
             with pytest.raises(ValueError):
                 rjson.loads(bad)
 
+    def test_escapes_at_every_block_offset(self):
+        # The escape kernel works on 32-byte blocks with escapes straddling
+        # block ends; the last 64 bytes of the input go through a scalar tail.
+        import json
+        escs = ['\\n', '\\"', '\\\\', '\\/', '\\u00e9', '\\u4e2d', '\\ud83d\\ude00', '\\u0041']
+        for esc in escs:
+            for pre in range(0, 70):
+                for trail in (0, 3, 40, 100):
+                    doc = '["' + "a" * pre + esc + "b" * 5 + esc + '"' + " " * trail + "]"
+                    assert rjson.loads(doc) == json.loads(doc), doc
+                    assert rjson.loads(doc.encode()) == json.loads(doc), doc
+        long = "x\\n" * 200 + "é\\t" * 50 + "\\u20ac" * 30
+        assert rjson.loads('"' + long + '"') == json.loads('"' + long + '"')
+
+    def test_escape_errors_at_every_block_offset(self):
+        import json
+        # (bad sequence, offset of the reported position within it)
+        cases = [('\\x', 0), ('\\ud800', 0), ('\\udc00', 0), ('\\ud800\\u0041', 6), ('\\u12G4', 4),
+                 ('\x01', 0), ('\\uD83D\\uDBFF', 6)]
+        for bad, off in cases:
+            for pre in range(0, 70, 3):
+                doc = '["' + "a\\n" * (pre // 3) + "a" * (pre % 3) + bad + "tail" * 20 + '"]'
+                with pytest.raises(json.JSONDecodeError) as e:
+                    rjson.loads(doc)
+                # The error points at the offending escape / character.
+                assert e.value.pos == doc.index(bad) + off, (doc, e.value.pos)
+        with pytest.raises(ValueError, match="end of data"):
+            rjson.loads('"' + "a\\n" * 40)
+        with pytest.raises(ValueError):
+            rjson.loads(b'"' + b"a\\n" * 40 + b"\xff" + b"b" * 80 + b'"')
+
     def test_control_characters_rejected(self):
         with pytest.raises(ValueError):
             rjson.loads('"a\tb"')
