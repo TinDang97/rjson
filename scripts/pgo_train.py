@@ -51,7 +51,7 @@ def main():
     all_cases = cases()
     print(f"pgo_train: {len(all_cases)} cases from {DATA}", file=sys.stderr)
     for obj, text in all_cases.values():
-        for fn, arg in ((rjson.loads, text), (rjson.dumps, obj)):
+        for fn, arg in ((rjson.loads, text), (rjson.dumps, obj), (rjson.dumps_bytes, obj)):
             end = time.perf_counter() + SECONDS_PER_CASE
             while time.perf_counter() < end:
                 fn(arg)

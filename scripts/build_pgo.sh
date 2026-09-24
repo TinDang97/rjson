@@ -18,6 +18,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT"  # maturin builds the crate in the current directory
 PY=${1:-python3}
 TARGET=$(rustc -vV | sed -n 's/^host: //p')
 PROFDATA=$(find "$(rustc --print sysroot)" -name llvm-profdata -type f | head -1)

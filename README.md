@@ -2,68 +2,45 @@
 
 **High-performance JSON library for Python, backed by Rust**
 
-Fast, safe, and production-ready JSON serialization/deserialization with Rust's performance and safety guarantees.
+Fast JSON serialization/deserialization for Python, implemented in Rust against the CPython C API.
 
 ## Performance
 
-**9x faster** serialization (dumps) than Python's stdlib `json` ⚡
-**Production-ready** with comprehensive test coverage ✅
-**Beats orjson** on boolean arrays! 🏆
+rjson time ÷ orjson time on standard corpora (**< 1.00 = rjson faster**), geomean over
+twitter, citm_catalog, canada, github and six synthetic cases. Full table, methodology and
+remaining gaps: [docs/PERFORMANCE_REVIEW.md](docs/PERFORMANCE_REVIEW.md).
 
+| | CPython 3.11 (PGO build) | CPython 3.13 (plain release build) |
+|---|---|---|
+| `loads` | **0.74x** | **0.98x** |
+| `dumps_bytes` (→ `bytes`, like `orjson.dumps`) | **0.82x** | **0.94x** |
+| `dumps` (→ `str`) | 1.00x | 1.11x |
+
+Largest gaps remaining: `dumps` → `str` on non-ASCII text (a `str` result must be built
+in UCS2/UCS4), `loads` of escape-heavy strings and float arrays.
+
+Reproduce with `python benches/corpus_benchmark.py` (see the review doc for the corpora).
+
+## API
+
+```python
+import rjson
+
+rjson.loads(data)        # data: str | bytes | bytearray | memoryview
+rjson.dumps(obj)         # -> str   (compact, non-ASCII kept as-is)
+rjson.dumps_bytes(obj)   # -> bytes (UTF-8; fastest, same type as orjson.dumps)
 ```
-Benchmark (100 repetitions, 110k element dataset):
 
-Serialization (dumps):
-  rjson:  0.152s  →  9.0x faster than json
-  orjson: 0.058s  →  2.6x faster than rjson
-  json:   1.38s
-
-Deserialization (loads):
-  rjson:  0.672s  →  0.95x vs json (competitive)
-  orjson: 0.301s  →  2.2x faster than rjson
-  json:   0.638s
-```
-
-**Homogeneous array performance** (10k elements):
-```
-Boolean arrays:  12x faster than json, 34% FASTER than orjson! 🏆
-Float arrays:    2.5x faster than json,  5% slower than orjson
-Integer arrays:  5.4x faster than json, 2.3x slower than orjson
-String arrays:   2.4x faster than json, 4.5x slower than orjson
-```
-
-### Why rjson?
-
-✅ **9x faster serialization** - Excellent for write-heavy workloads
-✅ **Bulk array optimizations** - Exceptional performance on homogeneous arrays
-✅ **Beats orjson** - For boolean arrays, we're 34% faster! 🏆
-✅ **Safe Rust implementation** - Memory safety guaranteed, no segfaults
-✅ **Production-ready** - 57 comprehensive tests covering edge cases
-✅ **Drop-in replacement** - Compatible with stdlib json API
-
-### When to use rjson
-
-- **✅ Use rjson** if you serialize (dumps) JSON frequently, especially with homogeneous arrays
-- **✅ Use rjson** if you want Rust safety with excellent performance
-- **✅ Use rjson** if you work with boolean or numeric arrays (near or better than orjson!)
-- **⚠️ Consider orjson** if you need maximum performance on string-heavy workloads
-- **⚠️ Stick with json** if performance isn't critical and you prefer stdlib
-
-### Optimization Highlights
-
-- **Phase 6A: Bulk array processing** - C-layer bulk operations for homogeneous arrays (NEW!)
-- **Type pointer caching**: O(1) type detection via pointer comparison
-- **Integer object caching**: Pre-allocated Python ints for [-256, 256]
-- **Custom serializer**: Direct buffer writing with itoa/ryu for fast number formatting
-- **C API integration**: Direct PyDict_Next for efficient dict iteration
-- **Zero-copy strings**: Minimal allocations in hot paths
-- **SIMD string operations**: memchr for fast escape detection
-
-**See [OPTIMIZATION_JOURNEY.md](OPTIMIZATION_JOURNEY.md)** and **[ARCHITECTURE_ANALYSIS.md](ARCHITECTURE_ANALYSIS.md)** for complete details
+- Supported types: `dict` (str keys), `list`, `tuple`, `str`, `int` (arbitrary size),
+  `float`, `bool`, `None`, and their subclasses.
+- Errors: `json.JSONDecodeError` (a `ValueError`) from `loads`; `ValueError`/`TypeError`
+  from `dumps` for unsupported types, non-str keys, NaN/Infinity, nesting deeper than
+  254 (e.g. circular references).
+- `loads` nesting limit: 1024. Integers beyond 64 bits are parsed exactly.
 
 ## Installation
 
-Ensure you have Rust and Python (3.7+) installed and that your Python interpreter matches your system architecture (e.g., arm64 for Apple Silicon Macs).
+Ensure you have Rust and Python (3.11–3.13 tested) installed and that your Python interpreter matches your system architecture (e.g., arm64 for Apple Silicon Macs).
 
 1. **Install Maturin**:
 
@@ -132,12 +109,13 @@ if __name__ == "__main__":
 
 ## Project Structure
 
-- `/src/`: Rust core implementation
-- `/python/rjson/`: Python interface code
-- `/tests/`: Test suites
-- `/examples/`: Example usage
-- `/docs/`: Documentation
-- `/benches/`: Performance benchmarks
+- `/src/parser.rs`, `/src/lemire.rs`: `loads`
+- `/src/ser.rs`: `dumps` / `dumps_bytes`
+- `/src/entry.rs`: raw C-API entry points, module registration
+- `/tests/`: pytest suites
+- `/docs/`: performance review and roadmap
+- `/benches/`: benchmarks (`corpus_benchmark.py` is the reference)
+- `/scripts/build_pgo.sh`: PGO wheel build
 - `Cargo.toml`: Rust package manifest
 - `pyproject.toml`: Python project configuration
 
@@ -146,8 +124,8 @@ if __name__ == "__main__":
 - High-performance JSON serialization and deserialization
 - Rust-backed core for speed and safety
 - Pythonic API: `loads` and `dumps` functions
-- Compatible with Python 3.7+
-- Supports basic Python types: `dict`, `list`, `str`, `int`, `float`, `bool`, `None`
+- Tested on CPython 3.11, 3.12, 3.13
+- Supports `dict`, `list`, `tuple`, `str`, `int`, `float`, `bool`, `None` and subclasses
 - Simple installation with Maturin
 
 ## Status
