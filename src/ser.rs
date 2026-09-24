@@ -311,7 +311,9 @@ unsafe fn escape_scalar(mut dst: *mut u8, src: *const u8, len: usize) -> *mut u8
 }
 
 /// Escapes `len` bytes of UTF-8 at `src` into `dst` (no quotes).
-/// `dst` must have room for `len * 6 + 32` bytes. Returns the new end.
+/// `dst` must have room for the escaped length plus 32 bytes of slack for
+/// blind vector stores (so `len * 6 + 32` always suffices, and
+/// `len + 5 * count_escapes(..) + 32` exactly). Returns the new end.
 #[inline(always)]
 unsafe fn escape_body(dst: *mut u8, src: *const u8, len: usize) -> *mut u8 {
     #[cfg(target_arch = "x86_64")]
@@ -856,7 +858,9 @@ const SHRINK_COPY_THRESHOLD: usize = 64 * 1024;
 impl Out {
     unsafe fn new(unicode: bool) -> Out {
         let hint = LAST_LEN.with(|c| c.get());
-        let cap = (hint + hint / 8 + 16).max(MIN_CAPACITY);
+        // Headroom stays below the shrink threshold in `into_object`, so a
+        // steady workload never shrinks (see there).
+        let cap = (hint + hint / 16 + 16).max(MIN_CAPACITY);
         let obj = Self::alloc(cap, unicode);
         Out {
             obj,
@@ -954,6 +958,14 @@ impl Out {
             return small;
         }
         let slack = self.cap - self.len;
+        // Only give memory back when more than 1/8 is unused. Shrinking by
+        // the usual headroom made every call free a block smaller than the
+        // next call's request; glibc's dynamic mmap threshold only rises to
+        // the size of freed blocks, so above ~128 KiB every call then got a
+        // fresh mmap and page-faulted its whole output (e.g. 390 faults and
+        // +300% for a 1.6 MB result, depending on what the process had
+        // freed before). Freeing blocks of the requested size keeps them on
+        // the heap.
         if slack > 4096 && slack > self.len / 8 {
             self.resize(self.len);
         } else if slack != 0 {
@@ -1269,7 +1281,12 @@ impl Serializer {
         let mut off = 0;
         while off < len {
             let n = (len - off).min(ESCAPE_CHUNK);
-            p = self.reserve(p, n * 6 + 32);
+            if self.room(p) < n * 6 + 32 {
+                // Reserve only what this chunk needs: reserving the 6x worst
+                // case near the end of a buffer sized from the previous
+                // result forced a doubling realloc (and a shrink) per call.
+                p = self.reserve(p, n + 5 * count_escapes(src.add(off), n) + 32);
+            }
             p = escape_body(p, src.add(off), n);
             off += n;
         }

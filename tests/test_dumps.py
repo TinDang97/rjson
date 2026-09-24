@@ -247,3 +247,20 @@ class TestOutputBuffer:
     def test_top_level_scalars(self):
         for obj in (None, True, False, 0, -5, "", "x", "é", [], {}, ()):
             assert both(obj) == ref(obj)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="glibc malloc behaviour")
+def test_large_output_does_not_refault_every_call():
+    # Shrinking each result by the capacity headroom made every call free a
+    # block smaller than the next request, so glibc kept serving it with a
+    # fresh mmap and every call page-faulted its whole output.
+    import resource
+
+    s = "\U0001f600" * 400000  # 1.6 MB of UTF-8
+    for _ in range(5):
+        rjson.dumps_bytes(s)
+    before = resource.getrusage(resource.RUSAGE_SELF).ru_minflt
+    for _ in range(20):
+        assert len(rjson.dumps_bytes(s)) == 1600002
+    faults = (resource.getrusage(resource.RUSAGE_SELF).ru_minflt - before) / 20
+    assert faults < 100  # was ~390 (one per 4 KiB page)
