@@ -556,6 +556,18 @@ class TestLoadsParser:
     def test_duplicate_keys_last_wins(self):
         assert rjson.loads('{"a": 1, "b": 2, "a": 3}') == {"a": 3, "b": 2}
 
+    def test_dict_memory_matches_json(self):
+        # Small dicts must keep the compact str-only key table; on 3.13
+        # (_PyDict_FromItems) presized large dicts keep it too.
+        import json
+        import sys
+        sizes = (0, 1, 5, 6, 8) if sys.version_info[:2] != (3, 13) else (0, 1, 5, 6, 8, 9, 12, 100, 1000)
+        for n in sizes:
+            t = json.dumps({"k%d" % i: i for i in range(n)})
+            assert sys.getsizeof(rjson.loads(t)) <= sys.getsizeof(json.loads(t)), n
+        t = '{"a": 1, "b": {"c": [1]}, "a": 3, "b": 4}'
+        assert list(rjson.loads(t).items()) == [("a", 3), ("b", 4)]
+
     def test_long_and_escaped_keys(self):
         k = "k" * 100
         assert rjson.loads('{"%s": 1, "a\\nb": 2}' % k) == {k: 1, "a\nb": 2}

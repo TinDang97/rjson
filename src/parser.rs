@@ -354,34 +354,12 @@ impl<'a> Parser<'a> {
         self.depth -= 1;
         let n = (self.stack.len() - base) / 2;
         unsafe {
-            // `_PyDict_NewPresized` (3.11-3.13) always allocates the generic
-            // key table (24-byte entries with a stored hash) instead of the
-            // str-only table (16-byte entries) that `PyDict_New` + str-key
-            // inserts produce. Presizing small dicts made 8-key records ~80
-            // bytes larger each (and later lookups take the generic path), so
-            // only presize large dicts where avoiding repeated resizes pays
-            // (same threshold as orjson).
-            let dict = if n > 8 { ffi::_PyDict_NewPresized(n as ffi::Py_ssize_t) } else { ffi::PyDict_New() };
-            if dict.is_null() {
-                return self.err("out of memory", self.pos);
-            }
-            // Insert in document order so the last duplicate key wins.
-            let mut i = base;
-            let end = self.stack.len();
-            let mut failed = false;
-            while i < end {
-                let k = *self.stack.get_unchecked(i);
-                let v = *self.stack.get_unchecked(i + 1);
-                if !failed && ffi::PyDict_SetItem(dict, k, v) != 0 {
-                    failed = true;
-                }
-                ffi::Py_DECREF(k);
-                ffi::Py_DECREF(v);
-                i += 2;
+            let dict = build_dict(self.stack.as_ptr().add(base), n);
+            for &o in self.stack.get_unchecked(base..) {
+                ffi::Py_DECREF(o);
             }
             self.stack.set_len(base);
-            if failed {
-                ffi::Py_DECREF(dict);
+            if dict.is_null() {
                 ffi::PyErr_Clear();
                 return self.err("failed to insert into dict", self.pos);
             }
@@ -1249,6 +1227,57 @@ const POW10: [f64; 23] = [
     1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20,
     1e21, 1e22,
 ];
+
+// ============================================================================
+// Dict construction
+// ============================================================================
+
+#[cfg(all(Py_3_13, not(Py_3_14)))]
+extern "C" {
+    /// CPython 3.13 (exported, private; the BUILD_MAP implementation):
+    /// builds a dict from `length` keys/values read at the given strides,
+    /// inserting in order (the last duplicate wins) without stealing
+    /// references. It presizes the table and, when every key is an exact
+    /// str, uses the compact str-only key table.
+    fn _PyDict_FromItems(
+        keys: *const *mut ffi::PyObject,
+        keys_offset: ffi::Py_ssize_t,
+        values: *const *mut ffi::PyObject,
+        values_offset: ffi::Py_ssize_t,
+        length: ffi::Py_ssize_t,
+    ) -> *mut ffi::PyObject;
+}
+
+/// Build a dict from `n` interleaved key/value pairs at `kv` (borrowed; the
+/// caller releases them). Returns NULL with an exception set on failure.
+#[cfg(all(Py_3_13, not(Py_3_14)))]
+#[inline(always)]
+unsafe fn build_dict(kv: *const *mut ffi::PyObject, n: usize) -> *mut ffi::PyObject {
+    _PyDict_FromItems(kv, 2, kv.add(1), 2, n as ffi::Py_ssize_t)
+}
+
+#[cfg(not(all(Py_3_13, not(Py_3_14))))]
+#[inline(always)]
+unsafe fn build_dict(kv: *const *mut ffi::PyObject, n: usize) -> *mut ffi::PyObject {
+    // `_PyDict_NewPresized` (3.11-3.13) always allocates the generic key
+    // table (24-byte entries with a stored hash) instead of the str-only
+    // table (16-byte entries) that `PyDict_New` + str-key inserts produce.
+    // Presizing small dicts made 8-key records ~80 bytes larger each (and
+    // later lookups take the generic path), so only presize large dicts
+    // where avoiding repeated resizes pays (same threshold as orjson).
+    let dict = if n > 8 { ffi::_PyDict_NewPresized(n as ffi::Py_ssize_t) } else { ffi::PyDict_New() };
+    if dict.is_null() {
+        return dict;
+    }
+    // Insert in document order so the last duplicate key wins.
+    for i in 0..n {
+        if ffi::PyDict_SetItem(dict, *kv.add(2 * i), *kv.add(2 * i + 1)) != 0 {
+            ffi::Py_DECREF(dict);
+            return ptr::null_mut();
+        }
+    }
+    dict
+}
 
 // ============================================================================
 // String construction
