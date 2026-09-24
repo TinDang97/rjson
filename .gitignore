@@ -12,3 +12,6 @@ target/
 
 # Claude Code agent worktrees
 .claude/worktrees/
+
+# Benchmark corpora (benches/fetch_corpus.sh)
+benches/data/

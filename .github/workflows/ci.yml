@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+# Never set RUSTFLAGS in this workflow: it replaces the target rustflags from
+# .cargo/config.toml (target-cpu=x86-64-v2). Extra flags go into
+# CARGO_TARGET_<TRIPLE>_RUSTFLAGS, which cargo merges with the config.
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Warnings are reported, not fatal (two pre-existing clippy warnings in
+      # src/ser.rs). `cargo fmt --check` is not enforced yet: src/entry.rs and
+      # src/parser.rs are not rustfmt-clean.
+      - run: cargo clippy --release --all-targets
+        env:
+          PYO3_PYTHON: python
+
+  test:
+    name: test ${{ matrix.os }} py${{ matrix.python }}${{ matrix.no-avx512 && ' no-avx512' || '' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # PyO3 0.24 supports CPython 3.7-3.13; 3.14 needs a PyO3 upgrade
+        # (see docs/PERFORMANCE_REVIEW.md, "Platform and tooling").
+        os: [ubuntu-24.04]
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        include:
+          # SSE2/AVX2 escape kernels (the runner may have AVX-512).
+          - os: ubuntu-24.04
+            python: "3.13"
+            no-avx512: true
+          # aarch64: SWAR / non-x86 fallback paths, pre- and post-3.12 layouts.
+          - os: ubuntu-24.04-arm
+            python: "3.9"
+          - os: ubuntu-24.04-arm
+            python: "3.13"
+          - os: macos-14
+            python: "3.13"
+          - os: windows-2022
+            python: "3.13"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: py${{ matrix.python }}-${{ matrix.no-avx512 && 'no-avx512' || 'default' }}
+      - name: Disable the AVX-512 kernel
+        if: matrix.no-avx512
+        run: echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=--cfg rjson_no_avx512" >> "$GITHUB_ENV"
+      - run: python -m pip install "maturin>=1.8,<2" pytest
+      - name: Build wheel
+        run: maturin build --release -i python -o dist
+      - name: Install wheel
+        run: python -m pip install --no-index --find-links dist rjson
+      - run: python -m pytest tests -q

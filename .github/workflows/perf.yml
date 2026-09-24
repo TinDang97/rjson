@@ -1,0 +1,90 @@
+name: Perf gate
+
+# Opt-in performance regression gate (shared runners are noisy): runs on PRs
+# labelled `perf` and on manual dispatch. Builds base and head (plain release,
+# no PGO) in the same job, runs benches/corpus_benchmark.py for both,
+# interleaved, and fails if any rjson/orjson geomean (loads, dumps,
+# dumps_bytes) is more than 5% worse than base. The ratio to orjson, timed in
+# the same process, cancels most runner speed drift.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Base ref to compare against
+        default: main
+      threshold:
+        description: Max allowed geomean regression (0.05 = 5%)
+        default: "0.05"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  ROUNDS: "5"
+
+jobs:
+  perf:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'perf')
+    name: perf py${{ matrix.python }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 exercises the GC-pause path, 3.13 the like-for-like parser.
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: head
+      - uses: actions/checkout@v5
+        with:
+          path: base
+          ref: ${{ github.event.pull_request.base.sha || inputs.base }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Fetch corpora (sha256-pinned)
+        run: head/benches/fetch_corpus.sh "$RUNNER_TEMP/corpus"
+      - name: Build base and head
+        run: |
+          python -m pip install "maturin>=1.8,<2"
+          for side in base head; do
+            (cd "$side" && maturin build --release -i python -o "$RUNNER_TEMP/wheels-$side")
+            python -m venv "$RUNNER_TEMP/venv-$side"
+            "$RUNNER_TEMP/venv-$side/bin/python" -m pip install -q orjson
+            "$RUNNER_TEMP/venv-$side/bin/python" -m pip install -q --no-index --find-links "$RUNNER_TEMP/wheels-$side" rjson
+          done
+      - name: Benchmark (interleaved)
+        run: |
+          mkdir -p results
+          for r in $(seq 1 "$ROUNDS"); do
+            # alternate which side goes first to cancel ordering effects
+            if (( r % 2 )); then order="base head"; else order="head base"; fi
+            for side in $order; do
+              # head's benchmark script for both sides (base may predate --output-json)
+              "$RUNNER_TEMP/venv-$side/bin/python" head/benches/corpus_benchmark.py \
+                --data "$RUNNER_TEMP/corpus" --repeat 5 --output-json "results/$side-$r.json" > /dev/null
+            done
+          done
+      - name: Compare
+        run: |
+          python head/benches/perf_gate.py --threshold "${THRESHOLD}" \
+            --base results/base-*.json --head results/head-*.json
+        env:
+          THRESHOLD: ${{ inputs.threshold || '0.05' }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-results-py${{ matrix.python }}
+          path: results/
