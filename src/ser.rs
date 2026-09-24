@@ -45,8 +45,7 @@ pub const RECURSION_LIMIT: u32 = 254;
 /// reservation (6x) stays bounded.
 const ESCAPE_CHUNK: usize = 64 * 1024;
 
-/// Error kind; kept payload-free (1 byte) so `Result<(), SerError>` is
-/// returned in a register. Payloads live in `Serializer::err_*`.
+/// Error kind; payloads live in `Serializer::err_*`.
 #[derive(Clone, Copy)]
 pub enum SerError {
     NonFinite,
@@ -58,7 +57,6 @@ pub enum SerError {
     PyErrSet,
 }
 
-type SerResult = Result<(), SerError>;
 
 // ---------------------------------------------------------------------------
 // Type objects
@@ -892,12 +890,6 @@ impl Out {
         self.cap = cap;
     }
 
-    unsafe fn extend_from_slice(&mut self, s: &[u8]) {
-        self.reserve(s.len());
-        ptr::copy_nonoverlapping(s.as_ptr(), self.data.add(self.len), s.len());
-        self.len += s.len();
-    }
-
     /// Shrinks to the written length and hands the object over.
     unsafe fn into_object(&mut self) -> *mut ffi::PyObject {
         LAST_LEN.with(|c| c.set(self.len));
@@ -941,6 +933,29 @@ impl Drop for Out {
 // Serializer
 // ---------------------------------------------------------------------------
 
+/// Write cursor: the current end of the output. Writers take the cursor and
+/// return the advanced one, so it lives in a register instead of being stored
+/// to and reloaded from `Out::len` for every value (that store->load round
+/// trip was on the critical path of every element). `Out::len` is only
+/// synced at growth, segment and finish points.
+type Cur = *mut u8;
+/// A cursor, or null on error (the error kind is in `Serializer::err`).
+/// A `Result<Cur, SerError>` does not fit in one register, and LLVM spilled
+/// it to the stack where paths merge, putting a store->load back on the
+/// per-value critical path.
+type CurResult = Cur;
+
+/// `?` for `CurResult`.
+macro_rules! tri {
+    ($e:expr) => {{
+        let p = $e;
+        if p.is_null() {
+            return p;
+        }
+        p
+    }};
+}
+
 pub struct Serializer {
     buf: Out,
     depth: u32,
@@ -949,6 +964,7 @@ pub struct Serializer {
     segs: Vec<Segment>,
     max_kind: u32,
     seg_chars: usize,
+    err: SerError,
     err_obj: *mut ffi::PyObject,
     err_float: f64,
 }
@@ -970,97 +986,119 @@ impl Serializer {
             segs: Vec::new(),
             max_kind: 1,
             seg_chars: 0,
+            err: SerError::PyErrSet,
             err_obj: ptr::null_mut(),
             err_float: 0.0,
         }
     }
 
+    #[cold]
+    #[inline(never)]
+    fn fail(&mut self, e: SerError) -> Cur {
+        self.err = e;
+        ptr::null_mut()
+    }
+
     #[inline(always)]
-    fn reserve(&mut self, n: usize) {
-        if self.buf.capacity() - self.buf.len() < n {
-            self.grow(n);
+    fn start(&mut self) -> Cur {
+        unsafe { self.buf.as_mut_ptr().add(self.buf.len()) }
+    }
+
+    /// Bytes available after `p`.
+    #[inline(always)]
+    fn room(&self, p: Cur) -> usize {
+        self.buf.as_ptr() as usize + self.buf.capacity() - p as usize
+    }
+
+    /// Offset of `p` in the buffer.
+    #[inline(always)]
+    fn offset(&self, p: Cur) -> usize {
+        p as usize - self.buf.as_ptr() as usize
+    }
+
+    /// Records `p` as the end of the written output.
+    #[inline(always)]
+    unsafe fn sync(&mut self, p: Cur) {
+        let len = self.offset(p);
+        self.buf.set_len(len);
+    }
+
+    /// Ensures `n` writable bytes at the returned cursor (which moves if the
+    /// buffer is reallocated).
+    #[inline(always)]
+    unsafe fn reserve(&mut self, p: Cur, n: usize) -> Cur {
+        if self.room(p) < n {
+            return self.grow(p, n);
         }
+        p
     }
 
     #[cold]
     #[inline(never)]
-    fn grow(&mut self, n: usize) {
+    unsafe fn grow(&mut self, p: Cur, n: usize) -> Cur {
+        self.sync(p);
         self.buf.reserve(n);
+        self.start()
     }
 
     #[inline(always)]
-    fn end_ptr(&mut self) -> *mut u8 {
-        unsafe { self.buf.as_mut_ptr().add(self.buf.len()) }
+    unsafe fn put(&mut self, p: Cur, b: u8) -> Cur {
+        let p = self.reserve(p, 1);
+        *p = b;
+        p.add(1)
     }
 
     #[inline(always)]
-    unsafe fn set_end(&mut self, end: *mut u8) {
-        let len = end.offset_from(self.buf.as_ptr()) as usize;
-        debug_assert!(len <= self.buf.capacity());
-        self.buf.set_len(len);
-    }
-
-    #[inline(always)]
-    fn put(&mut self, b: u8) {
-        self.reserve(1);
-        unsafe {
-            *self.end_ptr() = b;
-            self.buf.set_len(self.buf.len() + 1);
-        }
-    }
-
-    #[inline(always)]
-    fn put2(&mut self, s: &[u8; 2]) {
-        self.reserve(2);
-        unsafe {
-            ptr::copy_nonoverlapping(s.as_ptr(), self.end_ptr(), 2);
-            self.buf.set_len(self.buf.len() + 2);
-        }
+    unsafe fn put2(&mut self, p: Cur, s: &[u8; 2]) -> Cur {
+        let p = self.reserve(p, 2);
+        ptr::copy_nonoverlapping(s.as_ptr(), p, 2);
+        p.add(2)
     }
 
     /// Writes the pending separator (if `ns == 1`) then up to 8 bytes given
-    /// as a pattern, with a single length update.
+    /// as a pattern.
     ///
     /// Separators (',' between items, ':' after keys) are passed down to the
-    /// next value writer instead of being written on their own: every update
-    /// of the buffer length is a store->load round trip through memory, and
-    /// fusing them cut the per-element cost of small scalars by ~1ns.
+    /// next value writer instead of being written on their own, so small
+    /// scalars cost one capacity check.
     #[inline(always)]
-    fn put_word(&mut self, sep: u8, ns: usize, pattern: &[u8; 8], len: usize) {
-        self.reserve(9);
-        unsafe {
-            let p = self.end_ptr();
-            *p = sep;
-            ptr::copy_nonoverlapping(pattern.as_ptr(), p.add(ns), 8);
-            self.buf.set_len(self.buf.len() + ns + len);
-        }
+    unsafe fn put_word(
+        &mut self,
+        p: Cur,
+        sep: u8,
+        ns: usize,
+        pattern: &[u8; 8],
+        len: usize,
+    ) -> Cur {
+        let p = self.reserve(p, 9);
+        *p = sep;
+        ptr::copy_nonoverlapping(pattern.as_ptr(), p.add(ns), 8);
+        p.add(ns + len)
     }
 
     #[inline(always)]
-    fn put_sep(&mut self, sep: u8, ns: usize) {
-        if ns != 0 {
-            self.put(sep);
-        }
+    unsafe fn put_sep(&mut self, p: Cur, sep: u8, ns: usize) -> Cur {
+        let p = self.reserve(p, 1);
+        *p = sep;
+        p.add(ns)
     }
 
     // ----- scalars -----
 
     #[inline(always)]
-    unsafe fn write_i64(&mut self, v: i64) {
-        self.reserve(24);
-        let n = itoap::write_to_ptr(self.end_ptr(), v);
-        self.buf.set_len(self.buf.len() + n);
-    }
-
-    #[inline(always)]
-    unsafe fn write_int(&mut self, obj: *mut ffi::PyObject, sep: u8, ns: usize) -> SerResult {
+    unsafe fn write_int(
+        &mut self,
+        p: Cur,
+        obj: *mut ffi::PyObject,
+        sep: u8,
+        ns: usize,
+    ) -> CurResult {
         if INLINE_INT {
             let (neg, nd) = int_shape(obj);
             if nd <= 2 {
                 // |value| < 2**60: sign + unsigned digits, using the cheaper
                 // 32-bit formatter for single-digit (< 2**30) values.
-                self.reserve(25);
-                let p = self.end_ptr();
+                let p = self.reserve(p, 25);
                 *p = sep;
                 let p = p.add(ns);
                 *p = b'-';
@@ -1070,32 +1108,29 @@ impl Serializer {
                 } else {
                     itoap::write_to_ptr(p, int_magnitude(obj, nd))
                 };
-                self.buf.set_len(self.buf.len() + ns + neg as usize + n);
-                return Ok(());
+                return p.add(n);
             }
         }
-        self.put_sep(sep, ns);
-        self.write_int_slow(obj)
+        let p = self.put_sep(p, sep, ns);
+        self.write_int_slow(p, obj)
     }
 
     #[inline(never)]
-    unsafe fn write_int_slow(&mut self, obj: *mut ffi::PyObject) -> SerResult {
+    unsafe fn write_int_slow(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
         let mut overflow: std::os::raw::c_int = 0;
         let v = ffi::PyLong_AsLongLongAndOverflow(obj, &mut overflow);
         if overflow == 0 {
             if v == -1 && !ffi::PyErr_Occurred().is_null() {
-                return Err(SerError::PyErrSet);
+                return self.fail(SerError::PyErrSet);
             }
-            self.write_i64(v);
-            return Ok(());
+            let p = self.reserve(p, 24);
+            return p.add(itoap::write_to_ptr(p, v));
         }
         if overflow > 0 {
             let u = ffi::PyLong_AsUnsignedLongLong(obj);
-            if !(u == u64::MAX && !ffi::PyErr_Occurred().is_null()) {
-                self.reserve(24);
-                let n = itoap::write_to_ptr(self.end_ptr(), u);
-                self.buf.set_len(self.buf.len() + n);
-                return Ok(());
+            if u != u64::MAX || ffi::PyErr_Occurred().is_null() {
+                let p = self.reserve(p, 24);
+                return p.add(itoap::write_to_ptr(p, u));
             }
             ffi::PyErr_Clear();
         }
@@ -1103,132 +1138,132 @@ impl Serializer {
         // not call user __str__/__repr__ on int subclasses).
         let s = ffi::PyNumber_ToBase(obj, 10);
         if s.is_null() {
-            return Err(SerError::PyErrSet);
+            return self.fail(SerError::PyErrSet);
         }
         let mut n: ffi::Py_ssize_t = 0;
-        let p = ffi::PyUnicode_AsUTF8AndSize(s, &mut n);
-        if p.is_null() {
+        let src = ffi::PyUnicode_AsUTF8AndSize(s, &mut n);
+        if src.is_null() {
             ffi::Py_DECREF(s);
-            return Err(SerError::PyErrSet);
+            return self.fail(SerError::PyErrSet);
         }
-        self.buf
-            .extend_from_slice(std::slice::from_raw_parts(p as *const u8, n as usize));
+        let n = n as usize;
+        let p = self.reserve(p, n);
+        ptr::copy_nonoverlapping(src as *const u8, p, n);
         ffi::Py_DECREF(s);
-        Ok(())
+        p.add(n)
     }
 
     #[inline(always)]
-    unsafe fn write_float(&mut self, v: f64, sep: u8, ns: usize) -> SerResult {
+    unsafe fn write_float(&mut self, p: Cur, v: f64, sep: u8, ns: usize) -> CurResult {
         if !v.is_finite() {
             self.err_float = v;
-            return Err(SerError::NonFinite);
+            return self.fail(SerError::NonFinite);
         }
-        self.reserve(33);
-        let p = self.end_ptr();
+        let p = self.reserve(p, 33);
         *p = sep;
         // Format in place: zmij::Buffer is a plain 24-byte array (asserted
-        // below) and 33 bytes are reserved. Formatting into a stack buffer and
+        // above) and 33 bytes are reserved. Formatting into a stack buffer and
         // copying out was ~40% slower (store-forwarding stall on the copy).
         let b = &mut *(p.add(ns) as *mut zmij::Buffer);
         let n = b.format_finite(v).len();
-        self.buf.set_len(self.buf.len() + ns + n);
-        Ok(())
+        p.add(ns + n)
     }
 
     // ----- strings -----
 
     /// Writes `"<escaped utf8>"`.
     #[inline(always)]
-    unsafe fn write_utf8(&mut self, src: *const u8, len: usize, sep: u8, ns: usize) {
+    unsafe fn write_utf8(&mut self, p: Cur, src: *const u8, len: usize, sep: u8, ns: usize) -> Cur {
         // Fast path: room for the worst case (every byte -> \u00XX) plus the
         // kernel's blind vector stores.
-        if len <= ESCAPE_CHUNK && self.buf.capacity() - self.buf.len() >= len * 6 + 35 {
-            self.write_utf8_unchecked(src, len, sep, ns);
+        if len <= ESCAPE_CHUNK && self.room(p) >= len * 6 + 35 {
+            write_utf8_unchecked(p, src, len, sep, ns)
         } else {
-            self.write_utf8_tight(src, len, sep, ns);
+            self.write_utf8_tight(p, src, len, sep, ns)
         }
-    }
-
-    #[inline(always)]
-    unsafe fn write_utf8_unchecked(&mut self, src: *const u8, len: usize, sep: u8, ns: usize) {
-        let mut dst = self.end_ptr();
-        *dst = sep;
-        dst = dst.add(ns);
-        *dst = b'"';
-        dst = escape_body(dst.add(1), src, len);
-        *dst = b'"';
-        self.set_end(dst.add(1));
     }
 
     /// Not enough room for the worst case: reserve only what this string
     /// needs (the output buffer is sized from the previous result, so
     /// reserving 6x would force needless reallocations).
     #[inline(never)]
-    unsafe fn write_utf8_tight(&mut self, src: *const u8, len: usize, sep: u8, ns: usize) {
+    unsafe fn write_utf8_tight(
+        &mut self,
+        p: Cur,
+        src: *const u8,
+        len: usize,
+        sep: u8,
+        ns: usize,
+    ) -> Cur {
         if len > ESCAPE_CHUNK {
-            self.put_sep(sep, ns);
-            self.put(b'"');
-            self.escape_chunked(src, len);
-            self.put(b'"');
-            return;
+            let p = self.put_sep(p, sep, ns);
+            let p = self.put(p, b'"');
+            let p = self.escape_chunked(p, src, len);
+            return self.put(p, b'"');
         }
         // Each escape adds at most 5 bytes.
-        self.reserve(len + 5 * count_escapes(src, len) + 35);
-        self.write_utf8_unchecked(src, len, sep, ns);
+        let p = self.reserve(p, len + 5 * count_escapes(src, len) + 35);
+        write_utf8_unchecked(p, src, len, sep, ns)
     }
 
-    unsafe fn escape_chunked(&mut self, src: *const u8, len: usize) {
+    unsafe fn escape_chunked(&mut self, mut p: Cur, src: *const u8, len: usize) -> Cur {
         let mut off = 0;
         while off < len {
             let n = (len - off).min(ESCAPE_CHUNK);
-            self.reserve(n * 6 + 32);
-            let dst = escape_body(self.end_ptr(), src.add(off), n);
-            self.set_end(dst);
+            p = self.reserve(p, n * 6 + 32);
+            p = escape_body(p, src.add(off), n);
             off += n;
         }
+        p
     }
 
     #[inline(always)]
-    unsafe fn write_str(&mut self, obj: *mut ffi::PyObject, sep: u8, ns: usize) -> SerResult {
+    unsafe fn write_str(
+        &mut self,
+        p: Cur,
+        obj: *mut ffi::PyObject,
+        sep: u8,
+        ns: usize,
+    ) -> CurResult {
         if ffi::PyUnicode_IS_COMPACT_ASCII(obj) != 0 {
             let len = (*(obj as *mut ffi::PyASCIIObject)).length as usize;
             let data = (obj as *mut ffi::PyASCIIObject).add(1) as *const u8;
-            self.write_utf8(data, len, sep, ns);
-            return Ok(());
+            return self.write_utf8(p, data, len, sep, ns);
         }
         if !self.str_mode && ffi::PyUnicode_IS_COMPACT(obj) != 0 {
             // bytes output, non-ASCII string whose UTF-8 form is cached.
             let c = obj as *mut ffi::PyCompactUnicodeObject;
             if !(*c).utf8.is_null() {
-                self.write_utf8((*c).utf8 as *const u8, (*c).utf8_length as usize, sep, ns);
-                return Ok(());
+                let (src, len) = ((*c).utf8 as *const u8, (*c).utf8_length as usize);
+                return self.write_utf8(p, src, len, sep, ns);
             }
         }
-        self.put_sep(sep, ns);
-        self.write_str_slow(obj)
+        let p = self.put_sep(p, sep, ns);
+        self.write_str_slow(p, obj)
     }
 
     /// Non-ASCII, non-compact (e.g. subclass) or legacy strings.
     #[inline(never)]
-    unsafe fn write_str_slow(&mut self, obj: *mut ffi::PyObject) -> SerResult {
+    unsafe fn write_str_slow(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
         #[cfg(not(Py_3_12))]
         {
             #[allow(deprecated)]
             if ffi::PyUnicode_READY(obj) != 0 {
-                return Err(SerError::PyErrSet);
+                return self.fail(SerError::PyErrSet);
             }
         }
         let len = ffi::PyUnicode_GET_LENGTH(obj) as usize;
         if ffi::PyUnicode_IS_ASCII(obj) != 0 {
-            self.write_utf8(ffi::PyUnicode_DATA(obj) as *const u8, len, 0, 0);
-            return Ok(());
+            return self.write_utf8(p, ffi::PyUnicode_DATA(obj) as *const u8, len, 0, 0);
         }
         if self.str_mode {
-            return self.write_str_segment(obj, len);
+            return self.write_str_segment(p, obj, len);
         }
-        let (p, n) = utf8_of(obj)?;
-        self.write_utf8(p, n, 0, 0);
-        Ok(())
+        let (src, n) = match utf8_of(obj) {
+            Ok(v) => v,
+            Err(e) => return self.fail(e),
+        };
+        self.write_utf8(p, src, n, 0, 0)
     }
 
     /// `str` output: record the non-ASCII string instead of encoding it.
@@ -1236,7 +1271,12 @@ impl Serializer {
     /// Like `json.dumps(..., ensure_ascii=False)`, lone surrogates are copied
     /// through (a `str` can hold them); `dumps_bytes` rejects them because
     /// they cannot be encoded as UTF-8.
-    unsafe fn write_str_segment(&mut self, obj: *mut ffi::PyObject, len: usize) -> SerResult {
+    unsafe fn write_str_segment(
+        &mut self,
+        p: Cur,
+        obj: *mut ffi::PyObject,
+        len: usize,
+    ) -> CurResult {
         let kind = ffi::PyUnicode_KIND(obj);
         let data = ffi::PyUnicode_DATA(obj);
         // Strong reference to the string whose native data will be copied.
@@ -1244,7 +1284,7 @@ impl Serializer {
             // Rare: build the escaped text as a new (canonical) str.
             let s = escaped_copy(kind, data as *const u8, len);
             if s.is_null() {
-                return Err(SerError::PyErrSet);
+                return self.fail(SerError::PyErrSet);
             }
             s
         } else {
@@ -1252,134 +1292,121 @@ impl Serializer {
             obj
         };
         let nchars = ffi::PyUnicode_GET_LENGTH(src) as usize;
-        self.put(b'"');
+        let p = self.put(p, b'"');
         self.segs.push(Segment {
-            pos: self.buf.len(),
+            pos: self.offset(p),
             obj: src,
             nchars,
         });
-        self.put(b'"');
         self.max_kind = self.max_kind.max(ffi::PyUnicode_KIND(src));
         self.seg_chars += nchars;
-        Ok(())
+        self.put(p, b'"')
     }
 
     // ----- containers -----
 
-    /// Containers nest at most `RECURSION_LIMIT` deep (an empty container
-    /// at that depth is rejected too, matching orjson).
-    #[inline(always)]
-    fn check_depth(&self) -> SerResult {
-        if self.depth >= RECURSION_LIMIT {
-            return Err(SerError::Recursion);
-        }
-        Ok(())
-    }
-
     #[inline(never)]
-    unsafe fn ser_list(&mut self, obj: *mut ffi::PyObject) -> SerResult {
-        self.check_depth()?;
+    unsafe fn ser_list(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        if self.depth >= RECURSION_LIMIT {
+            return self.fail(SerError::Recursion);
+        }
         let n = ffi::PyList_GET_SIZE(obj);
         if n == 0 {
-            self.put2(b"[]");
-            return Ok(());
+            return self.put2(p, b"[]");
         }
         self.depth += 1;
-        self.put(b'[');
+        let mut p = self.put(p, b'[');
         let mut i = 0;
         // Re-read the size each iteration: guards against mutation from
         // finalizers.
         while i < ffi::PyList_GET_SIZE(obj) {
-            self.ser(ffi::PyList_GET_ITEM(obj, i), b',', (i != 0) as usize)?;
+            p = tri!(self.ser(p, ffi::PyList_GET_ITEM(obj, i), b',', (i != 0) as usize));
             i += 1;
         }
-        self.put(b']');
         self.depth -= 1;
-        Ok(())
+        self.put(p, b']')
     }
 
     #[inline(never)]
-    unsafe fn ser_tuple(&mut self, obj: *mut ffi::PyObject) -> SerResult {
-        self.check_depth()?;
+    unsafe fn ser_tuple(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        if self.depth >= RECURSION_LIMIT {
+            return self.fail(SerError::Recursion);
+        }
         let n = ffi::PyTuple_GET_SIZE(obj);
         if n == 0 {
-            self.put2(b"[]");
-            return Ok(());
+            return self.put2(p, b"[]");
         }
         self.depth += 1;
-        self.put(b'[');
+        let mut p = self.put(p, b'[');
         for i in 0..n {
-            self.ser(ffi::PyTuple_GET_ITEM(obj, i), b',', (i != 0) as usize)?;
+            p = tri!(self.ser(p, ffi::PyTuple_GET_ITEM(obj, i), b',', (i != 0) as usize));
         }
-        self.put(b']');
         self.depth -= 1;
-        Ok(())
+        self.put(p, b']')
     }
 
     #[inline(never)]
-    unsafe fn ser_dict(&mut self, obj: *mut ffi::PyObject) -> SerResult {
-        self.check_depth()?;
+    unsafe fn ser_dict(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        if self.depth >= RECURSION_LIMIT {
+            return self.fail(SerError::Recursion);
+        }
         if (*(obj as *mut ffi::PyDictObject)).ma_used == 0 {
-            self.put2(b"{}");
-            return Ok(());
+            return self.put2(p, b"{}");
         }
         self.depth += 1;
-        self.put(b'{');
+        let mut p = self.put(p, b'{');
         let mut pos: ffi::Py_ssize_t = 0;
         let mut key: *mut ffi::PyObject = ptr::null_mut();
         let mut value: *mut ffi::PyObject = ptr::null_mut();
         let mut ns = 0;
         while ffi::PyDict_Next(obj, &mut pos, &mut key, &mut value) != 0 {
             if ffi::Py_TYPE(key) == str_type() {
-                self.write_str(key, b',', ns)?;
+                p = tri!(self.write_str(p, key, b',', ns));
             } else if ffi::PyUnicode_Check(key) != 0 {
-                self.put_sep(b',', ns);
-                self.write_str_slow(key)?;
+                p = self.put_sep(p, b',', ns);
+                p = tri!(self.write_str_slow(p, key));
             } else {
-                return Err(SerError::KeyNotStr);
+                return self.fail(SerError::KeyNotStr);
             }
             ns = 1;
-            self.ser(value, b':', 1)?;
+            p = tri!(self.ser(p, value, b':', 1));
         }
-        self.put(b'}');
         self.depth -= 1;
-        Ok(())
+        self.put(p, b'}')
     }
 
     // ----- dispatch -----
 
     /// Serializes `obj`, preceded by `sep` if `ns == 1`.
     #[inline(always)]
-    unsafe fn ser(&mut self, obj: *mut ffi::PyObject, sep: u8, ns: usize) -> SerResult {
+    unsafe fn ser(&mut self, p: Cur, obj: *mut ffi::PyObject, sep: u8, ns: usize) -> CurResult {
         let ty = ffi::Py_TYPE(obj);
         if ty == str_type() {
-            self.write_str(obj, sep, ns)
+            self.write_str(p, obj, sep, ns)
         } else if ty == int_type() {
-            self.write_int(obj, sep, ns)
+            self.write_int(p, obj, sep, ns)
         } else if ty == float_type() {
-            self.write_float(ffi::PyFloat_AS_DOUBLE(obj), sep, ns)
+            self.write_float(p, ffi::PyFloat_AS_DOUBLE(obj), sep, ns)
         } else if ty == dict_type() {
-            self.put_sep(sep, ns);
-            self.ser_dict(obj)
+            let p = self.put_sep(p, sep, ns);
+            self.ser_dict(p, obj)
         } else if ty == list_type() {
-            self.put_sep(sep, ns);
-            self.ser_list(obj)
+            let p = self.put_sep(p, sep, ns);
+            self.ser_list(p, obj)
         } else if ty == bool_type() {
             if obj == ffi::Py_True() {
-                self.put_word(sep, ns, b"true\0\0\0\0", 4);
+                self.put_word(p, sep, ns, b"true\0\0\0\0", 4)
             } else {
-                self.put_word(sep, ns, b"false\0\0\0", 5);
+                self.put_word(p, sep, ns, b"false\0\0\0", 5)
             }
-            Ok(())
         } else if obj == ffi::Py_None() {
-            self.put_word(sep, ns, b"null\0\0\0\0", 4);
-            Ok(())
+            self.put_word(p, sep, ns, b"null\0\0\0\0", 4)
         } else {
-            self.put_sep(sep, ns);
+            let p = self.put_sep(p, sep, ns);
             if ty == tuple_type() {
-                self.ser_tuple(obj)
+                self.ser_tuple(p, obj)
             } else {
-                self.ser_subclass(obj)
+                self.ser_subclass(p, obj)
             }
         }
     }
@@ -1389,23 +1416,23 @@ impl Serializer {
     /// serialized like their base type, as the stdlib `json` module does.
     #[cold]
     #[inline(never)]
-    unsafe fn ser_subclass(&mut self, obj: *mut ffi::PyObject) -> SerResult {
+    unsafe fn ser_subclass(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
         let ty = ffi::Py_TYPE(obj);
         if ffi::PyType_HasFeature(ty, ffi::Py_TPFLAGS_UNICODE_SUBCLASS) != 0 {
-            self.write_str_slow(obj)
+            self.write_str_slow(p, obj)
         } else if ffi::PyType_HasFeature(ty, ffi::Py_TPFLAGS_LONG_SUBCLASS) != 0 {
-            self.write_int_slow(obj)
+            self.write_int_slow(p, obj)
         } else if ffi::PyType_HasFeature(ty, ffi::Py_TPFLAGS_DICT_SUBCLASS) != 0 {
-            self.ser_dict(obj)
+            self.ser_dict(p, obj)
         } else if ffi::PyType_HasFeature(ty, ffi::Py_TPFLAGS_LIST_SUBCLASS) != 0 {
-            self.ser_list(obj)
+            self.ser_list(p, obj)
         } else if ffi::PyType_HasFeature(ty, ffi::Py_TPFLAGS_TUPLE_SUBCLASS) != 0 {
-            self.ser_tuple(obj)
+            self.ser_tuple(p, obj)
         } else if ffi::PyFloat_Check(obj) != 0 {
-            self.write_float(ffi::PyFloat_AS_DOUBLE(obj), 0, 0)
+            self.write_float(p, ffi::PyFloat_AS_DOUBLE(obj), 0, 0)
         } else {
             self.err_obj = obj;
-            Err(SerError::Unsupported)
+            self.fail(SerError::Unsupported)
         }
     }
 
@@ -1464,6 +1491,19 @@ impl Serializer {
         widen(buf.add(prev), out.add(o), self.buf.len() - prev);
         o + self.buf.len() - prev
     }
+}
+
+/// Writes `sep` (if `ns == 1`) and `"<escaped>"`; the caller guarantees
+/// `len * 6 + 35` bytes of room at `p`.
+#[inline(always)]
+unsafe fn write_utf8_unchecked(p: Cur, src: *const u8, len: usize, sep: u8, ns: usize) -> Cur {
+    let mut dst = p;
+    *dst = sep;
+    dst = dst.add(ns);
+    *dst = b'"';
+    dst = escape_body(dst.add(1), src, len);
+    *dst = b'"';
+    dst.add(1)
 }
 
 /// UTF-8 view of a (non-ASCII) string, using CPython's cached copy when present.
@@ -1525,9 +1565,12 @@ pub unsafe fn dumps_raw(
     as_str: bool,
 ) -> PyResult<*mut ffi::PyObject> {
     let mut ser = Serializer::new(as_str);
-    if let Err(e) = ser.ser(obj, 0, 0) {
-        return Err(to_pyerr(py, &ser, e));
+    let start = ser.start();
+    let end = ser.ser(start, obj, 0, 0);
+    if end.is_null() {
+        return Err(to_pyerr(py, &ser, ser.err));
     }
+    ser.sync(end);
     let out = if as_str {
         ser.finish_str()
     } else {
