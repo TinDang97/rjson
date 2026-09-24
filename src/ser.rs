@@ -57,7 +57,6 @@ pub enum SerError {
     PyErrSet,
 }
 
-
 // ---------------------------------------------------------------------------
 // Type objects
 // ---------------------------------------------------------------------------
@@ -1010,6 +1009,12 @@ impl Serializer {
         self.buf.as_ptr() as usize + self.buf.capacity() - p as usize
     }
 
+    /// Last cursor position with `n` bytes of room (`n <= MIN_CAPACITY`).
+    #[inline(always)]
+    fn limit(&self, n: usize) -> Cur {
+        unsafe { self.buf.data.add(self.buf.cap - n) }
+    }
+
     /// Offset of `p` in the buffer.
     #[inline(always)]
     fn offset(&self, p: Cur) -> usize {
@@ -1317,14 +1322,87 @@ impl Serializer {
         self.depth += 1;
         let mut p = self.put(p, b'[');
         let mut i = 0;
-        // Re-read the size each iteration: guards against mutation from
-        // finalizers.
+        // Re-read the size after every generic item: guards against mutation
+        // from finalizers.
         while i < ffi::PyList_GET_SIZE(obj) {
-            p = tri!(self.ser(p, ffi::PyList_GET_ITEM(obj, i), b',', (i != 0) as usize));
+            let item = ffi::PyList_GET_ITEM(obj, i);
+            let ty = ffi::Py_TYPE(item);
+            if ty == int_type() || ty == float_type() {
+                let (q, j) = self.list_scalars(p, obj, i);
+                p = q;
+                if j != i {
+                    i = j;
+                    continue;
+                }
+            }
+            p = tri!(self.ser(p, item, b',', (i != 0) as usize));
             i += 1;
         }
         self.depth -= 1;
         self.put(p, b']')
+    }
+
+    /// Writes the run of list items starting at `i` that are exact small
+    /// ints or exact finite floats, with the list size, item array and
+    /// capacity limit kept in registers. Returns the cursor and the index of
+    /// the first item it did not write (the caller serializes that one
+    /// generically, which also produces any error). Every item's exact type
+    /// is checked; nothing here can run Python code, so the list cannot
+    /// change under us.
+    #[inline(always)]
+    unsafe fn list_scalars(
+        &mut self,
+        mut p: Cur,
+        obj: *mut ffi::PyObject,
+        mut i: ffi::Py_ssize_t,
+    ) -> (Cur, ffi::Py_ssize_t) {
+        /// Largest scalar write: separator + '-' + 19 digits, or separator +
+        /// the 24-byte zmij buffer.
+        const MAX: usize = 40;
+        let n = ffi::PyList_GET_SIZE(obj);
+        let items = (*(obj as *mut ffi::PyListObject)).ob_item;
+        let inline_int = INLINE_INT;
+        // cap >= MIN_CAPACITY > MAX, so `limit` stays inside the allocation.
+        let mut limit = self.limit(MAX);
+        while i < n {
+            let item = *items.offset(i);
+            let ty = ffi::Py_TYPE(item);
+            if p > limit {
+                p = self.grow(p, MAX);
+                limit = self.limit(MAX);
+            }
+            // The separator is only committed (by advancing past it) once
+            // the item is written; otherwise the generic path rewrites it.
+            *p = b',';
+            let q = p.add((i != 0) as usize);
+            if ty == int_type() && inline_int {
+                let (neg, nd) = int_shape(item);
+                if nd > 2 {
+                    break;
+                }
+                *q = b'-';
+                let q = q.add(neg as usize);
+                let len = if nd <= 1 {
+                    write_u32_small(q, int_magnitude(item, nd) as u32)
+                } else {
+                    itoap::write_to_ptr(q, int_magnitude(item, nd))
+                };
+                p = q.add(len);
+            } else if ty == float_type() {
+                let v = ffi::PyFloat_AS_DOUBLE(item);
+                if !v.is_finite() {
+                    break;
+                }
+                // SAFETY: MAX bytes are reserved at `p`; zmij::Buffer is a
+                // plain 24-byte array (asserted at the top of the file).
+                let b = &mut *(q as *mut zmij::Buffer);
+                p = q.add(b.format_finite(v).len());
+            } else {
+                break;
+            }
+            i += 1;
+        }
+        (p, i)
     }
 
     #[inline(never)]

@@ -122,6 +122,54 @@ class TestHomogeneousListsWithOddTail:
         assert both(obj) == ref(obj)
 
 
+class TestListScalarRun:
+    """The list fast loop writes runs of exact ints/floats and must hand every
+    other item (including subclasses and big ints) to the generic path."""
+
+    class I(int):
+        def __str__(self):
+            return "nope"
+
+    class F(float):
+        def __repr__(self):
+            return "nope"
+
+    def test_late_type_switch(self):
+        for tail in (True, False, None, "x", "é", 2**60, -(2**61), 10**30, [1, 2], {"a": 1}, (3,),
+                     self.I(7), self.F(2.5), 1.5, 3):
+            for n in (0, 1, 2, 15, 16, 17, 1000, 5000):
+                for obj in ([7] * n + [tail] + [8] * 3, [0.5] * n + [tail] + [1] * 3 + [0.25]):
+                    want = ref([float(x) if type(x) is self.F else x for x in obj])
+                    assert both(obj) == want
+
+    def test_int_boundaries_in_runs(self):
+        vals = []
+        for b in (29, 30, 31, 59, 60, 61, 63, 64):
+            vals += [2**b - 1, 2**b, 2**b + 1, -(2**b) + 1, -(2**b), -(2**b) - 1]
+        vals += [0, -0, 9, 10, 99999, 100000, 99999999, 100000000, 999999999, 10**9]
+        vals += [-v for v in vals]
+        assert both(vals) == ref(vals)
+        assert both(vals * 50) == ref(vals * 50)
+
+    def test_subclass_items(self):
+        obj = [1, self.I(2), 3, self.F(1.5), 2.5, self.I(2**70)]
+        assert both(obj) == "[1,2,3,1.5,2.5,1180591620717411303424]"
+
+    @pytest.mark.parametrize("v", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_late(self, v):
+        for f in (rjson.dumps, rjson.dumps_bytes):
+            with pytest.raises(ValueError, match="non-finite"):
+                f([1.0] * 1000 + [v])
+            with pytest.raises(ValueError, match="non-finite"):
+                f([1] * 1000 + [v])
+
+    def test_growth_inside_run(self):
+        # Output far larger than the size hint of the previous call.
+        rjson.dumps([])
+        for obj in ([-(2**59)] * 20000, [1.2345678901234567e-300] * 20000, list(range(10**6))):
+            assert json.loads(both(obj)) == obj
+
+
 class TestSubclasses:
     def test_str_subclass(self):
         class S(str):
