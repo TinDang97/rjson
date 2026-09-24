@@ -117,11 +117,7 @@ fn full_multiplication(a: u64, b: u64) -> (u64, u64) {
 
 #[inline(always)]
 fn compute_product_approx(q: i64, w: u64, precision: usize) -> (u64, u64) {
-    let mask = if precision < 64 {
-        0xFFFF_FFFF_FFFF_FFFF_u64 >> precision
-    } else {
-        0xFFFF_FFFF_FFFF_FFFF_u64
-    };
+    let mask = if precision < 64 { 0xFFFF_FFFF_FFFF_FFFF_u64 >> precision } else { 0xFFFF_FFFF_FFFF_FFFF_u64 };
     let index = (q - SMALLEST_POWER_OF_FIVE as i64) as usize;
     let (lo5, hi5) = POWER_OF_FIVE_128[index];
     let (mut first_lo, mut first_hi) = full_multiplication(w, lo5);

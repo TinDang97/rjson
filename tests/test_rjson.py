@@ -481,6 +481,25 @@ class TestLoadsParser:
         for inp in (doc.encode(), bytearray(doc.encode()), memoryview(doc.encode())):
             assert rjson.loads(inp) == expected
 
+    def test_memoryview_slice_does_not_read_past_end(self):
+        # The parser relies on a NUL byte after the input; sliced memoryviews
+        # are followed by arbitrary bytes, so they must be copied first.
+        assert rjson.loads(memoryview(b"[1]2")[:3]) == [1]
+        assert rjson.loads(memoryview(b"1234")[:2]) == 12
+        assert rjson.loads(memoryview(b"1.5e3")[:3]) == 1.5
+        assert rjson.loads(memoryview(b'"ab"x')[:4]) == "ab"
+        assert rjson.loads(memoryview(b"truex")[:4]) is True
+        assert rjson.loads(memoryview(b" [ ] ")[1:4]) == []
+        for bad in (b'"ab"', b"[1,2]", b"nulx", b"1.5"):
+            with pytest.raises(ValueError):
+                rjson.loads(memoryview(bad)[: len(bad) - 1])
+        with pytest.raises(ValueError, match="empty"):
+            rjson.loads(memoryview(b"1")[:0])
+        with pytest.raises(ValueError, match="empty"):
+            rjson.loads(bytearray())
+        big = b"[" + b"1.25," * 100 + b"2]"
+        assert rjson.loads(memoryview(big + b"999")[: len(big)]) == [1.25] * 100 + [2]
+
     def test_invalid_utf8_rejected(self):
         for bad in (b'"\xff"', b'"\xed\xa0\x80"', b'"\xc3"'):
             with pytest.raises(ValueError):

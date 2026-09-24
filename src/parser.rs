@@ -51,11 +51,7 @@ struct KeyEntry {
     bytes: [u8; KEY_CACHE_MAX_LEN],
 }
 
-const EMPTY_KEY: KeyEntry = KeyEntry {
-    obj: ptr::null_mut(),
-    len: 0,
-    bytes: [0; KEY_CACHE_MAX_LEN],
-};
+const EMPTY_KEY: KeyEntry = KeyEntry { obj: ptr::null_mut(), len: 0, bytes: [0; KEY_CACHE_MAX_LEN] };
 
 /// Direct-mapped cache of dict-key strings. Only touched with the GIL held
 /// (every `loads` call holds it), so no further synchronization is needed on
@@ -107,9 +103,7 @@ fn raise_decode_error(py: Python<'_>, msg: &str, doc: &[u8], pos: usize) -> PyEr
     let full = format!("JSON parsing error: {msg}");
     let ty = JSON_DECODE_ERROR.get_or_try_init(py, || -> PyResult<Py<PyType>> {
         let m = py.import("json")?;
-        Ok(m.getattr("JSONDecodeError")?
-            .downcast_into::<PyType>()?
-            .unbind())
+        Ok(m.getattr("JSONDecodeError")?.downcast_into::<PyType>()?.unbind())
     });
     match ty {
         Ok(ty) => PyErr::from_type(ty.bind(py).clone(), (full, doc_str.into_owned(), char_pos)),
@@ -143,11 +137,11 @@ fn is_ws(b: u8) -> bool {
 impl<'a> Parser<'a> {
     #[inline(always)]
     fn peek(&self) -> u8 {
-        if self.pos < self.buf.len() {
-            unsafe { *self.buf.get_unchecked(self.pos) }
-        } else {
-            0
-        }
+        // SAFETY: `pos <= buf.len()` always holds and `buf` is followed by a
+        // readable NUL byte (see `parse`), so this reads either a document
+        // byte or the terminating 0, which no token starts with.
+        debug_assert!(self.pos <= self.buf.len());
+        unsafe { *self.buf.as_ptr().add(self.pos) }
     }
 
     #[inline(always)]
@@ -236,11 +230,7 @@ impl<'a> Parser<'a> {
     }
 
     #[inline(always)]
-    fn parse_literal(
-        &mut self,
-        lit: &'static [u8],
-        obj: *mut ffi::PyObject,
-    ) -> PResult<*mut ffi::PyObject> {
+    fn parse_literal(&mut self, lit: &'static [u8], obj: *mut ffi::PyObject) -> PResult<*mut ffi::PyObject> {
         let end = self.pos + lit.len();
         if end <= self.buf.len() && &self.buf[self.pos..end] == lit {
             self.pos = end;
@@ -371,11 +361,7 @@ impl<'a> Parser<'a> {
             // bytes larger each (and later lookups take the generic path), so
             // only presize large dicts where avoiding repeated resizes pays
             // (same threshold as orjson).
-            let dict = if n > 8 {
-                ffi::_PyDict_NewPresized(n as ffi::Py_ssize_t)
-            } else {
-                ffi::PyDict_New()
-            };
+            let dict = if n > 8 { ffi::_PyDict_NewPresized(n as ffi::Py_ssize_t) } else { ffi::PyDict_New() };
             if dict.is_null() {
                 return self.err("out of memory", self.pos);
             }
@@ -489,19 +475,12 @@ impl<'a> Parser<'a> {
     }
 
     #[inline(always)]
-    fn cached_key(
-        &mut self,
-        start: usize,
-        end: usize,
-        non_ascii: bool,
-    ) -> PResult<*mut ffi::PyObject> {
+    fn cached_key(&mut self, start: usize, end: usize, non_ascii: bool) -> PResult<*mut ffi::PyObject> {
         let raw = unsafe { self.buf.get_unchecked(start..end) };
         unsafe {
             let idx = (hash_key(raw) as usize) & (KEY_CACHE_SIZE - 1);
             let entry = &mut *ptr::addr_of_mut!(KEY_CACHE[idx]);
-            if !entry.obj.is_null()
-                && entry.len as usize == raw.len()
-                && entry.bytes.get_unchecked(..raw.len()) == raw
+            if !entry.obj.is_null() && entry.len as usize == raw.len() && entry.bytes.get_unchecked(..raw.len()) == raw
             {
                 ffi::Py_INCREF(entry.obj);
                 return Ok(entry.obj);
@@ -515,10 +494,7 @@ impl<'a> Parser<'a> {
             ffi::Py_INCREF(s);
             entry.obj = s;
             entry.len = raw.len() as u32;
-            entry
-                .bytes
-                .get_unchecked_mut(..raw.len())
-                .copy_from_slice(raw);
+            entry.bytes.get_unchecked_mut(..raw.len()).copy_from_slice(raw);
             if !old.is_null() {
                 ffi::Py_DECREF(old);
             }
@@ -563,23 +539,13 @@ impl<'a> Parser<'a> {
     /// are handed to the scalar `parse_escaped_tail`, which also produces
     /// every error message, so error semantics don't depend on the kernel.
     #[inline(never)]
-    fn parse_escaped(
-        &mut self,
-        start: usize,
-        i: usize,
-        non_ascii: bool,
-    ) -> PResult<*mut ffi::PyObject> {
+    fn parse_escaped(&mut self, start: usize, i: usize, non_ascii: bool) -> PResult<*mut ffi::PyObject> {
         let buf = self.buf;
         let mut out = std::mem::take(&mut self.scratch);
         out.clear();
         out.reserve(i - start + 256);
         out.extend_from_slice(&buf[start..i]);
-        let mut st = EscState {
-            i,
-            olen: out.len(),
-            non_ascii,
-            done: false,
-        };
+        let mut st = EscState { i, olen: out.len(), non_ascii, done: false };
         #[cfg(target_arch = "x86_64")]
         unsafe {
             // SAFETY: the kernels only read `buf` while `i + ESC_LOOKAHEAD <=
@@ -619,12 +585,7 @@ impl<'a> Parser<'a> {
     /// byte); `out` holds everything decoded so far. Used near the end of the
     /// input and for every error.
     #[inline(never)]
-    fn parse_escaped_tail(
-        &mut self,
-        mut i: usize,
-        out: &mut Vec<u8>,
-        non_ascii: &mut bool,
-    ) -> PResult<()> {
+    fn parse_escaped_tail(&mut self, mut i: usize, out: &mut Vec<u8>, non_ascii: &mut bool) -> PResult<()> {
         let buf = self.buf;
         let len = buf.len();
         loop {
@@ -713,11 +674,9 @@ impl<'a> Parser<'a> {
         // SWAR: classify 8 bytes at once and convert the leading digit run
         // (1..=8 digits) with a single multiply-based conversion.
         while *i + 8 <= len {
-            let w =
-                u64::from_le(unsafe { ptr::read_unaligned(buf.as_ptr().add(*i) as *const u64) });
-            let non_digit = (w.wrapping_sub(0x3030_3030_3030_3030)
-                | w.wrapping_add(0x4646_4646_4646_4646))
-                & 0x8080_8080_8080_8080;
+            let w = u64::from_le(unsafe { ptr::read_unaligned(buf.as_ptr().add(*i) as *const u64) });
+            let non_digit =
+                (w.wrapping_sub(0x3030_3030_3030_3030) | w.wrapping_add(0x4646_4646_4646_4646)) & 0x8080_8080_8080_8080;
             if non_digit == 0 {
                 if *nd + 8 > 19 {
                     break;
@@ -928,11 +887,7 @@ impl<'a> Parser<'a> {
             // single correctly rounded operation.
             let v = if mant <= (1u64 << 53) && (-22..=22).contains(&e) {
                 let m = mant as f64;
-                Some(if e >= 0 {
-                    m * POW10[e as usize]
-                } else {
-                    m / POW10[(-e) as usize]
-                })
+                Some(if e >= 0 { m * POW10[e as usize] } else { m / POW10[(-e) as usize] })
             } else {
                 crate::lemire::compute_float64(e, mant)
             };
@@ -977,10 +932,7 @@ impl<'a> Parser<'a> {
         let s = &self.buf[start..end];
         // 20 digits may still fit in a u64.
         if s.len() == 20 && s[0] != b'-' {
-            if let Some(v) = std::str::from_utf8(s)
-                .ok()
-                .and_then(|t| t.parse::<u64>().ok())
-            {
+            if let Some(v) = std::str::from_utf8(s).ok().and_then(|t| t.parse::<u64>().ok()) {
                 return unsafe { Ok(ffi::PyLong_FromUnsignedLongLong(v)) };
             }
         }
@@ -988,11 +940,7 @@ impl<'a> Parser<'a> {
         tmp.extend_from_slice(s);
         tmp.push(0);
         unsafe {
-            let r = ffi::PyLong_FromString(
-                tmp.as_ptr() as *const std::os::raw::c_char,
-                ptr::null_mut(),
-                10,
-            );
+            let r = ffi::PyLong_FromString(tmp.as_ptr() as *const std::os::raw::c_char, ptr::null_mut(), 10);
             if r.is_null() {
                 ffi::PyErr_Clear();
                 return self.err("invalid number", start);
@@ -1009,8 +957,8 @@ const NUM_FAST_LOOKAHEAD: usize = 40;
 /// Number of leading ASCII digits in the 8 bytes of `w` (little endian).
 #[inline(always)]
 fn digit_run(w: u64) -> usize {
-    let non_digit = (w.wrapping_sub(0x3030_3030_3030_3030) | w.wrapping_add(0x4646_4646_4646_4646))
-        & 0x8080_8080_8080_8080;
+    let non_digit =
+        (w.wrapping_sub(0x3030_3030_3030_3030) | w.wrapping_add(0x4646_4646_4646_4646)) & 0x8080_8080_8080_8080;
     (non_digit.trailing_zeros() / 8) as usize
 }
 
@@ -1042,10 +990,7 @@ unsafe fn digits16(p: *const u8) -> Option<(u64, usize)> {
     if nb == 8 {
         return None;
     }
-    Some((
-        parse_8digits(w1) * POW10_U64[nb] + parse_digits_prefix(w2, nb),
-        8 + nb,
-    ))
+    Some((parse_8digits(w1) * POW10_U64[nb] + parse_digits_prefix(w2, nb), 8 + nb))
 }
 
 #[inline(always)]
@@ -1145,11 +1090,7 @@ unsafe fn unescape_u_fast(p: *const u8, o: *mut u8) -> Option<(usize, usize)> {
     } else if cp < 0x800 {
         (0x80C0 | (cp >> 6) | ((cp & 0x3F) << 8), 2, 6)
     } else if !(0xD800..0xE000).contains(&cp) {
-        (
-            0x8080E0 | (cp >> 12) | (((cp >> 6) & 0x3F) << 8) | ((cp & 0x3F) << 16),
-            3,
-            6,
-        )
+        (0x8080E0 | (cp >> 12) | (((cp >> 6) & 0x3F) << 8) | ((cp & 0x3F) << 16), 3, 6)
     } else {
         if cp >= 0xDC00 || *p.add(6) != b'\\' || *p.add(7) != b'u' {
             return None;
@@ -1159,15 +1100,7 @@ unsafe fn unescape_u_fast(p: *const u8, o: *mut u8) -> Option<(usize, usize)> {
             return None;
         }
         let c = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-        (
-            0x808080F0
-                | (c >> 18)
-                | (((c >> 12) & 0x3F) << 8)
-                | (((c >> 6) & 0x3F) << 16)
-                | ((c & 0x3F) << 24),
-            4,
-            12,
-        )
+        (0x808080F0 | (c >> 18) | (((c >> 12) & 0x3F) << 8) | (((c >> 6) & 0x3F) << 16) | ((c & 0x3F) << 24), 4, 12)
     };
     ptr::write_unaligned(o as *mut u32, w.to_le());
     Some((consumed, n))
@@ -1294,10 +1227,7 @@ unsafe fn escape_blocks_avx2(buf: &[u8], out: &mut Vec<u8>, st: &mut EscState) {
             _mm256_or_si256(_mm256_cmpeq_epi8(v, quote), _mm256_cmpeq_epi8(v, bslash)),
             _mm256_cmpeq_epi8(_mm256_max_epu8(v, ctl), ctl),
         );
-        (
-            _mm256_movemask_epi8(m) as u32,
-            _mm256_movemask_epi8(v) as u32,
-        )
+        (_mm256_movemask_epi8(m) as u32, _mm256_movemask_epi8(v) as u32)
     };
     let copy32 = |s: *const u8, d: *mut u8| {
         _mm256_storeu_si256(d as *mut __m256i, _mm256_loadu_si256(s as *const __m256i));
@@ -1316,8 +1246,8 @@ const POW10_U64: [u64; 20] = {
 };
 
 const POW10: [f64; 23] = [
-    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
-    1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20,
+    1e21, 1e22,
 ];
 
 // ============================================================================
@@ -1329,11 +1259,7 @@ const POW10: [f64; 23] = [
 unsafe fn new_ascii_str(bytes: &[u8]) -> *mut ffi::PyObject {
     let s = ffi::PyUnicode_New(bytes.len() as ffi::Py_ssize_t, 127);
     if !s.is_null() {
-        ptr::copy_nonoverlapping(
-            bytes.as_ptr(),
-            ffi::PyUnicode_DATA(s) as *mut u8,
-            bytes.len(),
-        );
+        ptr::copy_nonoverlapping(bytes.as_ptr(), ffi::PyUnicode_DATA(s) as *mut u8, bytes.len());
     }
     s
 }
@@ -1448,9 +1374,7 @@ unsafe fn decode_into<T: CodeUnit>(bytes: &[u8], mut out: *mut T) {
             i += 2;
             c
         } else if b0 < 0xF0 {
-            let c = ((b0 & 0x0F) << 12)
-                | ((*p.add(i + 1) as u32 & 0x3F) << 6)
-                | (*p.add(i + 2) as u32 & 0x3F);
+            let c = ((b0 & 0x0F) << 12) | ((*p.add(i + 1) as u32 & 0x3F) << 6) | (*p.add(i + 2) as u32 & 0x3F);
             i += 3;
             c
         } else {
@@ -1471,19 +1395,15 @@ unsafe fn decode_into<T: CodeUnit>(bytes: &[u8], mut out: *mut T) {
 // ============================================================================
 
 /// Borrowed view of the input document plus whatever keeps it alive.
+/// `ptr[len]` is always a readable NUL byte (required by `parse`): `str`
+/// (UTF-8 cache), `bytes` and `bytearray` buffers guarantee one; other
+/// buffers are copied into `owned` with one appended.
 pub(crate) struct Input {
     pub(crate) ptr: *const u8,
     pub(crate) len: usize,
     pub(crate) utf8_valid: bool,
-    view: Option<Box<ffi::Py_buffer>>,
-}
-
-impl Drop for Input {
-    fn drop(&mut self) {
-        if let Some(view) = self.view.as_mut() {
-            unsafe { ffi::PyBuffer_Release(&mut **view) };
-        }
-    }
+    #[allow(dead_code)] // only keeps the copy alive
+    owned: Option<Vec<u8>>,
 }
 
 pub(crate) unsafe fn get_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyResult<Input> {
@@ -1492,26 +1412,16 @@ pub(crate) unsafe fn get_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyRes
         let p = ffi::PyUnicode_AsUTF8AndSize(obj, &mut size);
         if p.is_null() {
             ffi::PyErr_Clear();
-            return Err(raise_decode_error(
-                py,
-                "str is not valid UTF-8: surrogates not allowed",
-                b"",
-                0,
-            ));
+            return Err(raise_decode_error(py, "str is not valid UTF-8: surrogates not allowed", b"", 0));
         }
-        return Ok(Input {
-            ptr: p as *const u8,
-            len: size as usize,
-            utf8_valid: true,
-            view: None,
-        });
+        return Ok(Input { ptr: p as *const u8, len: size as usize, utf8_valid: true, owned: None });
     }
     if ffi::PyBytes_Check(obj) != 0 {
         return Ok(Input {
             ptr: ffi::PyBytes_AsString(obj) as *const u8,
             len: ffi::PyBytes_Size(obj) as usize,
             utf8_valid: false,
-            view: None,
+            owned: None,
         });
     }
     if ffi::PyByteArray_Check(obj) != 0 {
@@ -1519,24 +1429,25 @@ pub(crate) unsafe fn get_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyRes
             ptr: ffi::PyByteArray_AsString(obj) as *const u8,
             len: ffi::PyByteArray_Size(obj) as usize,
             utf8_valid: false,
-            view: None,
+            owned: None,
         });
     }
     if ffi::PyMemoryView_Check(obj) != 0 {
-        let mut view: Box<ffi::Py_buffer> = Box::new(std::mem::zeroed());
-        if ffi::PyObject_GetBuffer(obj, &mut *view, ffi::PyBUF_C_CONTIGUOUS) == 0 {
-            return Ok(Input {
-                ptr: view.buf as *const u8,
-                len: view.len as usize,
-                utf8_valid: false,
-                view: Some(view),
-            });
+        let mut view: ffi::Py_buffer = std::mem::zeroed();
+        if ffi::PyObject_GetBuffer(obj, &mut view, ffi::PyBUF_C_CONTIGUOUS) != 0 {
+            return Err(PyErr::fetch(py));
         }
-        return Err(PyErr::fetch(py));
+        // No terminator guarantee for arbitrary buffers: copy and append one.
+        let len = view.len as usize;
+        let mut owned = Vec::with_capacity(len + 1);
+        if len > 0 {
+            owned.extend_from_slice(std::slice::from_raw_parts(view.buf as *const u8, len));
+        }
+        owned.push(0);
+        ffi::PyBuffer_Release(&mut view);
+        return Ok(Input { ptr: owned.as_ptr(), len, utf8_valid: false, owned: Some(owned) });
     }
-    Err(PyTypeError::new_err(
-        "Input must be bytes, bytearray, memoryview, or str",
-    ))
+    Err(PyTypeError::new_err("Input must be bytes, bytearray, memoryview, or str"))
 }
 
 #[inline(always)]
@@ -1572,7 +1483,17 @@ const MAX_POOLED_SCRATCH: usize = 1 << 20;
 /// `utf8_valid`: the bytes came from a Python `str` (known-valid UTF-8);
 /// otherwise they are validated. Returns a new reference, or raises
 /// `json.JSONDecodeError` (a `ValueError`).
-pub(crate) fn parse(py: Python<'_>, buf: &[u8], utf8_valid: bool) -> PyResult<*mut ffi::PyObject> {
+///
+/// # Safety
+///
+/// Unless `buf` is empty, the byte just past its end (`buf.as_ptr() +
+/// buf.len()`) must be readable and 0 (every `Input` from `get_input`
+/// guarantees this). The parser peeks at `pos <= len` without bounds checks.
+pub(crate) unsafe fn parse(py: Python<'_>, buf: &[u8], utf8_valid: bool) -> PyResult<*mut ffi::PyObject> {
+    if buf.is_empty() {
+        return Err(raise_decode_error(py, "input data is empty", buf, 0));
+    }
+    debug_assert_eq!(*buf.as_ptr().add(buf.len()), 0);
     let mut p = Parser {
         buf,
         pos: 0,
