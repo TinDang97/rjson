@@ -75,6 +75,15 @@ class TestStrings:
                     s = plain[:k] + ch + plain[k:]
                     assert both([s, {s: s}]) == ref([s, {s: s}])
 
+    def test_late_escape_in_non_ascii(self):
+        # str mode copies non-ASCII strings optimistically and grows the
+        # result when it meets the first one that needs escaping.
+        for a in ("\xe9", "\u65e5", "\U0001f600"):
+            for b in ("\xe9", "\u65e5", "\U0001f600"):
+                for k in (0, 1, 2, 50):
+                    obj = [a * 3] * k + ["x" + b + "\n\"" + a] + [b * 2, "plain", a + "\\"] + [{a: b}] * k
+                    assert both(obj) == ref(obj)
+
     def test_str_result_kinds(self):
         for obj in (["a", "é"], ["a", "日"], ["a", "😀"], ["é", "日", "😀"], ["plain"]):
             s = rjson.dumps(obj)

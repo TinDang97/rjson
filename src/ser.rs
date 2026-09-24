@@ -1499,17 +1499,6 @@ impl Serializer {
         len: usize,
     ) -> CurResult {
         let kind = ffi::PyUnicode_KIND(obj);
-        let data = ffi::PyUnicode_DATA(obj);
-        let extra = if kind_needs_escape(kind, data as *const u8, len) {
-            // The final copy escapes this string (see `fill`).
-            match kind {
-                ffi::PyUnicode_1BYTE_KIND => escape_extra(data as *const u8, len),
-                ffi::PyUnicode_2BYTE_KIND => escape_extra(data as *const u16, len),
-                _ => escape_extra(data as *const u32, len),
-            }
-        } else {
-            0
-        };
         // Strong reference to the string whose native data will be copied.
         ffi::Py_INCREF(obj);
         let p = self.put(p, b'"');
@@ -1517,10 +1506,12 @@ impl Serializer {
             pos: self.offset(p),
             obj,
             nchars: len,
-            extra,
+            // Escaping is checked (and done) by the final copy, see
+            // `finish_str`.
+            extra: 0,
         });
         self.max_kind = self.max_kind.max(kind);
-        self.seg_chars += len + extra;
+        self.seg_chars += len;
         self.put(p, b'"')
     }
 
@@ -1745,46 +1736,88 @@ impl Serializer {
         // Non-ASCII: the buffer holds the ASCII parts; build the final string
         // with the exact kind and drop the buffer.
         LAST_LEN.with(|c| c.set(len));
-        let total = len + self.seg_chars;
+        let mut total = len + self.seg_chars;
         let maxchar = match self.max_kind {
             1 => 0xff,
             2 => 0xffff,
             _ => 0x10ffff,
         };
-        let s = ffi::PyUnicode_New(total as ffi::Py_ssize_t, maxchar);
+        let mut s = ffi::PyUnicode_New(total as ffi::Py_ssize_t, maxchar);
         if s.is_null() {
             return s;
         }
-        let data = ffi::PyUnicode_DATA(s);
-        let written = match self.max_kind {
-            1 => self.fill(data as *mut u8),
-            2 => self.fill(data as *mut u16),
-            _ => self.fill(data as *mut u32),
-        };
-        debug_assert_eq!(written, total);
-        let _ = written;
+        // Optimistic pass: assume no string needs escaping, checking each one
+        // right before copying it (so its data is read from cache).
+        let mut st = FillState::default();
+        if self.fill_any(s, &mut st, true) {
+            debug_assert_eq!(st.o, total);
+            return s;
+        }
+        // A string needs escaping: everything before it is final. Count the
+        // escapes of the rest, grow the result and finish with escaping.
+        for seg in &mut self.segs[st.seg..] {
+            let d = ffi::PyUnicode_DATA(seg.obj) as *const u8;
+            let kind = ffi::PyUnicode_KIND(seg.obj);
+            if kind_needs_escape(kind, d, seg.nchars) {
+                seg.extra = match kind {
+                    ffi::PyUnicode_1BYTE_KIND => escape_extra(d, seg.nchars),
+                    ffi::PyUnicode_2BYTE_KIND => escape_extra(d as *const u16, seg.nchars),
+                    _ => escape_extra(d as *const u32, seg.nchars),
+                };
+                total += seg.extra;
+            }
+        }
+        if ffi::PyUnicode_Resize(&mut s, total as ffi::Py_ssize_t) != 0 {
+            // `s` was released and an exception is set.
+            return ptr::null_mut();
+        }
+        let done = self.fill_any(s, &mut st, false);
+        debug_assert!(done && st.o == total);
+        let _ = done;
         s
     }
 
-    unsafe fn fill<D: Unit>(&self, out: *mut D) -> usize {
+    unsafe fn fill_any(&self, s: *mut ffi::PyObject, st: &mut FillState, check: bool) -> bool {
+        let data = ffi::PyUnicode_DATA(s);
+        match self.max_kind {
+            1 => self.fill(data as *mut u8, st, check),
+            2 => self.fill(data as *mut u16, st, check),
+            _ => self.fill(data as *mut u32, st, check),
+        }
+    }
+
+    /// Writes the result from `st` on: ASCII runs from the buffer and the
+    /// segments' native data. With `check`, stops (returning false) before
+    /// the first segment that needs escaping; otherwise segments with
+    /// `extra != 0` are escaped while copying.
+    unsafe fn fill<D: Unit>(&self, out: *mut D, st: &mut FillState, check: bool) -> bool {
         let buf = self.buf.as_ptr();
-        let mut o = 0usize;
-        let mut prev = 0usize;
-        for seg in &self.segs {
+        let FillState {
+            seg: mut i,
+            mut o,
+            mut prev,
+        } = *st;
+        while i < self.segs.len() {
+            let seg = &self.segs[i];
+            let d = ffi::PyUnicode_DATA(seg.obj);
+            let kind = ffi::PyUnicode_KIND(seg.obj);
+            let n = seg.nchars;
+            if check && kind_needs_escape(kind, d as *const u8, n) {
+                *st = FillState { seg: i, o, prev };
+                return false;
+            }
             widen(buf.add(prev), out.add(o), seg.pos - prev);
             o += seg.pos - prev;
             prev = seg.pos;
-            let d = ffi::PyUnicode_DATA(seg.obj);
-            let n = seg.nchars;
             if seg.extra == 0 {
-                match ffi::PyUnicode_KIND(seg.obj) {
+                match kind {
                     ffi::PyUnicode_1BYTE_KIND => widen(d as *const u8, out.add(o), n),
                     ffi::PyUnicode_2BYTE_KIND => widen(d as *const u16, out.add(o), n),
                     _ => widen(d as *const u32, out.add(o), n),
                 }
                 o += n;
             } else {
-                let w = match ffi::PyUnicode_KIND(seg.obj) {
+                let w = match kind {
                     ffi::PyUnicode_1BYTE_KIND => widen_escaped(d as *const u8, out.add(o), n),
                     ffi::PyUnicode_2BYTE_KIND => widen_escaped(d as *const u16, out.add(o), n),
                     _ => widen_escaped(d as *const u32, out.add(o), n),
@@ -1792,10 +1825,22 @@ impl Serializer {
                 debug_assert_eq!(w, n + seg.extra);
                 o += n + seg.extra;
             }
+            i += 1;
         }
         widen(buf.add(prev), out.add(o), self.buf.len() - prev);
-        o + self.buf.len() - prev
+        o += self.buf.len() - prev;
+        *st = FillState { seg: i, o, prev };
+        true
     }
+}
+
+/// Progress of `Serializer::fill`: next segment, units written, buffer
+/// offset copied up to.
+#[derive(Clone, Copy, Default)]
+struct FillState {
+    seg: usize,
+    o: usize,
+    prev: usize,
 }
 
 /// Writes `sep` (if `ns == 1`) and `"<escaped>"`; the caller guarantees
