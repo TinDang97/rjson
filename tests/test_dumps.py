@@ -122,6 +122,18 @@ class TestNumbers:
         for v in vals:
             assert both(v) == str(v)
 
+    def test_int_digit_counts(self):
+        # Every digit count and power-of-ten edge of the SWAR formatter.
+        vals = [10**k + d for k in range(0, 19) for d in (-2, -1, 0, 1)]
+        vals += [2**30 - 1, 2**30, 999_999_999, 1_000_000_000, 1_073_741_823]
+        vals += list(range(0, 300_000, 7)) + list(range(99_999_000, 100_001_000))
+        vals += [-v for v in vals]
+        assert both(vals) == ref(vals)
+        assert both({"k": vals[:5000]}) == ref({"k": vals[:5000]})
+        for v in vals[:200]:
+            assert both(v) == str(v)
+            assert both({"a": v}) == ref({"a": v})
+
     def test_huge_int_raises(self):
         if not hasattr(sys, "get_int_max_str_digits"):
             pytest.skip("no int max str digits limit")
