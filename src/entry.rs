@@ -24,13 +24,12 @@
 //! `METH_FASTCALL | METH_KEYWORDS` with hand-parsed `kwnames` (orjson style),
 //! not PyO3's `FunctionDescription`.
 //!
-//! The work itself lives in `crate::parser::parse` / `crate::dumps_impl`; this
+//! The work itself lives in `crate::parser::parse` / `crate::ser::dumps_raw`; this
 //! file only converts arguments and results.
 
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::PyCFunction;
-use std::os::raw::c_char;
 
 unsafe fn loads_body(py: Python<'_>, _m: *mut ffi::PyObject, arg: *mut ffi::PyObject) -> PyResult<*mut ffi::PyObject> {
     // str / bytes / bytearray / memoryview; see `parser::get_input`.
@@ -44,16 +43,11 @@ unsafe fn loads_body(py: Python<'_>, _m: *mut ffi::PyObject, arg: *mut ffi::PyOb
 }
 
 unsafe fn dumps_body(py: Python<'_>, _m: *mut ffi::PyObject, arg: *mut ffi::PyObject) -> PyResult<*mut ffi::PyObject> {
-    let obj = Bound::from_borrowed_ptr(py, arg);
-    crate::dumps_impl(&obj, |bytes| {
-        // Straight from the reused buffer into a new str (no Rust String).
-        let p = ffi::PyUnicode_FromStringAndSize(bytes.as_ptr() as *const c_char, bytes.len() as ffi::Py_ssize_t);
-        if p.is_null() {
-            Err(PyErr::fetch(py))
-        } else {
-            Ok(p)
-        }
-    })
+    crate::ser::dumps_raw(py, arg, true)
+}
+
+unsafe fn dumps_bytes_body(py: Python<'_>, _m: *mut ffi::PyObject, arg: *mut ffi::PyObject) -> PyResult<*mut ffi::PyObject> {
+    crate::ser::dumps_raw(py, arg, false)
 }
 
 /// `loads(obj: str | bytes | bytearray | memoryview) -> Any`
@@ -66,13 +60,18 @@ unsafe extern "C" fn dumps(module: *mut ffi::PyObject, arg: *mut ffi::PyObject) 
     pyo3::impl_::trampoline::binaryfunc(module, arg, dumps_body)
 }
 
+/// `dumps_bytes(obj: Any) -> bytes` (UTF-8, like `orjson.dumps`)
+unsafe extern "C" fn dumps_bytes(module: *mut ffi::PyObject, arg: *mut ffi::PyObject) -> *mut ffi::PyObject {
+    pyo3::impl_::trampoline::binaryfunc(module, arg, dumps_bytes_body)
+}
+
 // ---------------------------------------------------------------------------
 // registration
 // ---------------------------------------------------------------------------
 
 /// `PyMethodDef`s must outlive the function objects created from them.
 /// Wrapped so the raw pointers inside can live in a `static`.
-struct MethodDefs([ffi::PyMethodDef; 2]);
+struct MethodDefs([ffi::PyMethodDef; 3]);
 // SAFETY: the table is immutable after construction and only read by CPython.
 unsafe impl Sync for MethodDefs {}
 
@@ -88,6 +87,12 @@ static METHODS: MethodDefs = MethodDefs([
         ml_meth: ffi::PyMethodDefPointer { PyCFunction: dumps },
         ml_flags: ffi::METH_O,
         ml_doc: c"dumps(obj, /)\n--\n\nSerialize a Python object to a JSON str.".as_ptr(),
+    },
+    ffi::PyMethodDef {
+        ml_name: c"dumps_bytes".as_ptr(),
+        ml_meth: ffi::PyMethodDefPointer { PyCFunction: dumps_bytes },
+        ml_flags: ffi::METH_O,
+        ml_doc: c"dumps_bytes(obj, /)\n--\n\nSerialize a Python object to UTF-8 JSON bytes (fastest; like orjson.dumps).".as_ptr(),
     },
 ]);
 

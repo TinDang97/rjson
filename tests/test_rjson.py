@@ -304,11 +304,14 @@ class TestErrorHandling:
     @pytest.mark.parametrize(
         "obj", ["\ud800", ["\ud800"], {"a": "\ud800"}, {"\ud800": 1}, ["x", 1, "\udfff"]]
     )
-    def test_dumps_lone_surrogate_raises_cleanly(self, obj):
-        # must raise the encode error itself, not SystemError
-        # ("returned a result with an exception set")
+    def test_dumps_lone_surrogate_no_systemerror(self, obj):
+        # Regression: used to return with an exception set (SystemError).
+        # str output passes surrogates through like
+        # json.dumps(ensure_ascii=False); bytes output cannot encode them.
+        import json
+        assert rjson.dumps(obj) == json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
         with pytest.raises(UnicodeEncodeError):
-            rjson.dumps(obj)
+            rjson.dumps_bytes(obj)
 
 
 class TestStringLayout:

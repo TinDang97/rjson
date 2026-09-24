@@ -9,8 +9,9 @@ Plus synthetic cases for per-call overhead and string/number heavy payloads.
 Usage:
     python benches/corpus_benchmark.py [--data DIR] [--repeat N] [--only NAME]
 
-Reports the best-of-N median time per call and the ratio rjson/orjson
-(< 1.0 means rjson is faster).
+Reports the median time per call and the ratio rjson/orjson (< 1.0 means
+rjson is faster). For dumps, ``rjson`` is ``rjson.dumps`` (-> str) and
+``rjson_b`` is ``rjson.dumps_bytes`` (-> bytes, the same type orjson returns).
 """
 
 import argparse
@@ -97,9 +98,10 @@ def main():
     libs = [("rjson", rjson.loads, rjson.dumps), ("orjson", orjson.loads, orjson.dumps)]
     if args.json:
         libs.append(("json", json.loads, json.dumps))
+    dumps_bytes = getattr(rjson, "dumps_bytes", None)
 
     print(f"{'case':18} {'op':6} " + " ".join(f"{n:>10}" for n, _, _ in libs) + "   rjson/orjson")
-    geo = {"loads": [], "dumps": []}
+    geo = {"loads": [], "dumps": [], "dumps_bytes": []}
     for name, (obj, text) in cases.items():
         if args.only and args.only not in name:
             continue
@@ -114,6 +116,12 @@ def main():
             geo[op].append(ratio)
             flag = "WIN " if ratio < 1 else "    "
             print(f"{name:18} {op:6} " + " ".join(f"{fmt(t):>10}" for t in times) + f"   {ratio:5.2f}x {flag}")
+            if op == "dumps" and dumps_bytes is not None:
+                tb = bench(dumps_bytes, obj, args.repeat)
+                rb = tb / times[1]
+                geo["dumps_bytes"].append(rb)
+                flag = "WIN " if rb < 1 else "    "
+                print(f"{name:18} {'bytes':6} {fmt(tb):>10} {'':>10}" + " " * (11 * (len(libs) - 2)) + f"   {rb:5.2f}x {flag}")
     for op, rs in geo.items():
         if rs:
             print(f"geomean rjson/orjson {op}: {statistics.geometric_mean(rs):.2f}x")
