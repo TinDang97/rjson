@@ -228,7 +228,140 @@ pub fn init(py: Python<'_>) {
     })()
     .unwrap_or(false);
     unsafe { INLINE_INT = ok };
+    #[cfg(rjson_dict_direct)]
+    unsafe {
+        dictiter::ENABLED = dictiter::self_test();
+    }
     detect_cpu();
+}
+
+/// Direct iteration over the entries of combined-table dicts, replacing a
+/// `PyDict_Next` call per item (about a quarter of the instructions of a
+/// small dict item).
+///
+/// `PyDictKeysObject` is private, so this is gated to the CPython versions
+/// whose layout it was written against (3.11-3.13, GIL builds; see
+/// `build.rs`) and enabled only if an init-time self-test over dicts with
+/// str keys, other keys and deleted entries matches `PyDict_Next`. Split
+/// tables (`ma_values != NULL`, e.g. instance dicts) use `PyDict_Next`.
+#[cfg(rjson_dict_direct)]
+mod dictiter {
+    use pyo3::ffi;
+
+    /// `struct _dictkeysobject` up to `dk_indices` (CPython 3.11-3.13).
+    #[repr(C)]
+    struct DictKeys {
+        dk_refcnt: ffi::Py_ssize_t,
+        dk_log2_size: u8,
+        dk_log2_index_bytes: u8,
+        dk_kind: u8,
+        dk_version: u32,
+        dk_usable: ffi::Py_ssize_t,
+        dk_nentries: ffi::Py_ssize_t,
+    }
+
+    /// `DICT_KEYS_GENERAL`: entries are `{hash, key, value}`; otherwise
+    /// (str keys) `{key, value}`.
+    const DICT_KEYS_GENERAL: u8 = 0;
+
+    pub static mut ENABLED: bool = false;
+
+    /// (pointer to the first entry's key slot, number of entries, entry
+    /// size in pointers) of a combined-table dict; the value slot follows
+    /// the key slot. Entries whose value is NULL are deleted.
+    #[inline(always)]
+    pub unsafe fn entries(
+        d: *mut ffi::PyObject,
+    ) -> Option<(*const *mut ffi::PyObject, usize, usize)> {
+        if !ENABLED {
+            return None;
+        }
+        raw_entries(d)
+    }
+
+    #[inline(always)]
+    unsafe fn raw_entries(
+        d: *mut ffi::PyObject,
+    ) -> Option<(*const *mut ffi::PyObject, usize, usize)> {
+        let d = d as *mut ffi::PyDictObject;
+        if !(*d).ma_values.is_null() {
+            return None;
+        }
+        let k = (*d).ma_keys as *const DictKeys;
+        let indices = (k as *const u8).add(std::mem::size_of::<DictKeys>());
+        let entries = indices.add(1usize << (*k).dk_log2_index_bytes) as *const *mut ffi::PyObject;
+        let (stride, key_slot) = if (*k).dk_kind == DICT_KEYS_GENERAL {
+            (3, 1)
+        } else {
+            (2, 0)
+        };
+        Some((entries.add(key_slot), (*k).dk_nentries as usize, stride))
+    }
+
+    /// Does direct iteration give exactly `PyDict_Next`'s items for `d`?
+    unsafe fn same_as_next(d: *mut ffi::PyObject) -> bool {
+        let Some((base, n, stride)) = raw_entries(d) else {
+            return false;
+        };
+        let (mut pos, mut i) = (0, 0);
+        let (mut k, mut v) = (std::ptr::null_mut(), std::ptr::null_mut());
+        while ffi::PyDict_Next(d, &mut pos, &mut k, &mut v) != 0 {
+            while i < n && (*base.add(i * stride + 1)).is_null() {
+                i += 1;
+            }
+            if i == n || *base.add(i * stride) != k || *base.add(i * stride + 1) != v {
+                return false;
+            }
+            i += 1;
+        }
+        (i..n).all(|j| (*base.add(j * stride + 1)).is_null())
+    }
+
+    /// Builds dicts with str keys, non-str keys, deleted entries and 512
+    /// slots (2-byte indices), and compares both iterations. Kept cheap
+    /// (it runs at import): one-character keys, `None` values.
+    pub fn self_test() -> bool {
+        unsafe {
+            let mut ok = true;
+            for (nkeys, str_keys, deleted) in [
+                (0usize, true, &[][..]),
+                (6, true, &[1usize][..]),
+                (200, true, &[0, 7, 150, 199][..]),
+                (6, false, &[2][..]),
+            ] {
+                let d = ffi::PyDict_New();
+                if d.is_null() {
+                    ffi::PyErr_Clear();
+                    return false;
+                }
+                for i in 0..nkeys {
+                    let key = if str_keys || i % 2 == 0 {
+                        ffi::PyUnicode_FromOrdinal(0x4e00 + i as std::os::raw::c_int)
+                    } else {
+                        ffi::PyLong_FromLong(i as _)
+                    };
+                    ok &= !key.is_null() && ffi::PyDict_SetItem(d, key, ffi::Py_None()) == 0;
+                    if !key.is_null() {
+                        ffi::Py_DECREF(key);
+                    }
+                }
+                for &i in deleted {
+                    let key = ffi::PyUnicode_FromOrdinal(0x4e00 + i as std::os::raw::c_int);
+                    ok &= !key.is_null() && ffi::PyDict_DelItem(d, key) == 0;
+                    if !key.is_null() {
+                        ffi::Py_DECREF(key);
+                    }
+                }
+                ok &= same_as_next(d);
+                ffi::Py_DECREF(d);
+                if !ok {
+                    ffi::PyErr_Clear();
+                    return false;
+                }
+            }
+            ok
+        }
+    }
 }
 
 const _: () =
@@ -1705,24 +1838,51 @@ impl Serializer {
         }
         self.depth += 1;
         let mut p = self.put(p, b'{');
+        let mut ns = 0;
+        #[cfg(rjson_dict_direct)]
+        if let Some((base, n, stride)) = dictiter::entries(obj) {
+            // Nothing below runs Python code, so the table cannot change.
+            for i in 0..n {
+                let e = base.add(i * stride);
+                let value = *e.add(1);
+                if value.is_null() {
+                    continue; // deleted entry
+                }
+                p = tri!(self.dict_item(p, *e, value, ns));
+                ns = 1;
+            }
+            self.depth -= 1;
+            return self.put(p, b'}');
+        }
         let mut pos: ffi::Py_ssize_t = 0;
         let mut key: *mut ffi::PyObject = ptr::null_mut();
         let mut value: *mut ffi::PyObject = ptr::null_mut();
-        let mut ns = 0;
         while ffi::PyDict_Next(obj, &mut pos, &mut key, &mut value) != 0 {
-            if ffi::Py_TYPE(key) == str_type() {
-                p = tri!(self.write_str(p, key, b',', ns));
-            } else if ffi::PyUnicode_Check(key) != 0 {
-                p = self.put_sep(p, b',', ns);
-                p = tri!(self.write_str_slow(p, key));
-            } else {
-                return self.fail(SerError::KeyNotStr);
-            }
+            p = tri!(self.dict_item(p, key, value, ns));
             ns = 1;
-            p = tri!(self.ser(p, value, b':', 1));
         }
         self.depth -= 1;
         self.put(p, b'}')
+    }
+
+    /// Writes `,` (if `ns == 1`), `"key":value`.
+    #[inline(always)]
+    unsafe fn dict_item(
+        &mut self,
+        p: Cur,
+        key: *mut ffi::PyObject,
+        value: *mut ffi::PyObject,
+        ns: usize,
+    ) -> CurResult {
+        let p = if ffi::Py_TYPE(key) == str_type() {
+            tri!(self.write_str(p, key, b',', ns))
+        } else if ffi::PyUnicode_Check(key) != 0 {
+            let p = self.put_sep(p, b',', ns);
+            tri!(self.write_str_slow(p, key))
+        } else {
+            return self.fail(SerError::KeyNotStr);
+        };
+        self.ser(p, value, b':', 1)
     }
 
     // ----- dispatch -----

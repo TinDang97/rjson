@@ -207,6 +207,63 @@ class TestListScalarRun:
             assert json.loads(both(obj)) == obj
 
 
+class TestDictLayouts:
+    """dumps reads combined-table dict entries directly on 3.11-3.13."""
+
+    @pytest.mark.parametrize("n", [1, 5, 8, 9, 200, 300, 70000])
+    def test_deleted_entries_and_index_widths(self, n):
+        d = {f"k{i}": i for i in range(n)}
+        for i in range(0, n, 3):
+            del d[f"k{i}"]
+        d["late"] = [1, {"x": None}]
+        assert both(d) == ref(d)
+        d.clear()
+        assert both(d) == "{}"
+        d["again"] = 1
+        assert both(d) == ref(d)
+
+    def test_popitem_and_reinsert(self):
+        d = {str(i): i for i in range(50)}
+        for _ in range(20):
+            k, v = d.popitem()
+            d["x" + k] = v
+        del d["0"]
+        d["0"] = "back"
+        assert both(d) == ref(d)
+
+    def test_general_keys_table(self):
+        # A non-str key switches the table to general entries (with hash);
+        # the error must still be raised, and str keys of such a table that
+        # only has str keys left must serialize in order.
+        d = {"a": 1, 2: "b", "c": 3}
+        with pytest.raises(ValueError, match="keys must be strings"):
+            rjson.dumps(d)
+        del d[2]
+        assert both(d) == ref(d)
+
+    def test_split_table_instance_dict(self):
+        class C:
+            pass
+
+        objs = []
+        for i in range(5):
+            c = C()
+            c.a, c.b, c.c = i, "é" * i, [i]
+            objs.append(c.__dict__)
+        del objs[0]["b"]
+        objs[1]["z"] = None
+        assert both(objs) == ref(objs)
+
+    def test_key_subclasses_and_dict_subclasses(self):
+        class S(str):
+            pass
+
+        d = {S("k"): 1, "é": {S("x"): S("y")}}
+        assert both(d) == ref(d)
+        od = collections.OrderedDict([("b", 1), ("a", 2)])
+        assert both(od) == ref(od)
+
+
 class TestSubclasses:
     def test_str_subclass(self):
         class S(str):
