@@ -438,6 +438,49 @@ class TestLoadsParser:
                   "0.1", "123456789012345678901234567890.5", "1e-400"]:
             assert rjson.loads(s) == json.loads(s), s
 
+    def test_number_digit_counts(self):
+        # The one-pass fast path reads up to 15 integer and 15 fraction
+        # digits as 8-byte words, needs <= 19 digits in total, and is only
+        # used with >= 40 bytes of input left; every other shape goes through
+        # the general parser. Check all digit-count combinations both ways.
+        import json
+        import random
+        rnd = random.Random(7)
+        pad = " " * 45
+        for n1 in range(1, 22):
+            for n2 in range(0, 22):
+                for _ in range(3):
+                    ip = str(rnd.randint(1, 9)) + "".join(rnd.choice("0123456789") for _ in range(n1 - 1))
+                    fp = "".join(rnd.choice("0123456789") for _ in range(n2))
+                    for s in (ip, "-" + ip, ip + "." + fp, "-" + ip + "." + fp, "0." + fp, "-0." + fp):
+                        if s.endswith("."):
+                            continue
+                        exp = json.loads(s)
+                        for doc in (s, "[" + s + "]", "[" + s + pad + "]", "[" + s + "," + s + pad + "]"):
+                            got = rjson.loads(doc)
+                            got = got if not isinstance(got, list) else got[0]
+                            assert type(got) is type(exp) and got == exp, doc
+        for bad in ("01", "-01", "00.5", "1.", "-", "-.5", "1.e5", "1e", "1e+", "01.5"):
+            for doc in ("[" + bad + pad + "]", "[" + bad + "]"):
+                with pytest.raises(ValueError):
+                    rjson.loads(doc)
+        for mant in ("1", "0", "-0", "12", "1.5", "-1.25", "123456789012345.6", "9007199254740993", "4.9406564584124654"):
+            for exp in ("e0", "E5", "e+5", "e-5", "e22", "e-22", "e23", "e308", "e-324", "e-400", "e0400", "e1234", "e-9999"):
+                s = mant + exp
+                exp_val = json.loads(s)
+                for doc in ("[" + s + pad + "]", "[" + s + "]"):
+                    if exp_val in (float("inf"), float("-inf")):
+                        with pytest.raises(ValueError):
+                            rjson.loads(doc)
+                    else:
+                        got = rjson.loads(doc)[0]
+                        assert got == exp_val and repr(got) == repr(exp_val), doc
+        for bad in ("1e", "1e+", "1e-", "1.5E", "1ee5", "1e5.5", "1e+-5"):
+            with pytest.raises(ValueError):
+                rjson.loads("[" + bad + pad + "]")
+        assert rjson.loads("[1.5e3" + pad + "]") == [1500.0]
+        assert rjson.loads("[123456789012345.25" + pad + "]") == [123456789012345.25]
+
     def test_float_overflow_rejected(self):
         with pytest.raises(ValueError):
             rjson.loads("1e400")
@@ -452,6 +495,25 @@ class TestLoadsParser:
         for inp in (doc.encode(), bytearray(doc.encode()), memoryview(doc.encode())):
             assert rjson.loads(inp) == expected
 
+    def test_memoryview_slice_does_not_read_past_end(self):
+        # The parser relies on a NUL byte after the input; sliced memoryviews
+        # are followed by arbitrary bytes, so they must be copied first.
+        assert rjson.loads(memoryview(b"[1]2")[:3]) == [1]
+        assert rjson.loads(memoryview(b"1234")[:2]) == 12
+        assert rjson.loads(memoryview(b"1.5e3")[:3]) == 1.5
+        assert rjson.loads(memoryview(b'"ab"x')[:4]) == "ab"
+        assert rjson.loads(memoryview(b"truex")[:4]) is True
+        assert rjson.loads(memoryview(b" [ ] ")[1:4]) == []
+        for bad in (b'"ab"', b"[1,2]", b"nulx", b"1.5"):
+            with pytest.raises(ValueError):
+                rjson.loads(memoryview(bad)[: len(bad) - 1])
+        with pytest.raises(ValueError, match="empty"):
+            rjson.loads(memoryview(b"1")[:0])
+        with pytest.raises(ValueError, match="empty"):
+            rjson.loads(bytearray())
+        big = b"[" + b"1.25," * 100 + b"2]"
+        assert rjson.loads(memoryview(big + b"999")[: len(big)]) == [1.25] * 100 + [2]
+
     def test_invalid_utf8_rejected(self):
         for bad in (b'"\xff"', b'"\xed\xa0\x80"', b'"\xc3"'):
             with pytest.raises(ValueError):
@@ -465,6 +527,37 @@ class TestLoadsParser:
             with pytest.raises(ValueError):
                 rjson.loads(bad)
 
+    def test_escapes_at_every_block_offset(self):
+        # The escape kernel works on 32-byte blocks with escapes straddling
+        # block ends; the last 64 bytes of the input go through a scalar tail.
+        import json
+        escs = ['\\n', '\\"', '\\\\', '\\/', '\\u00e9', '\\u4e2d', '\\ud83d\\ude00', '\\u0041']
+        for esc in escs:
+            for pre in range(0, 70):
+                for trail in (0, 3, 40, 100):
+                    doc = '["' + "a" * pre + esc + "b" * 5 + esc + '"' + " " * trail + "]"
+                    assert rjson.loads(doc) == json.loads(doc), doc
+                    assert rjson.loads(doc.encode()) == json.loads(doc), doc
+        long = "x\\n" * 200 + "é\\t" * 50 + "\\u20ac" * 30
+        assert rjson.loads('"' + long + '"') == json.loads('"' + long + '"')
+
+    def test_escape_errors_at_every_block_offset(self):
+        import json
+        # (bad sequence, offset of the reported position within it)
+        cases = [('\\x', 0), ('\\ud800', 0), ('\\udc00', 0), ('\\ud800\\u0041', 6), ('\\u12G4', 4),
+                 ('\x01', 0), ('\\uD83D\\uDBFF', 6)]
+        for bad, off in cases:
+            for pre in range(0, 70, 3):
+                doc = '["' + "a\\n" * (pre // 3) + "a" * (pre % 3) + bad + "tail" * 20 + '"]'
+                with pytest.raises(json.JSONDecodeError) as e:
+                    rjson.loads(doc)
+                # The error points at the offending escape / character.
+                assert e.value.pos == doc.index(bad) + off, (doc, e.value.pos)
+        with pytest.raises(ValueError, match="end of data"):
+            rjson.loads('"' + "a\\n" * 40)
+        with pytest.raises(ValueError):
+            rjson.loads(b'"' + b"a\\n" * 40 + b"\xff" + b"b" * 80 + b'"')
+
     def test_control_characters_rejected(self):
         with pytest.raises(ValueError):
             rjson.loads('"a\tb"')
@@ -474,8 +567,65 @@ class TestLoadsParser:
             assert rjson.loads('"' + s + '"') == s
             assert rjson.loads(('"' + s + '"').encode()) == s
 
+    def test_lists_are_normal_lists(self):
+        # Lists get a PyMem_Malloc'd item array attached to an empty list;
+        # they must behave (grow, shrink, free) like any other list.
+        import gc
+        import json
+        import sys
+        for n in (0, 1, 2, 7, 100, 5000):
+            text = json.dumps(list(range(n)))
+            a = rjson.loads(text)
+            assert a == list(range(n))
+            assert sys.getsizeof(a) <= sys.getsizeof(json.loads(text))
+            a.append("x")
+            a.extend(range(50))
+            a.insert(0, None)
+            del a[1:3]
+            a.sort(key=str)
+            a.clear()
+            a += [1, 2]
+            assert a == [1, 2]
+        nested = rjson.loads("[[1, [2, []]], [], {\"a\": [3]}]")
+        nested[0][1].append(nested)
+        del nested
+        gc.collect()
+
     def test_duplicate_keys_last_wins(self):
         assert rjson.loads('{"a": 1, "b": 2, "a": 3}') == {"a": 3, "b": 2}
+
+    def test_dict_memory_matches_json(self):
+        # Small dicts must keep the compact str-only key table; on 3.13
+        # (_PyDict_FromItems) presized large dicts keep it too.
+        import json
+        import sys
+        sizes = (0, 1, 5, 6, 8) if sys.version_info[:2] != (3, 13) else (0, 1, 5, 6, 8, 9, 12, 100, 1000)
+        for n in sizes:
+            t = json.dumps({"k%d" % i: i for i in range(n)})
+            assert sys.getsizeof(rjson.loads(t)) <= sys.getsizeof(json.loads(t)), n
+        t = '{"a": 1, "b": {"c": [1]}, "a": 3, "b": 4}'
+        assert list(rjson.loads(t).items()) == [("a", 3), ("b", 4)]
+
+    def test_key_cache_lengths_and_collisions(self):
+        # The key cache hashes only the first/last 8 bytes and the length, and
+        # compares 16 bytes at a time; keys that differ only in the middle, and
+        # keys near the end of the input (zero-padded copy), must stay distinct.
+        import json
+        keys = []
+        for n in range(0, 70):
+            keys.append("k" * n)
+            if n >= 17:
+                mid = n // 2
+                keys.append("k" * mid + "X" + "k" * (n - mid - 1))
+                keys.append("k" * mid + "é" + "k" * (n - mid - 2))
+        doc = {k: i for i, k in enumerate(keys)}
+        text = json.dumps(doc, ensure_ascii=False)
+        for _ in range(3):
+            assert rjson.loads(text) == doc
+            for k, i in doc.items():
+                small = json.dumps({k: i}, ensure_ascii=False)
+                assert rjson.loads(small) == {k: i}
+                assert rjson.loads(small.encode()) == {k: i}
 
     def test_long_and_escaped_keys(self):
         k = "k" * 100
