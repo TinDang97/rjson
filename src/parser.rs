@@ -327,15 +327,12 @@ impl<'a> Parser<'a> {
         self.depth -= 1;
         let n = self.stack.len() - base;
         unsafe {
-            let list = ffi::PyList_New(n as ffi::Py_ssize_t);
+            let list = list_from_items(self.stack.as_ptr().add(base), n);
             if list.is_null() {
-                return self.err("out of memory", self.pos);
+                // The items are still on the stack and released by `parse`.
+                return self.err_oom();
             }
-            if n > 0 {
-                let items = (*(list as *mut ffi::PyListObject)).ob_item;
-                ptr::copy_nonoverlapping(self.stack.as_ptr().add(base), items, n);
-                self.stack.set_len(base);
-            }
+            self.stack.set_len(base);
             Ok(list)
         }
     }
@@ -1319,6 +1316,55 @@ const POW10: [f64; 23] = [
     1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20,
     1e21, 1e22,
 ];
+
+// ============================================================================
+// List construction
+// ============================================================================
+
+/// New list holding the `n` references at `src`, which it takes over on
+/// success (on failure they are untouched and NULL is returned).
+///
+/// `PyList_New(n)` allocates the item array with `PyMem_Calloc` and zeroes
+/// it only for us to overwrite every slot; instead, attach a `PyMem_Malloc`
+/// array to an empty list, exactly as `PyList_New(n)` would leave it
+/// (`ob_item` from the PyMem allocator, `allocated == size == n`), which is
+/// what `list_dealloc`/`list_resize` expect. `PyListObject` is part of the
+/// public CPython (non-limited) API; free-threaded builds use a different
+/// item storage, so they take the plain path.
+#[inline(always)]
+unsafe fn list_from_items(src: *const *mut ffi::PyObject, n: usize) -> *mut ffi::PyObject {
+    #[cfg(not(Py_GIL_DISABLED))]
+    {
+        if n == 0 {
+            return ffi::PyList_New(0);
+        }
+        let items = ffi::PyMem_Malloc(n * std::mem::size_of::<*mut ffi::PyObject>()) as *mut *mut ffi::PyObject;
+        if items.is_null() {
+            return ptr::null_mut();
+        }
+        let list = ffi::PyList_New(0);
+        if list.is_null() {
+            ffi::PyMem_Free(items as *mut std::ffi::c_void);
+            return list;
+        }
+        ptr::copy_nonoverlapping(src, items, n);
+        let l = list as *mut ffi::PyListObject;
+        (*l).ob_item = items;
+        (*l).allocated = n as ffi::Py_ssize_t;
+        (*(list as *mut ffi::PyVarObject)).ob_size = n as ffi::Py_ssize_t; // Py_SET_SIZE
+        list
+    }
+    #[cfg(Py_GIL_DISABLED)]
+    {
+        let list = ffi::PyList_New(n as ffi::Py_ssize_t);
+        if !list.is_null() {
+            for i in 0..n {
+                ffi::PyList_SET_ITEM(list, i as ffi::Py_ssize_t, *src.add(i));
+            }
+        }
+        list
+    }
+}
 
 // ============================================================================
 // Dict construction

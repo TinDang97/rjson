@@ -567,6 +567,30 @@ class TestLoadsParser:
             assert rjson.loads('"' + s + '"') == s
             assert rjson.loads(('"' + s + '"').encode()) == s
 
+    def test_lists_are_normal_lists(self):
+        # Lists get a PyMem_Malloc'd item array attached to an empty list;
+        # they must behave (grow, shrink, free) like any other list.
+        import gc
+        import json
+        import sys
+        for n in (0, 1, 2, 7, 100, 5000):
+            text = json.dumps(list(range(n)))
+            a = rjson.loads(text)
+            assert a == list(range(n))
+            assert sys.getsizeof(a) <= sys.getsizeof(json.loads(text))
+            a.append("x")
+            a.extend(range(50))
+            a.insert(0, None)
+            del a[1:3]
+            a.sort(key=str)
+            a.clear()
+            a += [1, 2]
+            assert a == [1, 2]
+        nested = rjson.loads("[[1, [2, []]], [], {\"a\": [3]}]")
+        nested[0][1].append(nested)
+        del nested
+        gc.collect()
+
     def test_duplicate_keys_last_wins(self):
         assert rjson.loads('{"a": 1, "b": 2, "a": 3}') == {"a": 3, "b": 2}
 
