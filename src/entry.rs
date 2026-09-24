@@ -24,39 +24,23 @@
 //! `METH_FASTCALL | METH_KEYWORDS` with hand-parsed `kwnames` (orjson style),
 //! not PyO3's `FunctionDescription`.
 //!
-//! The work itself lives in `crate::loads_impl` / `crate::dumps_impl`; this
+//! The work itself lives in `crate::parser::parse` / `crate::dumps_impl`; this
 //! file only converts arguments and results.
 
-use pyo3::exceptions::PyTypeError;
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::PyCFunction;
 use std::os::raw::c_char;
 
-/// Borrow the JSON bytes of a `str` / `bytes` / `bytearray` argument
-/// (orjson accepts the same input types; `memoryview` is still TODO).
-/// Returns `(bytes, is_str)`; `is_str` means known-valid UTF-8.
-#[inline(always)]
-unsafe fn input_bytes<'a>(py: Python<'_>, arg: *mut ffi::PyObject) -> PyResult<(&'a [u8], bool)> {
-    if ffi::PyUnicode_Check(arg) != 0 {
-        return Ok((crate::pystr::utf8(py, arg)?, true));
-    }
-    if ffi::PyBytes_Check(arg) != 0 {
-        let p = ffi::PyBytes_AsString(arg) as *const u8;
-        let n = ffi::PyBytes_Size(arg) as usize;
-        return Ok((std::slice::from_raw_parts(p, n), false));
-    }
-    if ffi::PyByteArray_Check(arg) != 0 {
-        let p = ffi::PyByteArray_AsString(arg) as *const u8;
-        let n = ffi::PyByteArray_Size(arg) as usize;
-        return Ok((std::slice::from_raw_parts(p, n), false));
-    }
-    Err(PyTypeError::new_err("Input must be bytes, bytearray, or str"))
-}
-
 unsafe fn loads_body(py: Python<'_>, _m: *mut ffi::PyObject, arg: *mut ffi::PyObject) -> PyResult<*mut ffi::PyObject> {
-    let (input, is_str) = input_bytes(py, arg)?;
-    crate::loads_impl(py, input, is_str)
+    // str / bytes / bytearray / memoryview; see `parser::get_input`.
+    let input = crate::parser::get_input(py, arg)?;
+    let buf: &[u8] = if input.len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(input.ptr, input.len)
+    };
+    crate::parser::parse(py, buf, input.utf8_valid)
 }
 
 unsafe fn dumps_body(py: Python<'_>, _m: *mut ffi::PyObject, arg: *mut ffi::PyObject) -> PyResult<*mut ffi::PyObject> {
@@ -72,7 +56,7 @@ unsafe fn dumps_body(py: Python<'_>, _m: *mut ffi::PyObject, arg: *mut ffi::PyOb
     })
 }
 
-/// `loads(obj: str | bytes | bytearray) -> Any`
+/// `loads(obj: str | bytes | bytearray | memoryview) -> Any`
 unsafe extern "C" fn loads(module: *mut ffi::PyObject, arg: *mut ffi::PyObject) -> *mut ffi::PyObject {
     pyo3::impl_::trampoline::binaryfunc(module, arg, loads_body)
 }
@@ -97,7 +81,7 @@ static METHODS: MethodDefs = MethodDefs([
         ml_name: c"loads".as_ptr(),
         ml_meth: ffi::PyMethodDefPointer { PyCFunction: loads },
         ml_flags: ffi::METH_O,
-        ml_doc: c"loads(obj, /)\n--\n\nDeserialize JSON (str, bytes or bytearray) to Python objects.".as_ptr(),
+        ml_doc: c"loads(obj, /)\n--\n\nDeserialize JSON (str, bytes, bytearray or memoryview) to Python objects.".as_ptr(),
     },
     ffi::PyMethodDef {
         ml_name: c"dumps".as_ptr(),

@@ -49,13 +49,13 @@ class TestBasicTypes:
 
     def test_integer_very_large(self):
         # Python arbitrary precision int
-        # Note: serde_json parses very large ints as floats (JSON spec limitation)
+        # Integers beyond 64 bits round-trip exactly (same as stdlib json)
         very_large = 123456789012345678901234567890
         result = rjson.dumps(very_large)
-        # Round-trip loses precision for numbers > f64 range
         loaded = rjson.loads(result)
-        assert isinstance(loaded, float)  # Becomes float on loads
-        assert loaded == pytest.approx(very_large, rel=1e-10)
+        assert isinstance(loaded, int)
+        assert loaded == very_large
+        assert rjson.loads(str(-very_large)) == -very_large
 
     def test_float_zero(self):
         assert rjson.dumps(0.0) == "0.0"
@@ -284,12 +284,12 @@ class TestErrorHandling:
         with pytest.raises(ValueError, match="JSON parsing error"):
             rjson.loads(doc)
 
-    @pytest.mark.parametrize("conv", [str, lambda s: s.encode(), lambda s: bytearray(s.encode())])
+    @pytest.mark.parametrize("conv", [str, lambda s: s.encode(), lambda s: bytearray(s.encode()), lambda s: memoryview(s.encode())])
     def test_loads_accepts_str_bytes_bytearray(self, conv):
         doc = '{"a": [1, 2.5, "héllo \U0001F600", null, true]}'
         assert rjson.loads(conv(doc)) == {"a": [1, 2.5, "héllo \U0001F600", None, True]}
 
-    @pytest.mark.parametrize("bad", [None, 1, ["[]"], memoryview(b"[]")])
+    @pytest.mark.parametrize("bad", [None, 1, ["[]"], 1.5])
     def test_loads_rejects_other_input_types(self, bad):
         with pytest.raises(TypeError):
             rjson.loads(bad)
@@ -407,6 +407,102 @@ class TestCompatibility:
         json_result = json.dumps(data, separators=(",", ":"), sort_keys=True)
         # Note: dict order may differ, so we parse and compare
         assert rjson.loads(rjson_result) == json.loads(json_result)
+
+
+class TestLoadsParser:
+    """Regression tests for the hand-written loads parser."""
+
+    def test_trailing_content_rejected(self):
+        with pytest.raises(ValueError, match="JSON parsing error"):
+            rjson.loads("1 2")
+        with pytest.raises(ValueError):
+            rjson.loads("[1] x")
+        assert rjson.loads(" \n[1]\r\n\t") == [1]
+
+    def test_raises_json_decode_error(self):
+        import json
+        with pytest.raises(json.JSONDecodeError):
+            rjson.loads("[1,")
+
+    def test_negative_zero(self):
+        assert rjson.loads("-0") == 0 and isinstance(rjson.loads("-0"), int)
+        assert math.copysign(1.0, rjson.loads("-0.0")) == -1.0
+
+    def test_float_correct_rounding(self):
+        import json
+        for s in ["43.474709000000125", "0.000000000000000000000000000001", "2.2250738585072014e-308",
+                  "5e-324", "1.7976931348623157e308", "9007199254740993", "9007199254740993.0",
+                  "0.1", "123456789012345678901234567890.5", "1e-400"]:
+            assert rjson.loads(s) == json.loads(s), s
+
+    def test_float_overflow_rejected(self):
+        with pytest.raises(ValueError):
+            rjson.loads("1e400")
+
+    def test_int_boundaries(self):
+        for v in [2**63 - 1, -2**63, 2**63, 2**64 - 1, 2**64, -2**63 - 1, 10**19, 10**20, -10**40]:
+            assert rjson.loads(str(v)) == v and isinstance(rjson.loads(str(v)), int)
+
+    def test_bytes_bytearray_memoryview(self):
+        doc = '{"a": ["é", 1, 2.5, null]}'
+        expected = {"a": ["é", 1, 2.5, None]}
+        for inp in (doc.encode(), bytearray(doc.encode()), memoryview(doc.encode())):
+            assert rjson.loads(inp) == expected
+
+    def test_invalid_utf8_rejected(self):
+        for bad in (b'"\xff"', b'"\xed\xa0\x80"', b'"\xc3"'):
+            with pytest.raises(ValueError):
+                rjson.loads(bad)
+        with pytest.raises(ValueError):
+            rjson.loads('"\ud800"')
+
+    def test_unicode_escapes(self):
+        assert rjson.loads('"\\ud83d\\ude00 \\u00e9\\u4e2d\\/\\b\\f\\n\\r\\t"') == "😀 é中/\b\f\n\r\t"
+        for bad in ('"\\ud800"', '"\\udc00"', '"\\ud800\\u0041"', '"\\x"', '"\\u12"'):
+            with pytest.raises(ValueError):
+                rjson.loads(bad)
+
+    def test_control_characters_rejected(self):
+        with pytest.raises(ValueError):
+            rjson.loads('"a\tb"')
+
+    def test_non_ascii_kinds(self):
+        for s in ["héllo", "ÿ" * 20, "Ā中" * 10, "日本語テキスト" * 5, "😀" * 3 + "a" * 17, "x" * 100 + "é"]:
+            assert rjson.loads('"' + s + '"') == s
+            assert rjson.loads(('"' + s + '"').encode()) == s
+
+    def test_duplicate_keys_last_wins(self):
+        assert rjson.loads('{"a": 1, "b": 2, "a": 3}') == {"a": 3, "b": 2}
+
+    def test_long_and_escaped_keys(self):
+        k = "k" * 100
+        assert rjson.loads('{"%s": 1, "a\\nb": 2}' % k) == {k: 1, "a\nb": 2}
+
+    def test_nesting_limit(self):
+        assert rjson.loads("[" * 1000 + "]" * 1000) is not None
+        with pytest.raises(ValueError, match="depth"):
+            rjson.loads("[" * 1100 + "]" * 1100)
+
+    def test_gc_state_preserved(self):
+        import gc
+        assert gc.isenabled()
+        rjson.loads("[[1], {}]")
+        assert gc.isenabled()
+        gc.disable()
+        try:
+            rjson.loads("[[1], {}]")
+            assert not gc.isenabled()
+        finally:
+            gc.enable()
+
+    def test_rejects_non_json_literals(self):
+        for bad in ("NaN", "Infinity", "-Infinity", "01", "1.", ".5", "[1,]", '{"a":1,}', "", "  ", "﻿[1]"):
+            with pytest.raises(ValueError):
+                rjson.loads(bad)
+
+    def test_unsupported_input_type(self):
+        with pytest.raises(TypeError):
+            rjson.loads(123)
 
 
 if __name__ == "__main__":
