@@ -59,6 +59,22 @@ class TestStrings:
         # The str result must be canonical (smallest kind) for == to work.
         assert json.loads(s) == data
 
+    @pytest.mark.parametrize("base", ["\xe9", "\u0100", "\u8000", "\uffff", "\U0001f600", "\U0010ffff"])
+    def test_non_ascii_escape_scan(self, base):
+        # The str-mode scan narrows UCS2/UCS4 units with saturating packs; units
+        # whose low byte looks like an escape (U+0122, U+015C, U+0100, U+10022)
+        # or whose sign bit is set (U+8000) must not be flagged, and a real
+        # escape must be found at every position and length.
+        lookalikes = "\u0122\u015c\u0100\u8000\U00010022\U0001005c\u2028"
+        for n in list(range(0, 70)) + [127, 128, 129, 255, 256, 257, 1000]:
+            plain = (base + lookalikes) * (n // 8 + 1)
+            plain = plain[:n] if n else base
+            assert both([plain]) == ref([plain])
+            for k in {0, n // 3, n // 2, n - 1, n}:
+                for ch in ("\n", '"', "\\", "\x00", "\x1f"):
+                    s = plain[:k] + ch + plain[k:]
+                    assert both([s, {s: s}]) == ref([s, {s: s}])
+
     def test_str_result_kinds(self):
         for obj in (["a", "é"], ["a", "日"], ["a", "😀"], ["é", "日", "😀"], ["plain"]):
             s = rjson.dumps(obj)

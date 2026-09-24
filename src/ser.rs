@@ -332,15 +332,20 @@ unsafe fn escape_body(dst: *mut u8, src: *const u8, len: usize) -> *mut u8 {
 #[cfg(target_arch = "x86_64")]
 static mut HAS_AVX512VL: bool = false;
 
+/// AVX2 available (checked once at init).
+#[cfg(target_arch = "x86_64")]
+static mut HAS_AVX2: bool = false;
+
 #[cfg(target_arch = "x86_64")]
 fn detect_cpu() {
-    // `--cfg rjson_no_avx512` forces the SSE2/AVX2 kernels (for testing them
-    // on AVX-512 machines).
+    // `--cfg rjson_no_avx512` forces the SSE2/AVX2 kernels and
+    // `--cfg rjson_no_avx2` the SSE scans (for testing them on newer CPUs).
     unsafe {
         HAS_AVX512VL = !cfg!(rjson_no_avx512)
             && std::arch::is_x86_feature_detected!("avx512f")
             && std::arch::is_x86_feature_detected!("avx512bw")
             && std::arch::is_x86_feature_detected!("avx512vl");
+        HAS_AVX2 = !cfg!(rjson_no_avx2) && std::arch::is_x86_feature_detected!("avx2");
     }
 }
 
@@ -694,64 +699,158 @@ unsafe fn widen<S: Unit, D: Unit>(src: *const S, dst: *mut D, n: usize) {
 
 /// Does any code unit of a UCS1/UCS2/UCS4 buffer need JSON escaping?
 unsafe fn kind_needs_escape(kind: u32, data: *const u8, n: usize) -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        use std::arch::x86_64::*;
-        let (bytes, mut i) = (n * kind as usize, 0usize);
-        match kind {
-            1 => {
-                while i + 16 <= bytes {
-                    if x86::mask16(_mm_loadu_si128(data.add(i) as *const __m128i)) != 0 {
-                        return true;
-                    }
-                    i += 16;
-                }
-                units_need_escape(data.add(i), bytes - i)
-            }
-            2 => {
-                let q = _mm_set1_epi16(0x22);
-                let b = _mm_set1_epi16(0x5c);
-                let x1f = _mm_set1_epi16(0x1f);
-                while i + 16 <= bytes {
-                    let v = _mm_loadu_si128(data.add(i) as *const __m128i);
-                    let m = _mm_or_si128(
-                        _mm_or_si128(_mm_cmpeq_epi16(v, q), _mm_cmpeq_epi16(v, b)),
-                        _mm_cmpeq_epi16(_mm_subs_epu16(v, x1f), _mm_setzero_si128()),
-                    );
-                    if _mm_movemask_epi8(m) != 0 {
-                        return true;
-                    }
-                    i += 16;
-                }
-                units_need_escape(data.add(i) as *const u16, (bytes - i) / 2)
-            }
-            _ => {
-                // Code points are < 0x110000, so signed 32-bit compares work.
-                let q = _mm_set1_epi32(0x22);
-                let b = _mm_set1_epi32(0x5c);
-                let x20 = _mm_set1_epi32(0x20);
-                while i + 16 <= bytes {
-                    let v = _mm_loadu_si128(data.add(i) as *const __m128i);
-                    let m = _mm_or_si128(
-                        _mm_or_si128(_mm_cmpeq_epi32(v, q), _mm_cmpeq_epi32(v, b)),
-                        _mm_cmplt_epi32(v, x20),
-                    );
-                    if _mm_movemask_epi8(m) != 0 {
-                        return true;
-                    }
-                    i += 16;
-                }
-                units_need_escape(data.add(i) as *const u32, (bytes - i) / 4)
-            }
+    let bytes = n * kind as usize;
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
+    if bytes >= 16 {
+        return match kind {
+            1 => kscan::scan::<1>(data, bytes),
+            2 => kscan::scan::<2>(data, bytes),
+            _ => kscan::scan::<4>(data, bytes),
+        };
+    }
+    match kind {
+        1 => units_need_escape(data, n),
+        2 => units_need_escape(data as *const u16, n),
+        _ => units_need_escape(data as *const u32, n),
+    }
+}
+
+/// SIMD scans for `kind_needs_escape`. UCS2/UCS4 units are narrowed to
+/// bytes with saturating packs (a unit above 0xff becomes 0xff, which never
+/// needs escaping), so every 64 (SSE) or 128 (AVX2) input bytes cost one
+/// byte-vector check. Pack lane order does not matter for an "any" test.
+#[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
+mod kscan {
+    use std::arch::x86_64::*;
+
+    /// Lanes of a byte vector that need escaping (< 0x20, '"', '\\').
+    #[inline(always)]
+    unsafe fn esc8(v: __m128i) -> __m128i {
+        _mm_or_si128(
+            _mm_or_si128(
+                _mm_cmpeq_epi8(v, _mm_set1_epi8(0x22)),
+                _mm_cmpeq_epi8(v, _mm_set1_epi8(0x5c)),
+            ),
+            _mm_cmpeq_epi8(_mm_min_epu8(v, _mm_set1_epi8(0x1f)), v),
+        )
+    }
+
+    /// Two vectors of `K`-byte units -> one vector of bytes with the same
+    /// escape status (K = 2 or 4).
+    #[inline(always)]
+    unsafe fn narrow<const K: usize>(a: __m128i, b: __m128i) -> __m128i {
+        let ff = _mm_set1_epi16(0xff);
+        if K == 2 {
+            _mm_packus_epi16(_mm_min_epu16(a, ff), _mm_min_epu16(b, ff))
+        } else {
+            // Code points are < 0x110000, so the signed saturation of
+            // packus_epi32 maps them to 0..=0xffff exactly or 0xffff.
+            let w = _mm_packus_epi32(a, b);
+            _mm_packus_epi16(_mm_min_epu16(w, ff), _mm_min_epu16(w, ff))
         }
     }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        match kind {
-            1 => units_need_escape(data, n),
-            2 => units_need_escape(data as *const u16, n),
-            _ => units_need_escape(data as *const u32, n),
+
+    /// Escape lanes of 64 bytes at `p`.
+    #[inline(always)]
+    unsafe fn block64<const K: usize>(p: *const u8) -> __m128i {
+        let a = _mm_loadu_si128(p as *const __m128i);
+        let b = _mm_loadu_si128(p.add(16) as *const __m128i);
+        let c = _mm_loadu_si128(p.add(32) as *const __m128i);
+        let d = _mm_loadu_si128(p.add(48) as *const __m128i);
+        if K == 1 {
+            _mm_or_si128(
+                _mm_or_si128(esc8(a), esc8(b)),
+                _mm_or_si128(esc8(c), esc8(d)),
+            )
+        } else if K == 2 {
+            _mm_or_si128(esc8(narrow::<2>(a, b)), esc8(narrow::<2>(c, d)))
+        } else {
+            let ab = _mm_packus_epi32(a, b);
+            let cd = _mm_packus_epi32(c, d);
+            esc8(narrow::<2>(ab, cd))
         }
+    }
+
+    /// Escape lanes of 16 bytes at `p`.
+    #[inline(always)]
+    unsafe fn block16<const K: usize>(p: *const u8) -> __m128i {
+        let a = _mm_loadu_si128(p as *const __m128i);
+        if K == 1 {
+            esc8(a)
+        } else {
+            esc8(narrow::<K>(a, a))
+        }
+    }
+
+    /// `bytes >= 16`, a multiple of `K`.
+    #[inline(always)]
+    pub unsafe fn scan<const K: usize>(p: *const u8, bytes: usize) -> bool {
+        if bytes >= 128 && super::HAS_AVX2 {
+            return scan_avx2::<K>(p, bytes);
+        }
+        let mut i = 0;
+        if bytes >= 64 {
+            while i + 64 <= bytes {
+                if _mm_movemask_epi8(block64::<K>(p.add(i))) != 0 {
+                    return true;
+                }
+                i += 64;
+            }
+            // Final partial block: overlap the previous one.
+            return i != bytes && _mm_movemask_epi8(block64::<K>(p.add(bytes - 64))) != 0;
+        }
+        while i + 16 <= bytes {
+            if _mm_movemask_epi8(block16::<K>(p.add(i))) != 0 {
+                return true;
+            }
+            i += 16;
+        }
+        i != bytes && _mm_movemask_epi8(block16::<K>(p.add(bytes - 16))) != 0
+    }
+
+    /// AVX2 version of the 64-byte loop, 128 bytes per check. `bytes >= 128`.
+    #[target_feature(enable = "avx2")]
+    unsafe fn scan_avx2<const K: usize>(p: *const u8, bytes: usize) -> bool {
+        #[inline(always)]
+        unsafe fn esc8(v: __m256i) -> __m256i {
+            _mm256_or_si256(
+                _mm256_or_si256(
+                    _mm256_cmpeq_epi8(v, _mm256_set1_epi8(0x22)),
+                    _mm256_cmpeq_epi8(v, _mm256_set1_epi8(0x5c)),
+                ),
+                _mm256_cmpeq_epi8(_mm256_min_epu8(v, _mm256_set1_epi8(0x1f)), v),
+            )
+        }
+        #[inline(always)]
+        unsafe fn n2(a: __m256i, b: __m256i) -> __m256i {
+            let ff = _mm256_set1_epi16(0xff);
+            _mm256_packus_epi16(_mm256_min_epu16(a, ff), _mm256_min_epu16(b, ff))
+        }
+        #[inline(always)]
+        unsafe fn block<const K: usize>(p: *const u8) -> __m256i {
+            let a = super::load256(p);
+            let b = super::load256(p.add(32));
+            let c = super::load256(p.add(64));
+            let d = super::load256(p.add(96));
+            if K == 1 {
+                _mm256_or_si256(
+                    _mm256_or_si256(esc8(a), esc8(b)),
+                    _mm256_or_si256(esc8(c), esc8(d)),
+                )
+            } else if K == 2 {
+                _mm256_or_si256(esc8(n2(a, b)), esc8(n2(c, d)))
+            } else {
+                esc8(n2(_mm256_packus_epi32(a, b), _mm256_packus_epi32(c, d)))
+            }
+        }
+        let mut i = 0;
+        while i + 128 <= bytes {
+            if _mm256_movemask_epi8(block::<K>(p.add(i))) != 0 {
+                return true;
+            }
+            i += 128;
+        }
+        i != bytes && _mm256_movemask_epi8(block::<K>(p.add(bytes - 128))) != 0
     }
 }
 
