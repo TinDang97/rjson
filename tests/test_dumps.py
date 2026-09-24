@@ -47,6 +47,18 @@ class TestStrings:
         s = "\x01" * 70000 + '"' * 70000
         assert both([s, s]) == ref([s, s])
 
+    def test_large_strings_with_tight_buffer(self):
+        # The buffer is sized from the previous result; >64 KiB strings are
+        # escaped in room-bounded pieces and reserve exactly near the end.
+        plain = "a" * 300000
+        for tail in ("", "\n" * 10, "\x01" * 70000, '"' * 200000):
+            for body in (plain, "\xe9" * 150000, "\u65e5" * 100000, "b\\" * 100000):
+                s = body + tail
+                for f in (rjson.dumps, rjson.dumps_bytes):
+                    f(plain)  # size hint = len(plain)
+                assert both(s) == ref(s)
+                assert both([plain, s]) == ref([plain, s])
+
     def test_all_control_chars(self):
         s = "".join(chr(i) for i in range(0x80))
         assert both(s) == ref(s)
@@ -58,6 +70,35 @@ class TestStrings:
         assert s == ref(data)
         # The str result must be canonical (smallest kind) for == to work.
         assert json.loads(s) == data
+
+    @pytest.mark.parametrize("base", ["\xe9", "\u0100", "\u8000", "\uffff", "\U0001f600", "\U0010ffff"])
+    def test_non_ascii_escape_scan(self, base):
+        # The str-mode scan narrows UCS2/UCS4 units with saturating packs; units
+        # whose low byte looks like an escape (U+0122, U+015C, U+0100, U+10022)
+        # or whose sign bit is set (U+8000) must not be flagged, and a real
+        # escape must be found at every position and length.
+        lookalikes = "\u0122\u015c\u0100\u8000\U00010022\U0001005c\u2028"
+        for n in list(range(0, 70)) + [127, 128, 129, 255, 256, 257, 511, 512, 513, 600, 640, 641, 1000]:
+            plain = (base + lookalikes) * (n // 8 + 1)
+            plain = plain[:n] if n else base
+            assert both([plain]) == ref([plain])
+            for k in {0, n // 3, n // 2, n - 1, n}:
+                for ch in ("\n", '"', "\\", "\x00", "\x1f"):
+                    s = plain[:k] + ch + plain[k:]
+                    assert both([s, {s: s}]) == ref([s, {s: s}])
+
+    def test_late_escape_in_non_ascii(self):
+        # str mode copies non-ASCII strings optimistically and grows the
+        # result when it meets the first one that needs escaping.
+        for a in ("\xe9", "\u65e5", "\U0001f600"):
+            for b in ("\xe9", "\u65e5", "\U0001f600"):
+                for k in (0, 1, 2, 50):
+                    obj = [a * 3] * k + ["x" + b + "\n\"" + a] + [b * 2, "plain", a + "\\"] + [{a: b}] * k
+                    assert both(obj) == ref(obj)
+                    # Escapes beyond the result's slack force it to grow.
+                    for heavy in (a + "\n" * 1000, a + "\x01" * 300 + b, (a + '"') * 500):
+                        obj = [b * 40] * k + [heavy, a, "tail"] + [heavy] * (k % 3)
+                        assert both(obj) == ref(obj)
 
     def test_str_result_kinds(self):
         for obj in (["a", "é"], ["a", "日"], ["a", "😀"], ["é", "日", "😀"], ["plain"]):
@@ -84,6 +125,18 @@ class TestNumbers:
         assert both(vals) == ref(vals)
         for v in vals:
             assert both(v) == str(v)
+
+    def test_int_digit_counts(self):
+        # Every digit count and power-of-ten edge of the SWAR formatter.
+        vals = [10**k + d for k in range(0, 19) for d in (-2, -1, 0, 1)]
+        vals += [2**30 - 1, 2**30, 999_999_999, 1_000_000_000, 1_073_741_823]
+        vals += list(range(0, 300_000, 7)) + list(range(99_999_000, 100_001_000))
+        vals += [-v for v in vals]
+        assert both(vals) == ref(vals)
+        assert both({"k": vals[:5000]}) == ref({"k": vals[:5000]})
+        for v in vals[:200]:
+            assert both(v) == str(v)
+            assert both({"a": v}) == ref({"a": v})
 
     def test_huge_int_raises(self):
         if not hasattr(sys, "get_int_max_str_digits"):
@@ -120,6 +173,111 @@ class TestHomogeneousListsWithOddTail:
     ])
     def test_mixed(self, obj):
         assert both(obj) == ref(obj)
+
+
+class TestListScalarRun:
+    """The list fast loop writes runs of exact ints/floats and must hand every
+    other item (including subclasses and big ints) to the generic path."""
+
+    class I(int):
+        def __str__(self):
+            return "nope"
+
+    class F(float):
+        def __repr__(self):
+            return "nope"
+
+    def test_late_type_switch(self):
+        for tail in (True, False, None, "x", "é", 2**60, -(2**61), 10**30, [1, 2], {"a": 1}, (3,),
+                     self.I(7), self.F(2.5), 1.5, 3):
+            for n in (0, 1, 2, 15, 16, 17, 1000, 5000):
+                for obj in ([7] * n + [tail] + [8] * 3, [0.5] * n + [tail] + [1] * 3 + [0.25]):
+                    want = ref([float(x) if type(x) is self.F else x for x in obj])
+                    assert both(obj) == want
+
+    def test_int_boundaries_in_runs(self):
+        vals = []
+        for b in (29, 30, 31, 59, 60, 61, 63, 64):
+            vals += [2**b - 1, 2**b, 2**b + 1, -(2**b) + 1, -(2**b), -(2**b) - 1]
+        vals += [0, -0, 9, 10, 99999, 100000, 99999999, 100000000, 999999999, 10**9]
+        vals += [-v for v in vals]
+        assert both(vals) == ref(vals)
+        assert both(vals * 50) == ref(vals * 50)
+
+    def test_subclass_items(self):
+        obj = [1, self.I(2), 3, self.F(1.5), 2.5, self.I(2**70)]
+        assert both(obj) == "[1,2,3,1.5,2.5,1180591620717411303424]"
+
+    @pytest.mark.parametrize("v", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_late(self, v):
+        for f in (rjson.dumps, rjson.dumps_bytes):
+            with pytest.raises(ValueError, match="non-finite"):
+                f([1.0] * 1000 + [v])
+            with pytest.raises(ValueError, match="non-finite"):
+                f([1] * 1000 + [v])
+
+    def test_growth_inside_run(self):
+        # Output far larger than the size hint of the previous call.
+        rjson.dumps([])
+        for obj in ([-(2**59)] * 20000, [1.2345678901234567e-300] * 20000, list(range(10**6))):
+            assert json.loads(both(obj)) == obj
+
+
+class TestDictLayouts:
+    """dumps reads combined-table dict entries directly on 3.11-3.13."""
+
+    @pytest.mark.parametrize("n", [1, 5, 8, 9, 200, 300, 70000])
+    def test_deleted_entries_and_index_widths(self, n):
+        d = {f"k{i}": i for i in range(n)}
+        for i in range(0, n, 3):
+            del d[f"k{i}"]
+        d["late"] = [1, {"x": None}]
+        assert both(d) == ref(d)
+        d.clear()
+        assert both(d) == "{}"
+        d["again"] = 1
+        assert both(d) == ref(d)
+
+    def test_popitem_and_reinsert(self):
+        d = {str(i): i for i in range(50)}
+        for _ in range(20):
+            k, v = d.popitem()
+            d["x" + k] = v
+        del d["0"]
+        d["0"] = "back"
+        assert both(d) == ref(d)
+
+    def test_general_keys_table(self):
+        # A non-str key switches the table to general entries (with hash);
+        # the error must still be raised, and str keys of such a table that
+        # only has str keys left must serialize in order.
+        d = {"a": 1, 2: "b", "c": 3}
+        with pytest.raises(ValueError, match="keys must be strings"):
+            rjson.dumps(d)
+        del d[2]
+        assert both(d) == ref(d)
+
+    def test_split_table_instance_dict(self):
+        class C:
+            pass
+
+        objs = []
+        for i in range(5):
+            c = C()
+            c.a, c.b, c.c = i, "é" * i, [i]
+            objs.append(c.__dict__)
+        del objs[0]["b"]
+        objs[1]["z"] = None
+        assert both(objs) == ref(objs)
+
+    def test_key_subclasses_and_dict_subclasses(self):
+        class S(str):
+            pass
+
+        d = {S("k"): 1, "é": {S("x"): S("y")}}
+        assert both(d) == ref(d)
+        od = collections.OrderedDict([("b", 1), ("a", 2)])
+        assert both(od) == ref(od)
 
 
 class TestSubclasses:
@@ -199,3 +357,20 @@ class TestOutputBuffer:
     def test_top_level_scalars(self):
         for obj in (None, True, False, 0, -5, "", "x", "é", [], {}, ()):
             assert both(obj) == ref(obj)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="glibc malloc behaviour")
+def test_large_output_does_not_refault_every_call():
+    # Shrinking each result by the capacity headroom made every call free a
+    # block smaller than the next request, so glibc kept serving it with a
+    # fresh mmap and every call page-faulted its whole output.
+    import resource
+
+    s = "\U0001f600" * 400000  # 1.6 MB of UTF-8
+    for _ in range(5):
+        rjson.dumps_bytes(s)
+    before = resource.getrusage(resource.RUSAGE_SELF).ru_minflt
+    for _ in range(20):
+        assert len(rjson.dumps_bytes(s)) == 1600002
+    faults = (resource.getrusage(resource.RUSAGE_SELF).ru_minflt - before) / 20
+    assert faults < 100  # was ~390 (one per 4 KiB page)

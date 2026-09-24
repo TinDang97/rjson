@@ -4,6 +4,11 @@
 //! Design notes
 //! - Type dispatch is a chain of exact `ob_type` pointer comparisons against the
 //!   builtin type objects; no PyO3 wrappers, no per-element refcounting.
+//! - Writers take the output cursor and return the advanced one (null on
+//!   error), so it stays in a register; see `Cur`.
+//! - Dicts are iterated over their entry array directly on CPython 3.11-3.13
+//!   (gated and self-tested, see `dictiter`), else with `PyDict_Next`. Runs of
+//!   exact ints/floats in lists use a register-resident loop.
 //! - Output is written straight into the result object (`Out`): a `bytes`
 //!   object, or a compact ASCII `str`, sized from the previous output length on
 //!   this thread, grown with realloc and shortened at the end. No final copy,
@@ -11,7 +16,8 @@
 //! - Every write reserves its worst case before writing through raw pointers, so
 //!   no write can go past the allocation (the old SIMD escaper could).
 //! - Separators are fused into the next value's write (one length update per
-//!   element instead of two).
+//!   element instead of two); short (<= 16-byte) compact ASCII strings are
+//!   written inline with one SSSE3 shuffle.
 //! - Numbers: ints are read inline from the digit array (layout per Python
 //!   version, verified at init) and formatted with a small inline formatter or
 //!   itoap; floats are formatted in place with zmij (shortest round-trip, same
@@ -26,10 +32,11 @@
 //!   are handled correctly.
 //! - `str` output: when a non-ASCII string is written we do not UTF-8 encode it.
 //!   We leave a hole in the (pure ASCII) buffer and remember the source object.
-//!   At the end the result `str` is allocated once with the exact kind and length
-//!   and filled by widening the ASCII runs and copying the source strings' native
-//!   UCS1/UCS2/UCS4 data. This avoids both the UTF-8 encode and the full UTF-8
-//!   decode that `PyUnicode_FromStringAndSize` would do.
+//!   At the end the result `str` is allocated once with the exact kind and
+//!   filled by widening the ASCII runs and copying the source strings' native
+//!   UCS1/UCS2/UCS4 data, each checked for (and, rarely, copied with) escapes
+//!   right before it is copied. This avoids both the UTF-8 encode and the full
+//!   UTF-8 decode that `PyUnicode_FromStringAndSize` would do.
 //! - Recursion is limited to `RECURSION_LIMIT` nested containers, which also
 //!   turns circular references into an error instead of a stack overflow.
 
@@ -45,8 +52,7 @@ pub const RECURSION_LIMIT: u32 = 254;
 /// reservation (6x) stays bounded.
 const ESCAPE_CHUNK: usize = 64 * 1024;
 
-/// Error kind; kept payload-free (1 byte) so `Result<(), SerError>` is
-/// returned in a register. Payloads live in `Serializer::err_*`.
+/// Error kind; payloads live in `Serializer::err_*`.
 #[derive(Clone, Copy)]
 pub enum SerError {
     NonFinite,
@@ -57,8 +63,6 @@ pub enum SerError {
     /// convert, MemoryError).
     PyErrSet,
 }
-
-type SerResult = Result<(), SerError>;
 
 // ---------------------------------------------------------------------------
 // Type objects
@@ -231,7 +235,140 @@ pub fn init(py: Python<'_>) {
     })()
     .unwrap_or(false);
     unsafe { INLINE_INT = ok };
+    #[cfg(rjson_dict_direct)]
+    unsafe {
+        dictiter::ENABLED = dictiter::self_test();
+    }
     detect_cpu();
+}
+
+/// Direct iteration over the entries of combined-table dicts, replacing a
+/// `PyDict_Next` call per item (about a quarter of the instructions of a
+/// small dict item).
+///
+/// `PyDictKeysObject` is private, so this is gated to the CPython versions
+/// whose layout it was written against (3.11-3.13, GIL builds; see
+/// `build.rs`) and enabled only if an init-time self-test over dicts with
+/// str keys, other keys and deleted entries matches `PyDict_Next`. Split
+/// tables (`ma_values != NULL`, e.g. instance dicts) use `PyDict_Next`.
+#[cfg(rjson_dict_direct)]
+mod dictiter {
+    use pyo3::ffi;
+
+    /// `struct _dictkeysobject` up to `dk_indices` (CPython 3.11-3.13).
+    #[repr(C)]
+    struct DictKeys {
+        dk_refcnt: ffi::Py_ssize_t,
+        dk_log2_size: u8,
+        dk_log2_index_bytes: u8,
+        dk_kind: u8,
+        dk_version: u32,
+        dk_usable: ffi::Py_ssize_t,
+        dk_nentries: ffi::Py_ssize_t,
+    }
+
+    /// `DICT_KEYS_GENERAL`: entries are `{hash, key, value}`; otherwise
+    /// (str keys) `{key, value}`.
+    const DICT_KEYS_GENERAL: u8 = 0;
+
+    pub static mut ENABLED: bool = false;
+
+    /// (pointer to the first entry's key slot, number of entries, entry
+    /// size in pointers) of a combined-table dict; the value slot follows
+    /// the key slot. Entries whose value is NULL are deleted.
+    #[inline(always)]
+    pub unsafe fn entries(
+        d: *mut ffi::PyObject,
+    ) -> Option<(*const *mut ffi::PyObject, usize, usize)> {
+        if !ENABLED {
+            return None;
+        }
+        raw_entries(d)
+    }
+
+    #[inline(always)]
+    unsafe fn raw_entries(
+        d: *mut ffi::PyObject,
+    ) -> Option<(*const *mut ffi::PyObject, usize, usize)> {
+        let d = d as *mut ffi::PyDictObject;
+        if !(*d).ma_values.is_null() {
+            return None;
+        }
+        let k = (*d).ma_keys as *const DictKeys;
+        let indices = (k as *const u8).add(std::mem::size_of::<DictKeys>());
+        let entries = indices.add(1usize << (*k).dk_log2_index_bytes) as *const *mut ffi::PyObject;
+        let (stride, key_slot) = if (*k).dk_kind == DICT_KEYS_GENERAL {
+            (3, 1)
+        } else {
+            (2, 0)
+        };
+        Some((entries.add(key_slot), (*k).dk_nentries as usize, stride))
+    }
+
+    /// Does direct iteration give exactly `PyDict_Next`'s items for `d`?
+    unsafe fn same_as_next(d: *mut ffi::PyObject) -> bool {
+        let Some((base, n, stride)) = raw_entries(d) else {
+            return false;
+        };
+        let (mut pos, mut i) = (0, 0);
+        let (mut k, mut v) = (std::ptr::null_mut(), std::ptr::null_mut());
+        while ffi::PyDict_Next(d, &mut pos, &mut k, &mut v) != 0 {
+            while i < n && (*base.add(i * stride + 1)).is_null() {
+                i += 1;
+            }
+            if i == n || *base.add(i * stride) != k || *base.add(i * stride + 1) != v {
+                return false;
+            }
+            i += 1;
+        }
+        (i..n).all(|j| (*base.add(j * stride + 1)).is_null())
+    }
+
+    /// Builds dicts with str keys, non-str keys, deleted entries and 512
+    /// slots (2-byte indices), and compares both iterations. Kept cheap
+    /// (it runs at import): one-character keys, `None` values.
+    pub fn self_test() -> bool {
+        unsafe {
+            let mut ok = true;
+            for (nkeys, str_keys, deleted) in [
+                (0usize, true, &[][..]),
+                (6, true, &[1usize][..]),
+                (200, true, &[0, 7, 150, 199][..]),
+                (6, false, &[2][..]),
+            ] {
+                let d = ffi::PyDict_New();
+                if d.is_null() {
+                    ffi::PyErr_Clear();
+                    return false;
+                }
+                for i in 0..nkeys {
+                    let key = if str_keys || i % 2 == 0 {
+                        ffi::PyUnicode_FromOrdinal(0x4e00 + i as std::os::raw::c_int)
+                    } else {
+                        ffi::PyLong_FromLong(i as _)
+                    };
+                    ok &= !key.is_null() && ffi::PyDict_SetItem(d, key, ffi::Py_None()) == 0;
+                    if !key.is_null() {
+                        ffi::Py_DECREF(key);
+                    }
+                }
+                for &i in deleted {
+                    let key = ffi::PyUnicode_FromOrdinal(0x4e00 + i as std::os::raw::c_int);
+                    ok &= !key.is_null() && ffi::PyDict_DelItem(d, key) == 0;
+                    if !key.is_null() {
+                        ffi::Py_DECREF(key);
+                    }
+                }
+                ok &= same_as_next(d);
+                ffi::Py_DECREF(d);
+                if !ok {
+                    ffi::PyErr_Clear();
+                    return false;
+                }
+            }
+            ok
+        }
+    }
 }
 
 const _: () =
@@ -314,7 +451,9 @@ unsafe fn escape_scalar(mut dst: *mut u8, src: *const u8, len: usize) -> *mut u8
 }
 
 /// Escapes `len` bytes of UTF-8 at `src` into `dst` (no quotes).
-/// `dst` must have room for `len * 6 + 32` bytes. Returns the new end.
+/// `dst` must have room for the escaped length plus 32 bytes of slack for
+/// blind vector stores (so `len * 6 + 32` always suffices, and
+/// `len + 5 * count_escapes(..) + 32` exactly). Returns the new end.
 #[inline(always)]
 unsafe fn escape_body(dst: *mut u8, src: *const u8, len: usize) -> *mut u8 {
     #[cfg(target_arch = "x86_64")]
@@ -333,15 +472,20 @@ unsafe fn escape_body(dst: *mut u8, src: *const u8, len: usize) -> *mut u8 {
 #[cfg(target_arch = "x86_64")]
 static mut HAS_AVX512VL: bool = false;
 
+/// AVX2 available (checked once at init).
+#[cfg(target_arch = "x86_64")]
+static mut HAS_AVX2: bool = false;
+
 #[cfg(target_arch = "x86_64")]
 fn detect_cpu() {
-    // `--cfg rjson_no_avx512` forces the SSE2/AVX2 kernels (for testing them
-    // on AVX-512 machines).
+    // `--cfg rjson_no_avx512` forces the SSE2/AVX2 kernels and
+    // `--cfg rjson_no_avx2` the SSE scans (for testing them on newer CPUs).
     unsafe {
         HAS_AVX512VL = !cfg!(rjson_no_avx512)
             && std::arch::is_x86_feature_detected!("avx512f")
             && std::arch::is_x86_feature_detected!("avx512bw")
             && std::arch::is_x86_feature_detected!("avx512vl");
+        HAS_AVX2 = !cfg!(rjson_no_avx2) && std::arch::is_x86_feature_detected!("avx2");
     }
 }
 
@@ -361,12 +505,12 @@ unsafe fn escape_avx512vl(mut dst: *mut u8, mut src: *const u8, len: usize) -> *
     let x20 = _mm256_set1_epi8(0x20);
     let end = src.add(len);
     while end.offset_from(src) >= 32 {
-        let v = _mm256_loadu_si256(src as *const __m256i);
+        let v = load256(src);
         let m = _mm256_cmpeq_epi8_mask(v, quote)
             | _mm256_cmpeq_epi8_mask(v, bslash)
             | _mm256_cmplt_epu8_mask(v, x20);
         if m == 0 {
-            _mm256_storeu_si256(dst as *mut __m256i, v);
+            store256(dst, v);
             dst = dst.add(32);
         } else {
             dst = escape_block(dst, src, 32, m);
@@ -382,13 +526,46 @@ unsafe fn escape_avx512vl(mut dst: *mut u8, mut src: *const u8, len: usize) -> *
             | _mm256_cmplt_epu8_mask(v, x20))
             & k;
         if m == 0 {
-            _mm256_storeu_si256(dst as *mut __m256i, v);
+            store256(dst, v);
             dst = dst.add(rem);
         } else {
             dst = escape_block(dst, src, rem, m);
         }
     }
     dst
+}
+
+/// Unaligned 32-byte load/store as single instructions. The crate is built
+/// for x86-64-v2, whose generic tuning makes LLVM split every unaligned
+/// 256-bit access into two 128-bit halves plus an insert/extract, even in
+/// functions compiled with AVX2/AVX-512 enabled; that doubled the uops of
+/// the escape loops.
+///
+/// Only called from functions with AVX enabled.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+#[inline]
+unsafe fn load256(p: *const u8) -> std::arch::x86_64::__m256i {
+    let v;
+    std::arch::asm!(
+        "vmovdqu {v}, ymmword ptr [{p}]",
+        p = in(reg) p,
+        v = out(ymm_reg) v,
+        options(pure, readonly, nostack, preserves_flags)
+    );
+    v
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+#[inline]
+unsafe fn store256(p: *mut u8, v: std::arch::x86_64::__m256i) {
+    std::arch::asm!(
+        "vmovdqu ymmword ptr [{p}], {v}",
+        p = in(reg) p,
+        v = in(ymm_reg) v,
+        options(nostack, preserves_flags)
+    );
 }
 
 #[inline(always)]
@@ -502,10 +679,10 @@ unsafe fn escape_long_impl<const AVX2: bool>(
 
     if AVX2 {
         while end.offset_from(src) >= 32 {
-            let v = _mm256_loadu_si256(src as *const __m256i);
+            let v = load256(src);
             let m = x86::mask32(v);
             if m == 0 {
-                _mm256_storeu_si256(dst as *mut __m256i, v);
+                store256(dst, v);
                 dst = dst.add(32);
             } else {
                 dst = escape_block(dst, src, 32, m);
@@ -662,64 +839,215 @@ unsafe fn widen<S: Unit, D: Unit>(src: *const S, dst: *mut D, n: usize) {
 
 /// Does any code unit of a UCS1/UCS2/UCS4 buffer need JSON escaping?
 unsafe fn kind_needs_escape(kind: u32, data: *const u8, n: usize) -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        use std::arch::x86_64::*;
-        let (bytes, mut i) = (n * kind as usize, 0usize);
-        match kind {
-            1 => {
-                while i + 16 <= bytes {
-                    if x86::mask16(_mm_loadu_si128(data.add(i) as *const __m128i)) != 0 {
-                        return true;
-                    }
-                    i += 16;
-                }
-                units_need_escape(data.add(i), bytes - i)
-            }
-            2 => {
-                let q = _mm_set1_epi16(0x22);
-                let b = _mm_set1_epi16(0x5c);
-                let x1f = _mm_set1_epi16(0x1f);
-                while i + 16 <= bytes {
-                    let v = _mm_loadu_si128(data.add(i) as *const __m128i);
-                    let m = _mm_or_si128(
-                        _mm_or_si128(_mm_cmpeq_epi16(v, q), _mm_cmpeq_epi16(v, b)),
-                        _mm_cmpeq_epi16(_mm_subs_epu16(v, x1f), _mm_setzero_si128()),
-                    );
-                    if _mm_movemask_epi8(m) != 0 {
-                        return true;
-                    }
-                    i += 16;
-                }
-                units_need_escape(data.add(i) as *const u16, (bytes - i) / 2)
-            }
-            _ => {
-                // Code points are < 0x110000, so signed 32-bit compares work.
-                let q = _mm_set1_epi32(0x22);
-                let b = _mm_set1_epi32(0x5c);
-                let x20 = _mm_set1_epi32(0x20);
-                while i + 16 <= bytes {
-                    let v = _mm_loadu_si128(data.add(i) as *const __m128i);
-                    let m = _mm_or_si128(
-                        _mm_or_si128(_mm_cmpeq_epi32(v, q), _mm_cmpeq_epi32(v, b)),
-                        _mm_cmplt_epi32(v, x20),
-                    );
-                    if _mm_movemask_epi8(m) != 0 {
-                        return true;
-                    }
-                    i += 16;
-                }
-                units_need_escape(data.add(i) as *const u32, (bytes - i) / 4)
-            }
+    let bytes = n * kind as usize;
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
+    if bytes >= 16 {
+        return match kind {
+            1 => kscan::scan::<1>(data, bytes),
+            2 => kscan::scan::<2>(data, bytes),
+            _ => kscan::scan::<4>(data, bytes),
+        };
+    }
+    match kind {
+        1 => units_need_escape(data, n),
+        2 => units_need_escape(data as *const u16, n),
+        _ => units_need_escape(data as *const u32, n),
+    }
+}
+
+/// SIMD scans for `kind_needs_escape`. UCS2/UCS4 units are narrowed to
+/// bytes with saturating packs (a unit above 0xff becomes 0xff, which never
+/// needs escaping), so every 64 (SSE) or 128 (AVX2) input bytes cost one
+/// byte-vector check. Pack lane order does not matter for an "any" test.
+#[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
+mod kscan {
+    use std::arch::x86_64::*;
+
+    /// Lanes of a byte vector that need escaping (< 0x20, '"', '\\').
+    #[inline(always)]
+    unsafe fn esc8(v: __m128i) -> __m128i {
+        _mm_or_si128(
+            _mm_or_si128(
+                _mm_cmpeq_epi8(v, _mm_set1_epi8(0x22)),
+                _mm_cmpeq_epi8(v, _mm_set1_epi8(0x5c)),
+            ),
+            _mm_cmpeq_epi8(_mm_min_epu8(v, _mm_set1_epi8(0x1f)), v),
+        )
+    }
+
+    /// Two vectors of `K`-byte units -> one vector of bytes with the same
+    /// escape status (K = 2 or 4).
+    #[inline(always)]
+    unsafe fn narrow<const K: usize>(a: __m128i, b: __m128i) -> __m128i {
+        let ff = _mm_set1_epi16(0xff);
+        if K == 2 {
+            _mm_packus_epi16(_mm_min_epu16(a, ff), _mm_min_epu16(b, ff))
+        } else {
+            // Code points are < 0x110000, so the signed saturation of
+            // packus_epi32 maps them to 0..=0xffff exactly or 0xffff.
+            let w = _mm_packus_epi32(a, b);
+            _mm_packus_epi16(_mm_min_epu16(w, ff), _mm_min_epu16(w, ff))
         }
     }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        match kind {
-            1 => units_need_escape(data, n),
-            2 => units_need_escape(data as *const u16, n),
-            _ => units_need_escape(data as *const u32, n),
+
+    /// Escape lanes of 64 bytes at `p`.
+    #[inline(always)]
+    unsafe fn block64<const K: usize>(p: *const u8) -> __m128i {
+        let a = _mm_loadu_si128(p as *const __m128i);
+        let b = _mm_loadu_si128(p.add(16) as *const __m128i);
+        let c = _mm_loadu_si128(p.add(32) as *const __m128i);
+        let d = _mm_loadu_si128(p.add(48) as *const __m128i);
+        if K == 1 {
+            _mm_or_si128(
+                _mm_or_si128(esc8(a), esc8(b)),
+                _mm_or_si128(esc8(c), esc8(d)),
+            )
+        } else if K == 2 {
+            _mm_or_si128(esc8(narrow::<2>(a, b)), esc8(narrow::<2>(c, d)))
+        } else {
+            let ab = _mm_packus_epi32(a, b);
+            let cd = _mm_packus_epi32(c, d);
+            esc8(narrow::<2>(ab, cd))
         }
+    }
+
+    /// Escape lanes of 16 bytes at `p`.
+    #[inline(always)]
+    unsafe fn block16<const K: usize>(p: *const u8) -> __m128i {
+        let a = _mm_loadu_si128(p as *const __m128i);
+        if K == 1 {
+            esc8(a)
+        } else {
+            esc8(narrow::<K>(a, a))
+        }
+    }
+
+    /// `bytes >= 16`, a multiple of `K`.
+    #[inline(always)]
+    pub unsafe fn scan<const K: usize>(p: *const u8, bytes: usize) -> bool {
+        if bytes >= 128 && super::HAS_AVX2 {
+            return scan_avx2::<K>(p, bytes);
+        }
+        let mut i = 0;
+        if bytes >= 64 {
+            while i + 64 <= bytes {
+                if _mm_movemask_epi8(block64::<K>(p.add(i))) != 0 {
+                    return true;
+                }
+                i += 64;
+            }
+            // Final partial block: overlap the previous one.
+            return i != bytes && _mm_movemask_epi8(block64::<K>(p.add(bytes - 64))) != 0;
+        }
+        while i + 16 <= bytes {
+            if _mm_movemask_epi8(block16::<K>(p.add(i))) != 0 {
+                return true;
+            }
+            i += 16;
+        }
+        i != bytes && _mm_movemask_epi8(block16::<K>(p.add(bytes - 16))) != 0
+    }
+
+    /// Copies `bytes >= 128` bytes of `K`-byte units from `src` to `dst`
+    /// (same kind) while checking them: one pass over the source instead of
+    /// a scan and a memcpy. Returns true (with `dst` partially written) if a
+    /// unit needs escaping. AVX2 only.
+    #[target_feature(enable = "avx2")]
+    pub unsafe fn copy_scan_avx2<const K: usize>(
+        src: *const u8,
+        dst: *mut u8,
+        bytes: usize,
+    ) -> bool {
+        #[inline(always)]
+        unsafe fn esc8(v: __m256i) -> __m256i {
+            _mm256_or_si256(
+                _mm256_or_si256(
+                    _mm256_cmpeq_epi8(v, _mm256_set1_epi8(0x22)),
+                    _mm256_cmpeq_epi8(v, _mm256_set1_epi8(0x5c)),
+                ),
+                _mm256_cmpeq_epi8(_mm256_min_epu8(v, _mm256_set1_epi8(0x1f)), v),
+            )
+        }
+        #[inline(always)]
+        unsafe fn n2(a: __m256i, b: __m256i) -> __m256i {
+            let ff = _mm256_set1_epi16(0xff);
+            _mm256_packus_epi16(_mm256_min_epu16(a, ff), _mm256_min_epu16(b, ff))
+        }
+        #[inline(always)]
+        unsafe fn block<const K: usize>(s: *const u8, d: *mut u8) -> __m256i {
+            let a = super::load256(s);
+            let b = super::load256(s.add(32));
+            let c = super::load256(s.add(64));
+            let e = super::load256(s.add(96));
+            super::store256(d, a);
+            super::store256(d.add(32), b);
+            super::store256(d.add(64), c);
+            super::store256(d.add(96), e);
+            if K == 1 {
+                _mm256_or_si256(
+                    _mm256_or_si256(esc8(a), esc8(b)),
+                    _mm256_or_si256(esc8(c), esc8(e)),
+                )
+            } else if K == 2 {
+                _mm256_or_si256(esc8(n2(a, b)), esc8(n2(c, e)))
+            } else {
+                esc8(n2(_mm256_packus_epi32(a, b), _mm256_packus_epi32(c, e)))
+            }
+        }
+        let mut i = 0;
+        while i + 128 <= bytes {
+            if _mm256_movemask_epi8(block::<K>(src.add(i), dst.add(i))) != 0 {
+                return true;
+            }
+            i += 128;
+        }
+        i != bytes
+            && _mm256_movemask_epi8(block::<K>(src.add(bytes - 128), dst.add(bytes - 128))) != 0
+    }
+
+    /// AVX2 version of the 64-byte loop, 128 bytes per check. `bytes >= 128`.
+    #[target_feature(enable = "avx2")]
+    unsafe fn scan_avx2<const K: usize>(p: *const u8, bytes: usize) -> bool {
+        #[inline(always)]
+        unsafe fn esc8(v: __m256i) -> __m256i {
+            _mm256_or_si256(
+                _mm256_or_si256(
+                    _mm256_cmpeq_epi8(v, _mm256_set1_epi8(0x22)),
+                    _mm256_cmpeq_epi8(v, _mm256_set1_epi8(0x5c)),
+                ),
+                _mm256_cmpeq_epi8(_mm256_min_epu8(v, _mm256_set1_epi8(0x1f)), v),
+            )
+        }
+        #[inline(always)]
+        unsafe fn n2(a: __m256i, b: __m256i) -> __m256i {
+            let ff = _mm256_set1_epi16(0xff);
+            _mm256_packus_epi16(_mm256_min_epu16(a, ff), _mm256_min_epu16(b, ff))
+        }
+        #[inline(always)]
+        unsafe fn block<const K: usize>(p: *const u8) -> __m256i {
+            let a = super::load256(p);
+            let b = super::load256(p.add(32));
+            let c = super::load256(p.add(64));
+            let d = super::load256(p.add(96));
+            if K == 1 {
+                _mm256_or_si256(
+                    _mm256_or_si256(esc8(a), esc8(b)),
+                    _mm256_or_si256(esc8(c), esc8(d)),
+                )
+            } else if K == 2 {
+                _mm256_or_si256(esc8(n2(a, b)), esc8(n2(c, d)))
+            } else {
+                esc8(n2(_mm256_packus_epi32(a, b), _mm256_packus_epi32(c, d)))
+            }
+        }
+        let mut i = 0;
+        while i + 128 <= bytes {
+            if _mm256_movemask_epi8(block::<K>(p.add(i))) != 0 {
+                return true;
+            }
+            i += 128;
+        }
+        i != bytes && _mm256_movemask_epi8(block::<K>(p.add(bytes - 128))) != 0
     }
 }
 
@@ -739,31 +1067,90 @@ unsafe fn units_need_escape<S: Unit>(src: *const S, n: usize) -> bool {
     false
 }
 
-/// Returns a new canonical `str` holding the JSON-escaped text of a
-/// UCS1/UCS2/UCS4 buffer (without quotes), or NULL with an exception set.
-unsafe fn escaped_copy(kind: u32, data: *const u8, n: usize) -> *mut ffi::PyObject {
-    let unit = |i: usize| -> u32 {
-        match kind {
-            1 => *data.add(i) as u32,
-            2 => *(data as *const u16).add(i) as u32,
-            _ => *(data as *const u32).add(i),
-        }
-    };
-    let mut out: Vec<u32> = Vec::with_capacity(n + 16);
-    for i in 0..n {
-        let c = unit(i);
+/// Number of code units that escaping adds to a UCS1/UCS2/UCS4 buffer.
+unsafe fn escape_extra<S: Unit>(src: *const S, n: usize) -> usize {
+    let mut extra = 0;
+    for &c in std::slice::from_raw_parts(src, n) {
+        let c = c.to_u32();
         if c < 0x60 && NEEDS_ESCAPE[c as usize] != 0 {
-            let e = &ESCAPE_TAB[c as usize];
-            out.extend(e[..e[7] as usize].iter().map(|&b| b as u32));
-        } else {
-            out.push(c);
+            extra += ESCAPE_TAB[c as usize][7] as usize - 1;
         }
     }
-    ffi::PyUnicode_FromKindAndData(
-        ffi::PyUnicode_4BYTE_KIND as std::os::raw::c_int,
-        out.as_ptr() as *const std::os::raw::c_void,
-        out.len() as ffi::Py_ssize_t,
-    )
+    extra
+}
+
+/// Copies `n` code units, JSON-escaping them, widening from `S` to `D`.
+/// Writes exactly `n + escape_extra(src, n)` units.
+unsafe fn widen_escaped<S: Unit, D: Unit>(src: *const S, dst: *mut D, n: usize) -> usize {
+    let mut o = 0;
+    for &c in std::slice::from_raw_parts(src, n) {
+        let c = c.to_u32();
+        if c < 0x60 && NEEDS_ESCAPE[c as usize] != 0 {
+            let e = &ESCAPE_TAB[c as usize];
+            for (j, &b) in e[..e[7] as usize].iter().enumerate() {
+                *dst.add(o + j) = D::from_u32(b as u32);
+            }
+            o += e[7] as usize;
+        } else {
+            *dst.add(o) = D::from_u32(c);
+            o += 1;
+        }
+    }
+    o
+}
+
+/// `_mm_shuffle_epi8` controls for `write_short_ascii`: 16 bytes starting at
+/// `16 - len` move the last `len` bytes of a vector to the front and zero
+/// the rest (0x80 lanes).
+static SHIFT_TAB: [u8; 32] = {
+    let mut t = [0x80u8; 32];
+    let mut i = 0;
+    while i < 16 {
+        t[i] = i as u8;
+        i += 1;
+    }
+    t
+};
+
+const _: () = assert!(std::mem::size_of::<ffi::PyASCIIObject>() >= 16);
+
+/// Writes `sep` (if `ns == 1`) and `"<escaped>"` for a string of `len <= 16`
+/// bytes, without a call or a scalar tail: the 16 bytes *ending* at the end
+/// of the string are loaded (so the load never reads past it) and shifted
+/// down with one shuffle.
+///
+/// # Safety
+/// The 16 bytes before `data + len` must be readable: true for the inline
+/// data of a compact ASCII `str`, which follows its (>= 16-byte) header in
+/// the same allocation. `16 * 6 + 35` bytes of room at `p`.
+#[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
+#[inline(always)]
+unsafe fn write_short_ascii(
+    p: *mut u8,
+    data: *const u8,
+    len: usize,
+    sep: u8,
+    ns: usize,
+) -> *mut u8 {
+    use std::arch::x86_64::*;
+    debug_assert!(len <= 16);
+    let v = _mm_loadu_si128(data.add(len).sub(16) as *const __m128i);
+    let ctl = _mm_loadu_si128(SHIFT_TAB.as_ptr().add(16 - len) as *const __m128i);
+    let v = _mm_shuffle_epi8(v, ctl);
+    // Zeroed lanes past the end look like control characters: mask them.
+    let m = x86::mask16(v) & ((1u32 << len) - 1);
+    *p = sep;
+    let d = p.add(ns);
+    *d = b'"';
+    let d = d.add(1);
+    let d = if m == 0 {
+        _mm_storeu_si128(d as *mut __m128i, v);
+        d.add(len)
+    } else {
+        escape_block(d, data, len, m)
+    };
+    *d = b'"';
+    d.add(1)
 }
 
 /// A non-ASCII string whose content is not in the byte buffer.
@@ -772,7 +1159,8 @@ struct Segment {
     pos: usize,
     /// Strong reference to the source `str`.
     obj: *mut ffi::PyObject,
-    /// Number of code points of the content.
+    /// Number of code points of the source string (escaping, if needed,
+    /// happens in the final copy).
     nchars: usize,
 }
 
@@ -793,8 +1181,11 @@ struct Out {
 }
 
 thread_local! {
-    /// Size of the previous output on this thread (capacity hint).
-    static LAST_LEN: Cell<usize> = const { Cell::new(0) };
+    /// Size of the previous output buffer on this thread, per mode ([bytes,
+    /// str]): the capacity hint. Kept per mode because a str-mode buffer
+    /// holds only the ASCII parts of non-ASCII output, so a shared hint made
+    /// alternating dumps/dumps_bytes calls grow and then shrink the buffer.
+    static LAST_LEN: [Cell<usize>; 2] = const { [Cell::new(0), Cell::new(0)] };
 }
 
 const MIN_CAPACITY: usize = 128;
@@ -804,8 +1195,10 @@ const SHRINK_COPY_THRESHOLD: usize = 64 * 1024;
 
 impl Out {
     unsafe fn new(unicode: bool) -> Out {
-        let hint = LAST_LEN.with(|c| c.get());
-        let cap = (hint + hint / 8 + 16).max(MIN_CAPACITY);
+        let hint = LAST_LEN.with(|c| c[unicode as usize].get());
+        // Headroom stays below the shrink threshold in `into_object`, so a
+        // steady workload never shrinks (see there).
+        let cap = (hint + hint / 16 + 16).max(MIN_CAPACITY);
         let obj = Self::alloc(cap, unicode);
         Out {
             obj,
@@ -892,15 +1285,9 @@ impl Out {
         self.cap = cap;
     }
 
-    unsafe fn extend_from_slice(&mut self, s: &[u8]) {
-        self.reserve(s.len());
-        ptr::copy_nonoverlapping(s.as_ptr(), self.data.add(self.len), s.len());
-        self.len += s.len();
-    }
-
     /// Shrinks to the written length and hands the object over.
     unsafe fn into_object(&mut self) -> *mut ffi::PyObject {
-        LAST_LEN.with(|c| c.set(self.len));
+        LAST_LEN.with(|c| c[self.unicode as usize].set(self.len));
         if self.cap > SHRINK_COPY_THRESHOLD && self.len < self.cap / 4 {
             let small = Self::alloc(self.len, self.unicode);
             ptr::copy_nonoverlapping(self.data, Self::data_of(small, self.unicode), self.len);
@@ -909,6 +1296,14 @@ impl Out {
             return small;
         }
         let slack = self.cap - self.len;
+        // Only give memory back when more than 1/8 is unused. Shrinking by
+        // the usual headroom made every call free a block smaller than the
+        // next call's request; glibc's dynamic mmap threshold only rises to
+        // the size of freed blocks, so above ~128 KiB every call then got a
+        // fresh mmap and page-faulted its whole output (e.g. 390 faults and
+        // +300% for a 1.6 MB result, depending on what the process had
+        // freed before). Freeing blocks of the requested size keeps them on
+        // the heap.
         if slack > 4096 && slack > self.len / 8 {
             self.resize(self.len);
         } else if slack != 0 {
@@ -931,7 +1326,7 @@ impl Out {
 impl Drop for Out {
     fn drop(&mut self) {
         if !self.obj.is_null() {
-            LAST_LEN.with(|c| c.set(self.len));
+            LAST_LEN.with(|c| c[self.unicode as usize].set(self.len));
             unsafe { ffi::Py_DECREF(self.obj) };
         }
     }
@@ -941,6 +1336,29 @@ impl Drop for Out {
 // Serializer
 // ---------------------------------------------------------------------------
 
+/// Write cursor: the current end of the output. Writers take the cursor and
+/// return the advanced one, so it lives in a register instead of being stored
+/// to and reloaded from `Out::len` for every value (that store->load round
+/// trip was on the critical path of every element). `Out::len` is only
+/// synced at growth, segment and finish points.
+type Cur = *mut u8;
+/// A cursor, or null on error (the error kind is in `Serializer::err`).
+/// A `Result<Cur, SerError>` does not fit in one register, and LLVM spilled
+/// it to the stack where paths merge, putting a store->load back on the
+/// per-value critical path.
+type CurResult = Cur;
+
+/// `?` for `CurResult`.
+macro_rules! tri {
+    ($e:expr) => {{
+        let p = $e;
+        if p.is_null() {
+            return p;
+        }
+        p
+    }};
+}
+
 pub struct Serializer {
     buf: Out,
     depth: u32,
@@ -949,6 +1367,7 @@ pub struct Serializer {
     segs: Vec<Segment>,
     max_kind: u32,
     seg_chars: usize,
+    err: SerError,
     err_obj: *mut ffi::PyObject,
     err_float: f64,
 }
@@ -970,97 +1389,125 @@ impl Serializer {
             segs: Vec::new(),
             max_kind: 1,
             seg_chars: 0,
+            err: SerError::PyErrSet,
             err_obj: ptr::null_mut(),
             err_float: 0.0,
         }
     }
 
+    #[cold]
+    #[inline(never)]
+    fn fail(&mut self, e: SerError) -> Cur {
+        self.err = e;
+        ptr::null_mut()
+    }
+
     #[inline(always)]
-    fn reserve(&mut self, n: usize) {
-        if self.buf.capacity() - self.buf.len() < n {
-            self.grow(n);
+    fn start(&mut self) -> Cur {
+        unsafe { self.buf.as_mut_ptr().add(self.buf.len()) }
+    }
+
+    /// Bytes available after `p`.
+    #[inline(always)]
+    fn room(&self, p: Cur) -> usize {
+        self.buf.as_ptr() as usize + self.buf.capacity() - p as usize
+    }
+
+    /// Last cursor position with `n` bytes of room (`n <= MIN_CAPACITY`).
+    #[inline(always)]
+    fn limit(&self, n: usize) -> Cur {
+        unsafe { self.buf.data.add(self.buf.cap - n) }
+    }
+
+    /// Offset of `p` in the buffer.
+    #[inline(always)]
+    fn offset(&self, p: Cur) -> usize {
+        p as usize - self.buf.as_ptr() as usize
+    }
+
+    /// Records `p` as the end of the written output.
+    #[inline(always)]
+    unsafe fn sync(&mut self, p: Cur) {
+        let len = self.offset(p);
+        self.buf.set_len(len);
+    }
+
+    /// Ensures `n` writable bytes at the returned cursor (which moves if the
+    /// buffer is reallocated).
+    #[inline(always)]
+    unsafe fn reserve(&mut self, p: Cur, n: usize) -> Cur {
+        if self.room(p) < n {
+            return self.grow(p, n);
         }
+        p
     }
 
     #[cold]
     #[inline(never)]
-    fn grow(&mut self, n: usize) {
+    unsafe fn grow(&mut self, p: Cur, n: usize) -> Cur {
+        self.sync(p);
         self.buf.reserve(n);
+        self.start()
     }
 
     #[inline(always)]
-    fn end_ptr(&mut self) -> *mut u8 {
-        unsafe { self.buf.as_mut_ptr().add(self.buf.len()) }
+    unsafe fn put(&mut self, p: Cur, b: u8) -> Cur {
+        let p = self.reserve(p, 1);
+        *p = b;
+        p.add(1)
     }
 
     #[inline(always)]
-    unsafe fn set_end(&mut self, end: *mut u8) {
-        let len = end.offset_from(self.buf.as_ptr()) as usize;
-        debug_assert!(len <= self.buf.capacity());
-        self.buf.set_len(len);
-    }
-
-    #[inline(always)]
-    fn put(&mut self, b: u8) {
-        self.reserve(1);
-        unsafe {
-            *self.end_ptr() = b;
-            self.buf.set_len(self.buf.len() + 1);
-        }
-    }
-
-    #[inline(always)]
-    fn put2(&mut self, s: &[u8; 2]) {
-        self.reserve(2);
-        unsafe {
-            ptr::copy_nonoverlapping(s.as_ptr(), self.end_ptr(), 2);
-            self.buf.set_len(self.buf.len() + 2);
-        }
+    unsafe fn put2(&mut self, p: Cur, s: &[u8; 2]) -> Cur {
+        let p = self.reserve(p, 2);
+        ptr::copy_nonoverlapping(s.as_ptr(), p, 2);
+        p.add(2)
     }
 
     /// Writes the pending separator (if `ns == 1`) then up to 8 bytes given
-    /// as a pattern, with a single length update.
+    /// as a pattern.
     ///
     /// Separators (',' between items, ':' after keys) are passed down to the
-    /// next value writer instead of being written on their own: every update
-    /// of the buffer length is a store->load round trip through memory, and
-    /// fusing them cut the per-element cost of small scalars by ~1ns.
+    /// next value writer instead of being written on their own, so small
+    /// scalars cost one capacity check.
     #[inline(always)]
-    fn put_word(&mut self, sep: u8, ns: usize, pattern: &[u8; 8], len: usize) {
-        self.reserve(9);
-        unsafe {
-            let p = self.end_ptr();
-            *p = sep;
-            ptr::copy_nonoverlapping(pattern.as_ptr(), p.add(ns), 8);
-            self.buf.set_len(self.buf.len() + ns + len);
-        }
+    unsafe fn put_word(
+        &mut self,
+        p: Cur,
+        sep: u8,
+        ns: usize,
+        pattern: &[u8; 8],
+        len: usize,
+    ) -> Cur {
+        let p = self.reserve(p, 9);
+        *p = sep;
+        ptr::copy_nonoverlapping(pattern.as_ptr(), p.add(ns), 8);
+        p.add(ns + len)
     }
 
     #[inline(always)]
-    fn put_sep(&mut self, sep: u8, ns: usize) {
-        if ns != 0 {
-            self.put(sep);
-        }
+    unsafe fn put_sep(&mut self, p: Cur, sep: u8, ns: usize) -> Cur {
+        let p = self.reserve(p, 1);
+        *p = sep;
+        p.add(ns)
     }
 
     // ----- scalars -----
 
     #[inline(always)]
-    unsafe fn write_i64(&mut self, v: i64) {
-        self.reserve(24);
-        let n = itoap::write_to_ptr(self.end_ptr(), v);
-        self.buf.set_len(self.buf.len() + n);
-    }
-
-    #[inline(always)]
-    unsafe fn write_int(&mut self, obj: *mut ffi::PyObject, sep: u8, ns: usize) -> SerResult {
+    unsafe fn write_int(
+        &mut self,
+        p: Cur,
+        obj: *mut ffi::PyObject,
+        sep: u8,
+        ns: usize,
+    ) -> CurResult {
         if INLINE_INT {
             let (neg, nd) = int_shape(obj);
             if nd <= 2 {
                 // |value| < 2**60: sign + unsigned digits, using the cheaper
                 // 32-bit formatter for single-digit (< 2**30) values.
-                self.reserve(25);
-                let p = self.end_ptr();
+                let p = self.reserve(p, 25);
                 *p = sep;
                 let p = p.add(ns);
                 *p = b'-';
@@ -1070,32 +1517,29 @@ impl Serializer {
                 } else {
                     itoap::write_to_ptr(p, int_magnitude(obj, nd))
                 };
-                self.buf.set_len(self.buf.len() + ns + neg as usize + n);
-                return Ok(());
+                return p.add(n);
             }
         }
-        self.put_sep(sep, ns);
-        self.write_int_slow(obj)
+        let p = self.put_sep(p, sep, ns);
+        self.write_int_slow(p, obj)
     }
 
     #[inline(never)]
-    unsafe fn write_int_slow(&mut self, obj: *mut ffi::PyObject) -> SerResult {
+    unsafe fn write_int_slow(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
         let mut overflow: std::os::raw::c_int = 0;
         let v = ffi::PyLong_AsLongLongAndOverflow(obj, &mut overflow);
         if overflow == 0 {
             if v == -1 && !ffi::PyErr_Occurred().is_null() {
-                return Err(SerError::PyErrSet);
+                return self.fail(SerError::PyErrSet);
             }
-            self.write_i64(v);
-            return Ok(());
+            let p = self.reserve(p, 24);
+            return p.add(itoap::write_to_ptr(p, v));
         }
         if overflow > 0 {
             let u = ffi::PyLong_AsUnsignedLongLong(obj);
-            if !(u == u64::MAX && !ffi::PyErr_Occurred().is_null()) {
-                self.reserve(24);
-                let n = itoap::write_to_ptr(self.end_ptr(), u);
-                self.buf.set_len(self.buf.len() + n);
-                return Ok(());
+            if u != u64::MAX || ffi::PyErr_Occurred().is_null() {
+                let p = self.reserve(p, 24);
+                return p.add(itoap::write_to_ptr(p, u));
             }
             ffi::PyErr_Clear();
         }
@@ -1103,132 +1547,151 @@ impl Serializer {
         // not call user __str__/__repr__ on int subclasses).
         let s = ffi::PyNumber_ToBase(obj, 10);
         if s.is_null() {
-            return Err(SerError::PyErrSet);
+            return self.fail(SerError::PyErrSet);
         }
         let mut n: ffi::Py_ssize_t = 0;
-        let p = ffi::PyUnicode_AsUTF8AndSize(s, &mut n);
-        if p.is_null() {
+        let src = ffi::PyUnicode_AsUTF8AndSize(s, &mut n);
+        if src.is_null() {
             ffi::Py_DECREF(s);
-            return Err(SerError::PyErrSet);
+            return self.fail(SerError::PyErrSet);
         }
-        self.buf
-            .extend_from_slice(std::slice::from_raw_parts(p as *const u8, n as usize));
+        let n = n as usize;
+        let p = self.reserve(p, n);
+        ptr::copy_nonoverlapping(src as *const u8, p, n);
         ffi::Py_DECREF(s);
-        Ok(())
+        p.add(n)
     }
 
     #[inline(always)]
-    unsafe fn write_float(&mut self, v: f64, sep: u8, ns: usize) -> SerResult {
+    unsafe fn write_float(&mut self, p: Cur, v: f64, sep: u8, ns: usize) -> CurResult {
         if !v.is_finite() {
             self.err_float = v;
-            return Err(SerError::NonFinite);
+            return self.fail(SerError::NonFinite);
         }
-        self.reserve(33);
-        let p = self.end_ptr();
+        let p = self.reserve(p, 33);
         *p = sep;
         // Format in place: zmij::Buffer is a plain 24-byte array (asserted
-        // below) and 33 bytes are reserved. Formatting into a stack buffer and
+        // above) and 33 bytes are reserved. Formatting into a stack buffer and
         // copying out was ~40% slower (store-forwarding stall on the copy).
         let b = &mut *(p.add(ns) as *mut zmij::Buffer);
         let n = b.format_finite(v).len();
-        self.buf.set_len(self.buf.len() + ns + n);
-        Ok(())
+        p.add(ns + n)
     }
 
     // ----- strings -----
 
     /// Writes `"<escaped utf8>"`.
     #[inline(always)]
-    unsafe fn write_utf8(&mut self, src: *const u8, len: usize, sep: u8, ns: usize) {
+    unsafe fn write_utf8(&mut self, p: Cur, src: *const u8, len: usize, sep: u8, ns: usize) -> Cur {
         // Fast path: room for the worst case (every byte -> \u00XX) plus the
         // kernel's blind vector stores.
-        if len <= ESCAPE_CHUNK && self.buf.capacity() - self.buf.len() >= len * 6 + 35 {
-            self.write_utf8_unchecked(src, len, sep, ns);
+        if len <= ESCAPE_CHUNK && self.room(p) >= len * 6 + 35 {
+            write_utf8_unchecked(p, src, len, sep, ns)
         } else {
-            self.write_utf8_tight(src, len, sep, ns);
+            self.write_utf8_tight(p, src, len, sep, ns)
         }
-    }
-
-    #[inline(always)]
-    unsafe fn write_utf8_unchecked(&mut self, src: *const u8, len: usize, sep: u8, ns: usize) {
-        let mut dst = self.end_ptr();
-        *dst = sep;
-        dst = dst.add(ns);
-        *dst = b'"';
-        dst = escape_body(dst.add(1), src, len);
-        *dst = b'"';
-        self.set_end(dst.add(1));
     }
 
     /// Not enough room for the worst case: reserve only what this string
     /// needs (the output buffer is sized from the previous result, so
     /// reserving 6x would force needless reallocations).
     #[inline(never)]
-    unsafe fn write_utf8_tight(&mut self, src: *const u8, len: usize, sep: u8, ns: usize) {
+    unsafe fn write_utf8_tight(
+        &mut self,
+        p: Cur,
+        src: *const u8,
+        len: usize,
+        sep: u8,
+        ns: usize,
+    ) -> Cur {
         if len > ESCAPE_CHUNK {
-            self.put_sep(sep, ns);
-            self.put(b'"');
-            self.escape_chunked(src, len);
-            self.put(b'"');
-            return;
+            let p = self.put_sep(p, sep, ns);
+            let p = self.put(p, b'"');
+            let p = self.escape_chunked(p, src, len);
+            return self.put(p, b'"');
         }
         // Each escape adds at most 5 bytes.
-        self.reserve(len + 5 * count_escapes(src, len) + 35);
-        self.write_utf8_unchecked(src, len, sep, ns);
+        let p = self.reserve(p, len + 5 * count_escapes(src, len) + 35);
+        write_utf8_unchecked(p, src, len, sep, ns)
     }
 
-    unsafe fn escape_chunked(&mut self, src: *const u8, len: usize) {
+    unsafe fn escape_chunked(&mut self, mut p: Cur, src: *const u8, len: usize) -> Cur {
         let mut off = 0;
         while off < len {
-            let n = (len - off).min(ESCAPE_CHUNK);
-            self.reserve(n * 6 + 32);
-            let dst = escape_body(self.end_ptr(), src.add(off), n);
-            self.set_end(dst);
+            let mut n = (len - off).min(ESCAPE_CHUNK);
+            let room = self.room(p);
+            if room < n * 6 + 32 {
+                // Escape as much as the room surely holds; only near the end
+                // reserve exactly what the rest needs. Reserving the 6x
+                // worst case in a buffer sized from the previous result
+                // forced a doubling realloc (and a shrink) per call, and
+                // counting every chunk's escapes cost an extra pass.
+                let safe = room.saturating_sub(32) / 6;
+                if safe >= 4096 {
+                    n = n.min(safe);
+                } else {
+                    p = self.reserve(p, n + 5 * count_escapes(src.add(off), n) + 32);
+                }
+            }
+            p = escape_body(p, src.add(off), n);
             off += n;
         }
+        p
     }
 
     #[inline(always)]
-    unsafe fn write_str(&mut self, obj: *mut ffi::PyObject, sep: u8, ns: usize) -> SerResult {
+    unsafe fn write_str(
+        &mut self,
+        p: Cur,
+        obj: *mut ffi::PyObject,
+        sep: u8,
+        ns: usize,
+    ) -> CurResult {
         if ffi::PyUnicode_IS_COMPACT_ASCII(obj) != 0 {
             let len = (*(obj as *mut ffi::PyASCIIObject)).length as usize;
             let data = (obj as *mut ffi::PyASCIIObject).add(1) as *const u8;
-            self.write_utf8(data, len, sep, ns);
-            return Ok(());
+            #[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
+            if len <= 16 && self.room(p) >= 16 * 6 + 35 {
+                // SAFETY: `data` is the inline data of a compact ASCII str,
+                // preceded by its PyASCIIObject header (>= 16 bytes).
+                return write_short_ascii(p, data, len, sep, ns);
+            }
+            return self.write_utf8(p, data, len, sep, ns);
         }
         if !self.str_mode && ffi::PyUnicode_IS_COMPACT(obj) != 0 {
             // bytes output, non-ASCII string whose UTF-8 form is cached.
             let c = obj as *mut ffi::PyCompactUnicodeObject;
             if !(*c).utf8.is_null() {
-                self.write_utf8((*c).utf8 as *const u8, (*c).utf8_length as usize, sep, ns);
-                return Ok(());
+                let (src, len) = ((*c).utf8 as *const u8, (*c).utf8_length as usize);
+                return self.write_utf8(p, src, len, sep, ns);
             }
         }
-        self.put_sep(sep, ns);
-        self.write_str_slow(obj)
+        let p = self.put_sep(p, sep, ns);
+        self.write_str_slow(p, obj)
     }
 
     /// Non-ASCII, non-compact (e.g. subclass) or legacy strings.
     #[inline(never)]
-    unsafe fn write_str_slow(&mut self, obj: *mut ffi::PyObject) -> SerResult {
+    unsafe fn write_str_slow(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
         #[cfg(not(Py_3_12))]
         {
             #[allow(deprecated)]
             if ffi::PyUnicode_READY(obj) != 0 {
-                return Err(SerError::PyErrSet);
+                return self.fail(SerError::PyErrSet);
             }
         }
         let len = ffi::PyUnicode_GET_LENGTH(obj) as usize;
         if ffi::PyUnicode_IS_ASCII(obj) != 0 {
-            self.write_utf8(ffi::PyUnicode_DATA(obj) as *const u8, len, 0, 0);
-            return Ok(());
+            return self.write_utf8(p, ffi::PyUnicode_DATA(obj) as *const u8, len, 0, 0);
         }
         if self.str_mode {
-            return self.write_str_segment(obj, len);
+            return self.write_str_segment(p, obj, len);
         }
-        let (p, n) = utf8_of(obj)?;
-        self.write_utf8(p, n, 0, 0);
-        Ok(())
+        let (src, n) = match utf8_of(obj) {
+            Ok(v) => v,
+            Err(e) => return self.fail(e),
+        };
+        self.write_utf8(p, src, n, 0, 0)
     }
 
     /// `str` output: record the non-ASCII string instead of encoding it.
@@ -1236,150 +1699,230 @@ impl Serializer {
     /// Like `json.dumps(..., ensure_ascii=False)`, lone surrogates are copied
     /// through (a `str` can hold them); `dumps_bytes` rejects them because
     /// they cannot be encoded as UTF-8.
-    unsafe fn write_str_segment(&mut self, obj: *mut ffi::PyObject, len: usize) -> SerResult {
+    unsafe fn write_str_segment(
+        &mut self,
+        p: Cur,
+        obj: *mut ffi::PyObject,
+        len: usize,
+    ) -> CurResult {
         let kind = ffi::PyUnicode_KIND(obj);
-        let data = ffi::PyUnicode_DATA(obj);
         // Strong reference to the string whose native data will be copied.
-        let src = if kind_needs_escape(kind, data as *const u8, len) {
-            // Rare: build the escaped text as a new (canonical) str.
-            let s = escaped_copy(kind, data as *const u8, len);
-            if s.is_null() {
-                return Err(SerError::PyErrSet);
-            }
-            s
-        } else {
-            ffi::Py_INCREF(obj);
-            obj
-        };
-        let nchars = ffi::PyUnicode_GET_LENGTH(src) as usize;
-        self.put(b'"');
+        ffi::Py_INCREF(obj);
+        let p = self.put(p, b'"');
         self.segs.push(Segment {
-            pos: self.buf.len(),
-            obj: src,
-            nchars,
+            pos: self.offset(p),
+            obj,
+            nchars: len,
         });
-        self.put(b'"');
-        self.max_kind = self.max_kind.max(ffi::PyUnicode_KIND(src));
-        self.seg_chars += nchars;
-        Ok(())
+        self.max_kind = self.max_kind.max(kind);
+        self.seg_chars += len;
+        self.put(p, b'"')
     }
 
     // ----- containers -----
 
-    /// Containers nest at most `RECURSION_LIMIT` deep (an empty container
-    /// at that depth is rejected too, matching orjson).
-    #[inline(always)]
-    fn check_depth(&self) -> SerResult {
-        if self.depth >= RECURSION_LIMIT {
-            return Err(SerError::Recursion);
-        }
-        Ok(())
-    }
-
     #[inline(never)]
-    unsafe fn ser_list(&mut self, obj: *mut ffi::PyObject) -> SerResult {
-        self.check_depth()?;
+    unsafe fn ser_list(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        if self.depth >= RECURSION_LIMIT {
+            return self.fail(SerError::Recursion);
+        }
         let n = ffi::PyList_GET_SIZE(obj);
         if n == 0 {
-            self.put2(b"[]");
-            return Ok(());
+            return self.put2(p, b"[]");
         }
         self.depth += 1;
-        self.put(b'[');
+        let mut p = self.put(p, b'[');
         let mut i = 0;
-        // Re-read the size each iteration: guards against mutation from
-        // finalizers.
+        // Re-read the size after every generic item: guards against mutation
+        // from finalizers.
         while i < ffi::PyList_GET_SIZE(obj) {
-            self.ser(ffi::PyList_GET_ITEM(obj, i), b',', (i != 0) as usize)?;
+            let item = ffi::PyList_GET_ITEM(obj, i);
+            let ty = ffi::Py_TYPE(item);
+            if ty == int_type() || ty == float_type() {
+                let (q, j) = self.list_scalars(p, obj, i);
+                p = q;
+                if j != i {
+                    i = j;
+                    continue;
+                }
+            }
+            p = tri!(self.ser(p, item, b',', (i != 0) as usize));
             i += 1;
         }
-        self.put(b']');
         self.depth -= 1;
-        Ok(())
+        self.put(p, b']')
+    }
+
+    /// Writes the run of list items starting at `i` that are exact small
+    /// ints or exact finite floats, with the list size, item array and
+    /// capacity limit kept in registers. Returns the cursor and the index of
+    /// the first item it did not write (the caller serializes that one
+    /// generically, which also produces any error). Every item's exact type
+    /// is checked; nothing here can run Python code, so the list cannot
+    /// change under us.
+    #[inline(always)]
+    unsafe fn list_scalars(
+        &mut self,
+        mut p: Cur,
+        obj: *mut ffi::PyObject,
+        mut i: ffi::Py_ssize_t,
+    ) -> (Cur, ffi::Py_ssize_t) {
+        /// Largest scalar write: separator + '-' + 19 digits, or separator +
+        /// the 24-byte zmij buffer.
+        const MAX: usize = 40;
+        let n = ffi::PyList_GET_SIZE(obj);
+        let items = (*(obj as *mut ffi::PyListObject)).ob_item;
+        let inline_int = INLINE_INT;
+        // cap >= MIN_CAPACITY > MAX, so `limit` stays inside the allocation.
+        let mut limit = self.limit(MAX);
+        while i < n {
+            let item = *items.offset(i);
+            let ty = ffi::Py_TYPE(item);
+            if p > limit {
+                p = self.grow(p, MAX);
+                limit = self.limit(MAX);
+            }
+            // The separator is only committed (by advancing past it) once
+            // the item is written; otherwise the generic path rewrites it.
+            *p = b',';
+            let q = p.add((i != 0) as usize);
+            if ty == int_type() && inline_int {
+                let (neg, nd) = int_shape(item);
+                if nd > 2 {
+                    break;
+                }
+                *q = b'-';
+                let q = q.add(neg as usize);
+                let len = if nd <= 1 {
+                    write_u32_small(q, int_magnitude(item, nd) as u32)
+                } else {
+                    itoap::write_to_ptr(q, int_magnitude(item, nd))
+                };
+                p = q.add(len);
+            } else if ty == float_type() {
+                let v = ffi::PyFloat_AS_DOUBLE(item);
+                if !v.is_finite() {
+                    break;
+                }
+                // SAFETY: MAX bytes are reserved at `p`; zmij::Buffer is a
+                // plain 24-byte array (asserted at the top of the file).
+                let b = &mut *(q as *mut zmij::Buffer);
+                p = q.add(b.format_finite(v).len());
+            } else {
+                break;
+            }
+            i += 1;
+        }
+        (p, i)
     }
 
     #[inline(never)]
-    unsafe fn ser_tuple(&mut self, obj: *mut ffi::PyObject) -> SerResult {
-        self.check_depth()?;
+    unsafe fn ser_tuple(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        if self.depth >= RECURSION_LIMIT {
+            return self.fail(SerError::Recursion);
+        }
         let n = ffi::PyTuple_GET_SIZE(obj);
         if n == 0 {
-            self.put2(b"[]");
-            return Ok(());
+            return self.put2(p, b"[]");
         }
         self.depth += 1;
-        self.put(b'[');
+        let mut p = self.put(p, b'[');
         for i in 0..n {
-            self.ser(ffi::PyTuple_GET_ITEM(obj, i), b',', (i != 0) as usize)?;
+            p = tri!(self.ser(p, ffi::PyTuple_GET_ITEM(obj, i), b',', (i != 0) as usize));
         }
-        self.put(b']');
         self.depth -= 1;
-        Ok(())
+        self.put(p, b']')
     }
 
     #[inline(never)]
-    unsafe fn ser_dict(&mut self, obj: *mut ffi::PyObject) -> SerResult {
-        self.check_depth()?;
+    unsafe fn ser_dict(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        if self.depth >= RECURSION_LIMIT {
+            return self.fail(SerError::Recursion);
+        }
         if (*(obj as *mut ffi::PyDictObject)).ma_used == 0 {
-            self.put2(b"{}");
-            return Ok(());
+            return self.put2(p, b"{}");
         }
         self.depth += 1;
-        self.put(b'{');
+        let mut p = self.put(p, b'{');
+        let mut ns = 0;
+        #[cfg(rjson_dict_direct)]
+        if let Some((base, n, stride)) = dictiter::entries(obj) {
+            // Nothing below runs Python code, so the table cannot change.
+            for i in 0..n {
+                let e = base.add(i * stride);
+                let value = *e.add(1);
+                if value.is_null() {
+                    continue; // deleted entry
+                }
+                p = tri!(self.dict_item(p, *e, value, ns));
+                ns = 1;
+            }
+            self.depth -= 1;
+            return self.put(p, b'}');
+        }
         let mut pos: ffi::Py_ssize_t = 0;
         let mut key: *mut ffi::PyObject = ptr::null_mut();
         let mut value: *mut ffi::PyObject = ptr::null_mut();
-        let mut ns = 0;
         while ffi::PyDict_Next(obj, &mut pos, &mut key, &mut value) != 0 {
-            if ffi::Py_TYPE(key) == str_type() {
-                self.write_str(key, b',', ns)?;
-            } else if ffi::PyUnicode_Check(key) != 0 {
-                self.put_sep(b',', ns);
-                self.write_str_slow(key)?;
-            } else {
-                return Err(SerError::KeyNotStr);
-            }
+            p = tri!(self.dict_item(p, key, value, ns));
             ns = 1;
-            self.ser(value, b':', 1)?;
         }
-        self.put(b'}');
         self.depth -= 1;
-        Ok(())
+        self.put(p, b'}')
+    }
+
+    /// Writes `,` (if `ns == 1`), `"key":value`.
+    #[inline(always)]
+    unsafe fn dict_item(
+        &mut self,
+        p: Cur,
+        key: *mut ffi::PyObject,
+        value: *mut ffi::PyObject,
+        ns: usize,
+    ) -> CurResult {
+        let p = if ffi::Py_TYPE(key) == str_type() {
+            tri!(self.write_str(p, key, b',', ns))
+        } else if ffi::PyUnicode_Check(key) != 0 {
+            let p = self.put_sep(p, b',', ns);
+            tri!(self.write_str_slow(p, key))
+        } else {
+            return self.fail(SerError::KeyNotStr);
+        };
+        self.ser(p, value, b':', 1)
     }
 
     // ----- dispatch -----
 
     /// Serializes `obj`, preceded by `sep` if `ns == 1`.
     #[inline(always)]
-    unsafe fn ser(&mut self, obj: *mut ffi::PyObject, sep: u8, ns: usize) -> SerResult {
+    unsafe fn ser(&mut self, p: Cur, obj: *mut ffi::PyObject, sep: u8, ns: usize) -> CurResult {
         let ty = ffi::Py_TYPE(obj);
         if ty == str_type() {
-            self.write_str(obj, sep, ns)
+            self.write_str(p, obj, sep, ns)
         } else if ty == int_type() {
-            self.write_int(obj, sep, ns)
+            self.write_int(p, obj, sep, ns)
         } else if ty == float_type() {
-            self.write_float(ffi::PyFloat_AS_DOUBLE(obj), sep, ns)
+            self.write_float(p, ffi::PyFloat_AS_DOUBLE(obj), sep, ns)
         } else if ty == dict_type() {
-            self.put_sep(sep, ns);
-            self.ser_dict(obj)
+            let p = self.put_sep(p, sep, ns);
+            self.ser_dict(p, obj)
         } else if ty == list_type() {
-            self.put_sep(sep, ns);
-            self.ser_list(obj)
+            let p = self.put_sep(p, sep, ns);
+            self.ser_list(p, obj)
         } else if ty == bool_type() {
             if obj == ffi::Py_True() {
-                self.put_word(sep, ns, b"true\0\0\0\0", 4);
+                self.put_word(p, sep, ns, b"true\0\0\0\0", 4)
             } else {
-                self.put_word(sep, ns, b"false\0\0\0", 5);
+                self.put_word(p, sep, ns, b"false\0\0\0", 5)
             }
-            Ok(())
         } else if obj == ffi::Py_None() {
-            self.put_word(sep, ns, b"null\0\0\0\0", 4);
-            Ok(())
+            self.put_word(p, sep, ns, b"null\0\0\0\0", 4)
         } else {
-            self.put_sep(sep, ns);
+            let p = self.put_sep(p, sep, ns);
             if ty == tuple_type() {
-                self.ser_tuple(obj)
+                self.ser_tuple(p, obj)
             } else {
-                self.ser_subclass(obj)
+                self.ser_subclass(p, obj)
             }
         }
     }
@@ -1389,23 +1932,23 @@ impl Serializer {
     /// serialized like their base type, as the stdlib `json` module does.
     #[cold]
     #[inline(never)]
-    unsafe fn ser_subclass(&mut self, obj: *mut ffi::PyObject) -> SerResult {
+    unsafe fn ser_subclass(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
         let ty = ffi::Py_TYPE(obj);
         if ffi::PyType_HasFeature(ty, ffi::Py_TPFLAGS_UNICODE_SUBCLASS) != 0 {
-            self.write_str_slow(obj)
+            self.write_str_slow(p, obj)
         } else if ffi::PyType_HasFeature(ty, ffi::Py_TPFLAGS_LONG_SUBCLASS) != 0 {
-            self.write_int_slow(obj)
+            self.write_int_slow(p, obj)
         } else if ffi::PyType_HasFeature(ty, ffi::Py_TPFLAGS_DICT_SUBCLASS) != 0 {
-            self.ser_dict(obj)
+            self.ser_dict(p, obj)
         } else if ffi::PyType_HasFeature(ty, ffi::Py_TPFLAGS_LIST_SUBCLASS) != 0 {
-            self.ser_list(obj)
+            self.ser_list(p, obj)
         } else if ffi::PyType_HasFeature(ty, ffi::Py_TPFLAGS_TUPLE_SUBCLASS) != 0 {
-            self.ser_tuple(obj)
+            self.ser_tuple(p, obj)
         } else if ffi::PyFloat_Check(obj) != 0 {
-            self.write_float(ffi::PyFloat_AS_DOUBLE(obj), 0, 0)
+            self.write_float(p, ffi::PyFloat_AS_DOUBLE(obj), 0, 0)
         } else {
             self.err_obj = obj;
-            Err(SerError::Unsupported)
+            self.fail(SerError::Unsupported)
         }
     }
 
@@ -1423,47 +1966,136 @@ impl Serializer {
         }
         // Non-ASCII: the buffer holds the ASCII parts; build the final string
         // with the exact kind and drop the buffer.
-        LAST_LEN.with(|c| c.set(len));
+        LAST_LEN.with(|c| c[1].set(len));
         let total = len + self.seg_chars;
+        // Escapes in the non-ASCII strings are only found while copying them;
+        // leave some room so that a few do not need a realloc.
+        let cap = total + self.seg_chars / 32 + 16;
         let maxchar = match self.max_kind {
             1 => 0xff,
             2 => 0xffff,
             _ => 0x10ffff,
         };
-        let s = ffi::PyUnicode_New(total as ffi::Py_ssize_t, maxchar);
+        let mut s = ffi::PyUnicode_New(cap as ffi::Py_ssize_t, maxchar);
         if s.is_null() {
             return s;
         }
-        let data = ffi::PyUnicode_DATA(s);
-        let written = match self.max_kind {
-            1 => self.fill(data as *mut u8),
-            2 => self.fill(data as *mut u16),
-            _ => self.fill(data as *mut u32),
+        let filled = match self.max_kind {
+            1 => self.fill::<u8>(&mut s, cap),
+            2 => self.fill::<u16>(&mut s, cap),
+            _ => self.fill::<u32>(&mut s, cap),
         };
-        debug_assert_eq!(written, total);
-        let _ = written;
+        if filled.is_none() {
+            ffi::Py_DECREF(s);
+            return ptr::null_mut();
+        }
         s
     }
 
-    unsafe fn fill<D: Unit>(&self, out: *mut D) -> usize {
+    /// Writes the result into `*s` (allocated with `cap` units): ASCII runs
+    /// from the buffer and the segments' native data, checking each segment
+    /// for characters that need escaping right before copying it (so its
+    /// data is read from cache) and escaping those segments while copying.
+    /// Grows `*s` if the escapes do not fit, and finally shortens it in
+    /// place to the written length. None (exception set) if growing failed.
+    unsafe fn fill<D: Unit>(&self, s: &mut *mut ffi::PyObject, mut cap: usize) -> Option<()> {
         let buf = self.buf.as_ptr();
-        let mut o = 0usize;
-        let mut prev = 0usize;
+        let mut out = ffi::PyUnicode_DATA(*s) as *mut D;
+        let (mut o, mut prev) = (0usize, 0usize);
+        // Units still to write, not counting escapes.
+        let mut rem = self.buf.len() + self.seg_chars;
         for seg in &self.segs {
-            widen(buf.add(prev), out.add(o), seg.pos - prev);
-            o += seg.pos - prev;
             let d = ffi::PyUnicode_DATA(seg.obj);
-            match ffi::PyUnicode_KIND(seg.obj) {
-                ffi::PyUnicode_1BYTE_KIND => widen(d as *const u8, out.add(o), seg.nchars),
-                ffi::PyUnicode_2BYTE_KIND => widen(d as *const u16, out.add(o), seg.nchars),
-                _ => widen(d as *const u32, out.add(o), seg.nchars),
-            }
-            o += seg.nchars;
+            let kind = ffi::PyUnicode_KIND(seg.obj);
+            let n = seg.nchars;
+            let run = seg.pos - prev;
+            widen(buf.add(prev), out.add(o), run);
+            o += run;
             prev = seg.pos;
+            rem -= run + n;
+            // Copy, or find that the segment needs escaping. Large same-kind
+            // strings are checked while being copied.
+            #[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
+            let fused =
+                std::mem::size_of::<D>() == kind as usize && n * kind as usize >= 512 && HAS_AVX2;
+            #[cfg(not(all(target_arch = "x86_64", target_feature = "sse4.1")))]
+            let fused = false;
+            let escape = if fused {
+                #[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
+                {
+                    let (src, dst, bytes) =
+                        (d as *const u8, out.add(o) as *mut u8, n * kind as usize);
+                    match kind {
+                        ffi::PyUnicode_1BYTE_KIND => kscan::copy_scan_avx2::<1>(src, dst, bytes),
+                        ffi::PyUnicode_2BYTE_KIND => kscan::copy_scan_avx2::<2>(src, dst, bytes),
+                        _ => kscan::copy_scan_avx2::<4>(src, dst, bytes),
+                    }
+                }
+                #[cfg(not(all(target_arch = "x86_64", target_feature = "sse4.1")))]
+                false
+            } else if kind_needs_escape(kind, d as *const u8, n) {
+                true
+            } else {
+                match kind {
+                    ffi::PyUnicode_1BYTE_KIND => widen(d as *const u8, out.add(o), n),
+                    ffi::PyUnicode_2BYTE_KIND => widen(d as *const u16, out.add(o), n),
+                    _ => widen(d as *const u32, out.add(o), n),
+                }
+                false
+            };
+            if !escape {
+                o += n;
+                continue;
+            }
+            let extra = match kind {
+                ffi::PyUnicode_1BYTE_KIND => escape_extra(d as *const u8, n),
+                ffi::PyUnicode_2BYTE_KIND => escape_extra(d as *const u16, n),
+                _ => escape_extra(d as *const u32, n),
+            };
+            let need = o + n + extra + rem;
+            if need > cap {
+                cap = need + need / 16;
+                // On failure `*s` is left intact (the caller releases it).
+                if ffi::PyUnicode_Resize(s, cap as ffi::Py_ssize_t) != 0 {
+                    return None;
+                }
+                out = ffi::PyUnicode_DATA(*s) as *mut D;
+            }
+            let w = match kind {
+                ffi::PyUnicode_1BYTE_KIND => widen_escaped(d as *const u8, out.add(o), n),
+                ffi::PyUnicode_2BYTE_KIND => widen_escaped(d as *const u16, out.add(o), n),
+                _ => widen_escaped(d as *const u32, out.add(o), n),
+            };
+            debug_assert_eq!(w, n + extra);
+            o += w;
         }
-        widen(buf.add(prev), out.add(o), self.buf.len() - prev);
-        o + self.buf.len() - prev
+        let run = self.buf.len() - prev;
+        widen(buf.add(prev), out.add(o), run);
+        o += run;
+        debug_assert!(o <= cap);
+        if o < cap {
+            // Shorten in place like `Out::into_object`: a str does not record
+            // its allocation size, so a shorter length plus the terminating
+            // NUL is valid, and freeing a block of the size that was
+            // allocated keeps glibc from mmapping the next one.
+            (*(*s as *mut ffi::PyASCIIObject)).length = o as ffi::Py_ssize_t;
+            *out.add(o) = D::from_u32(0);
+        }
+        Some(())
     }
+}
+
+/// Writes `sep` (if `ns == 1`) and `"<escaped>"`; the caller guarantees
+/// `len * 6 + 35` bytes of room at `p`.
+#[inline(always)]
+unsafe fn write_utf8_unchecked(p: Cur, src: *const u8, len: usize, sep: u8, ns: usize) -> Cur {
+    let mut dst = p;
+    *dst = sep;
+    dst = dst.add(ns);
+    *dst = b'"';
+    dst = escape_body(dst.add(1), src, len);
+    *dst = b'"';
+    dst.add(1)
 }
 
 /// UTF-8 view of a (non-ASCII) string, using CPython's cached copy when present.
@@ -1525,9 +2157,12 @@ pub unsafe fn dumps_raw(
     as_str: bool,
 ) -> PyResult<*mut ffi::PyObject> {
     let mut ser = Serializer::new(as_str);
-    if let Err(e) = ser.ser(obj, 0, 0) {
-        return Err(to_pyerr(py, &ser, e));
+    let start = ser.start();
+    let end = ser.ser(start, obj, 0, 0);
+    if end.is_null() {
+        return Err(to_pyerr(py, &ser, ser.err));
     }
+    ser.sync(end);
     let out = if as_str {
         ser.finish_str()
     } else {
