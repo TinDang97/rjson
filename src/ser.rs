@@ -763,6 +763,60 @@ unsafe fn escaped_copy(kind: u32, data: *const u8, n: usize) -> *mut ffi::PyObje
     )
 }
 
+/// `_mm_shuffle_epi8` controls for `write_short_ascii`: 16 bytes starting at
+/// `16 - len` move the last `len` bytes of a vector to the front and zero
+/// the rest (0x80 lanes).
+static SHIFT_TAB: [u8; 32] = {
+    let mut t = [0x80u8; 32];
+    let mut i = 0;
+    while i < 16 {
+        t[i] = i as u8;
+        i += 1;
+    }
+    t
+};
+
+const _: () = assert!(std::mem::size_of::<ffi::PyASCIIObject>() >= 16);
+
+/// Writes `sep` (if `ns == 1`) and `"<escaped>"` for a string of `len <= 16`
+/// bytes, without a call or a scalar tail: the 16 bytes *ending* at the end
+/// of the string are loaded (so the load never reads past it) and shifted
+/// down with one shuffle.
+///
+/// # Safety
+/// The 16 bytes before `data + len` must be readable: true for the inline
+/// data of a compact ASCII `str`, which follows its (>= 16-byte) header in
+/// the same allocation. `16 * 6 + 35` bytes of room at `p`.
+#[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
+#[inline(always)]
+unsafe fn write_short_ascii(
+    p: *mut u8,
+    data: *const u8,
+    len: usize,
+    sep: u8,
+    ns: usize,
+) -> *mut u8 {
+    use std::arch::x86_64::*;
+    debug_assert!(len <= 16);
+    let v = _mm_loadu_si128(data.add(len).sub(16) as *const __m128i);
+    let ctl = _mm_loadu_si128(SHIFT_TAB.as_ptr().add(16 - len) as *const __m128i);
+    let v = _mm_shuffle_epi8(v, ctl);
+    // Zeroed lanes past the end look like control characters: mask them.
+    let m = x86::mask16(v) & ((1u32 << len) - 1);
+    *p = sep;
+    let d = p.add(ns);
+    *d = b'"';
+    let d = d.add(1);
+    let d = if m == 0 {
+        _mm_storeu_si128(d as *mut __m128i, v);
+        d.add(len)
+    } else {
+        escape_block(d, data, len, m)
+    };
+    *d = b'"';
+    d.add(1)
+}
+
 /// A non-ASCII string whose content is not in the byte buffer.
 struct Segment {
     /// Offset in `buf` where the content belongs.
@@ -1233,6 +1287,12 @@ impl Serializer {
         if ffi::PyUnicode_IS_COMPACT_ASCII(obj) != 0 {
             let len = (*(obj as *mut ffi::PyASCIIObject)).length as usize;
             let data = (obj as *mut ffi::PyASCIIObject).add(1) as *const u8;
+            #[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
+            if len <= 16 && self.room(p) >= 16 * 6 + 35 {
+                // SAFETY: `data` is the inline data of a compact ASCII str,
+                // preceded by its PyASCIIObject header (>= 16 bytes).
+                return write_short_ascii(p, data, len, sep, ns);
+            }
             return self.write_utf8(p, data, len, sep, ns);
         }
         if !self.str_mode && ffi::PyUnicode_IS_COMPACT(obj) != 0 {
