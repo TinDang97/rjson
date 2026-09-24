@@ -870,31 +870,36 @@ unsafe fn units_need_escape<S: Unit>(src: *const S, n: usize) -> bool {
     false
 }
 
-/// Returns a new canonical `str` holding the JSON-escaped text of a
-/// UCS1/UCS2/UCS4 buffer (without quotes), or NULL with an exception set.
-unsafe fn escaped_copy(kind: u32, data: *const u8, n: usize) -> *mut ffi::PyObject {
-    let unit = |i: usize| -> u32 {
-        match kind {
-            1 => *data.add(i) as u32,
-            2 => *(data as *const u16).add(i) as u32,
-            _ => *(data as *const u32).add(i),
-        }
-    };
-    let mut out: Vec<u32> = Vec::with_capacity(n + 16);
-    for i in 0..n {
-        let c = unit(i);
+/// Number of code units that escaping adds to a UCS1/UCS2/UCS4 buffer.
+unsafe fn escape_extra<S: Unit>(src: *const S, n: usize) -> usize {
+    let mut extra = 0;
+    for &c in std::slice::from_raw_parts(src, n) {
+        let c = c.to_u32();
         if c < 0x60 && NEEDS_ESCAPE[c as usize] != 0 {
-            let e = &ESCAPE_TAB[c as usize];
-            out.extend(e[..e[7] as usize].iter().map(|&b| b as u32));
-        } else {
-            out.push(c);
+            extra += ESCAPE_TAB[c as usize][7] as usize - 1;
         }
     }
-    ffi::PyUnicode_FromKindAndData(
-        ffi::PyUnicode_4BYTE_KIND as std::os::raw::c_int,
-        out.as_ptr() as *const std::os::raw::c_void,
-        out.len() as ffi::Py_ssize_t,
-    )
+    extra
+}
+
+/// Copies `n` code units, JSON-escaping them, widening from `S` to `D`.
+/// Writes exactly `n + escape_extra(src, n)` units.
+unsafe fn widen_escaped<S: Unit, D: Unit>(src: *const S, dst: *mut D, n: usize) -> usize {
+    let mut o = 0;
+    for &c in std::slice::from_raw_parts(src, n) {
+        let c = c.to_u32();
+        if c < 0x60 && NEEDS_ESCAPE[c as usize] != 0 {
+            let e = &ESCAPE_TAB[c as usize];
+            for (j, &b) in e[..e[7] as usize].iter().enumerate() {
+                *dst.add(o + j) = D::from_u32(b as u32);
+            }
+            o += e[7] as usize;
+        } else {
+            *dst.add(o) = D::from_u32(c);
+            o += 1;
+        }
+    }
+    o
 }
 
 /// `_mm_shuffle_epi8` controls for `write_short_ascii`: 16 bytes starting at
@@ -957,8 +962,10 @@ struct Segment {
     pos: usize,
     /// Strong reference to the source `str`.
     obj: *mut ffi::PyObject,
-    /// Number of code points of the content.
+    /// Number of code points of the source string.
     nchars: usize,
+    /// Code points added by escaping it (0: copied verbatim).
+    extra: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -1493,27 +1500,27 @@ impl Serializer {
     ) -> CurResult {
         let kind = ffi::PyUnicode_KIND(obj);
         let data = ffi::PyUnicode_DATA(obj);
-        // Strong reference to the string whose native data will be copied.
-        let src = if kind_needs_escape(kind, data as *const u8, len) {
-            // Rare: build the escaped text as a new (canonical) str.
-            let s = escaped_copy(kind, data as *const u8, len);
-            if s.is_null() {
-                return self.fail(SerError::PyErrSet);
+        let extra = if kind_needs_escape(kind, data as *const u8, len) {
+            // The final copy escapes this string (see `fill`).
+            match kind {
+                ffi::PyUnicode_1BYTE_KIND => escape_extra(data as *const u8, len),
+                ffi::PyUnicode_2BYTE_KIND => escape_extra(data as *const u16, len),
+                _ => escape_extra(data as *const u32, len),
             }
-            s
         } else {
-            ffi::Py_INCREF(obj);
-            obj
+            0
         };
-        let nchars = ffi::PyUnicode_GET_LENGTH(src) as usize;
+        // Strong reference to the string whose native data will be copied.
+        ffi::Py_INCREF(obj);
         let p = self.put(p, b'"');
         self.segs.push(Segment {
             pos: self.offset(p),
-            obj: src,
-            nchars,
+            obj,
+            nchars: len,
+            extra,
         });
-        self.max_kind = self.max_kind.max(ffi::PyUnicode_KIND(src));
-        self.seg_chars += nchars;
+        self.max_kind = self.max_kind.max(kind);
+        self.seg_chars += len + extra;
         self.put(p, b'"')
     }
 
@@ -1766,14 +1773,25 @@ impl Serializer {
         for seg in &self.segs {
             widen(buf.add(prev), out.add(o), seg.pos - prev);
             o += seg.pos - prev;
-            let d = ffi::PyUnicode_DATA(seg.obj);
-            match ffi::PyUnicode_KIND(seg.obj) {
-                ffi::PyUnicode_1BYTE_KIND => widen(d as *const u8, out.add(o), seg.nchars),
-                ffi::PyUnicode_2BYTE_KIND => widen(d as *const u16, out.add(o), seg.nchars),
-                _ => widen(d as *const u32, out.add(o), seg.nchars),
-            }
-            o += seg.nchars;
             prev = seg.pos;
+            let d = ffi::PyUnicode_DATA(seg.obj);
+            let n = seg.nchars;
+            if seg.extra == 0 {
+                match ffi::PyUnicode_KIND(seg.obj) {
+                    ffi::PyUnicode_1BYTE_KIND => widen(d as *const u8, out.add(o), n),
+                    ffi::PyUnicode_2BYTE_KIND => widen(d as *const u16, out.add(o), n),
+                    _ => widen(d as *const u32, out.add(o), n),
+                }
+                o += n;
+            } else {
+                let w = match ffi::PyUnicode_KIND(seg.obj) {
+                    ffi::PyUnicode_1BYTE_KIND => widen_escaped(d as *const u8, out.add(o), n),
+                    ffi::PyUnicode_2BYTE_KIND => widen_escaped(d as *const u16, out.add(o), n),
+                    _ => widen_escaped(d as *const u32, out.add(o), n),
+                };
+                debug_assert_eq!(w, n + seg.extra);
+                o += n + seg.extra;
+            }
         }
         widen(buf.add(prev), out.add(o), self.buf.len() - prev);
         o + self.buf.len() - prev
