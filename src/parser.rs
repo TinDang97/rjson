@@ -1321,13 +1321,16 @@ const POW10: [f64; 23] = [
 // Float construction
 // ============================================================================
 
-/// `PyFloat_FromDouble` without the free-list probe: while building a
-/// document the float free list (<= 100 entries) is empty after the first
-/// few floats, so every call pays for the probe and then allocates anyway.
-/// Allocates with `PyObject_Malloc` and initialises with `PyObject_Init`,
-/// exactly as `PyFloat_FromDouble` does on a free-list miss (float_dealloc
-/// frees with `PyObject_Free` or recycles into the free list either way).
-/// `PyFloatObject` is public CPython (non-limited) API.
+/// On CPython 3.13+, `PyFloat_FromDouble` without the free-list probe: while
+/// building a document the float free list (<= 100 entries) is empty after
+/// the first few floats, so every call pays for the probe and then
+/// allocates anyway. This does exactly the miss path (`PyObject_Malloc` +
+/// `PyObject_Init` + `ob_fval`); float_dealloc frees or recycles the object
+/// the same way. `PyFloatObject` is public CPython (non-limited) API.
+/// Measured: 3.13 -3..6% on float-heavy documents, 3.12 neutral, 3.11 +9%
+/// (its PyFloat_FromDouble is cheap and the extra call costs more), so
+/// older versions keep `PyFloat_FromDouble`.
+#[cfg(Py_3_13)]
 #[inline(always)]
 unsafe fn new_float(v: f64) -> *mut ffi::PyObject {
     let op = ffi::PyObject_Malloc(std::mem::size_of::<ffi::PyFloatObject>()) as *mut ffi::PyObject;
@@ -1337,6 +1340,12 @@ unsafe fn new_float(v: f64) -> *mut ffi::PyObject {
     ffi::PyObject_Init(op, ptr::addr_of_mut!(ffi::PyFloat_Type));
     (*(op as *mut ffi::PyFloatObject)).ob_fval = v;
     op
+}
+
+#[cfg(not(Py_3_13))]
+#[inline(always)]
+unsafe fn new_float(v: f64) -> *mut ffi::PyObject {
+    ffi::PyFloat_FromDouble(v)
 }
 
 // ============================================================================
