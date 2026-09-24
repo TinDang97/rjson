@@ -1152,10 +1152,9 @@ struct Segment {
     pos: usize,
     /// Strong reference to the source `str`.
     obj: *mut ffi::PyObject,
-    /// Number of code points of the source string.
+    /// Number of code points of the source string (escaping, if needed,
+    /// happens in the final copy).
     nchars: usize,
-    /// Code points added by escaping it (0: copied verbatim).
-    extra: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -1707,9 +1706,6 @@ impl Serializer {
             pos: self.offset(p),
             obj,
             nchars: len,
-            // Escaping is checked (and done) by the final copy, see
-            // `finish_str`.
-            extra: 0,
         });
         self.max_kind = self.max_kind.max(kind);
         self.seg_chars += len;
@@ -1964,140 +1960,122 @@ impl Serializer {
         // Non-ASCII: the buffer holds the ASCII parts; build the final string
         // with the exact kind and drop the buffer.
         LAST_LEN.with(|c| c[1].set(len));
-        let mut total = len + self.seg_chars;
+        let total = len + self.seg_chars;
+        // Escapes in the non-ASCII strings are only found while copying them;
+        // leave some room so that a few do not need a realloc.
+        let cap = total + self.seg_chars / 32 + 16;
         let maxchar = match self.max_kind {
             1 => 0xff,
             2 => 0xffff,
             _ => 0x10ffff,
         };
-        let mut s = ffi::PyUnicode_New(total as ffi::Py_ssize_t, maxchar);
+        let mut s = ffi::PyUnicode_New(cap as ffi::Py_ssize_t, maxchar);
         if s.is_null() {
             return s;
         }
-        // Optimistic pass: assume no string needs escaping, checking each one
-        // right before copying it (so its data is read from cache).
-        let mut st = FillState::default();
-        if self.fill_any(s, &mut st, true) {
-            debug_assert_eq!(st.o, total);
-            return s;
-        }
-        // A string needs escaping: everything before it is final. Count the
-        // escapes of the rest, grow the result and finish with escaping.
-        for seg in &mut self.segs[st.seg..] {
-            let d = ffi::PyUnicode_DATA(seg.obj) as *const u8;
-            let kind = ffi::PyUnicode_KIND(seg.obj);
-            if kind_needs_escape(kind, d, seg.nchars) {
-                seg.extra = match kind {
-                    ffi::PyUnicode_1BYTE_KIND => escape_extra(d, seg.nchars),
-                    ffi::PyUnicode_2BYTE_KIND => escape_extra(d as *const u16, seg.nchars),
-                    _ => escape_extra(d as *const u32, seg.nchars),
-                };
-                total += seg.extra;
-            }
-        }
-        if ffi::PyUnicode_Resize(&mut s, total as ffi::Py_ssize_t) != 0 {
-            // `s` was released and an exception is set.
+        let filled = match self.max_kind {
+            1 => self.fill::<u8>(&mut s, cap),
+            2 => self.fill::<u16>(&mut s, cap),
+            _ => self.fill::<u32>(&mut s, cap),
+        };
+        if filled.is_none() {
+            ffi::Py_DECREF(s);
             return ptr::null_mut();
         }
-        let done = self.fill_any(s, &mut st, false);
-        debug_assert!(done && st.o == total);
-        let _ = done;
         s
     }
 
-    unsafe fn fill_any(&self, s: *mut ffi::PyObject, st: &mut FillState, check: bool) -> bool {
-        let data = ffi::PyUnicode_DATA(s);
-        match self.max_kind {
-            1 => self.fill(data as *mut u8, st, check),
-            2 => self.fill(data as *mut u16, st, check),
-            _ => self.fill(data as *mut u32, st, check),
-        }
-    }
-
-    /// Writes the result from `st` on: ASCII runs from the buffer and the
-    /// segments' native data. With `check`, stops (returning false) before
-    /// the first segment that needs escaping; otherwise segments with
-    /// `extra != 0` are escaped while copying.
-    unsafe fn fill<D: Unit>(&self, out: *mut D, st: &mut FillState, check: bool) -> bool {
+    /// Writes the result into `*s` (allocated with `cap` units): ASCII runs
+    /// from the buffer and the segments' native data, checking each segment
+    /// for characters that need escaping right before copying it (so its
+    /// data is read from cache) and escaping those segments while copying.
+    /// Grows `*s` if the escapes do not fit, and finally shortens it in
+    /// place to the written length. None (exception set) if growing failed.
+    unsafe fn fill<D: Unit>(&self, s: &mut *mut ffi::PyObject, mut cap: usize) -> Option<()> {
         let buf = self.buf.as_ptr();
-        let FillState {
-            seg: mut i,
-            mut o,
-            mut prev,
-        } = *st;
-        while i < self.segs.len() {
-            let seg = &self.segs[i];
+        let mut out = ffi::PyUnicode_DATA(*s) as *mut D;
+        let (mut o, mut prev) = (0usize, 0usize);
+        // Units still to write, not counting escapes.
+        let mut rem = self.buf.len() + self.seg_chars;
+        for seg in &self.segs {
             let d = ffi::PyUnicode_DATA(seg.obj);
             let kind = ffi::PyUnicode_KIND(seg.obj);
             let n = seg.nchars;
-            let bytes = n * kind as usize;
-            // Large same-kind strings are checked while being copied.
+            let run = seg.pos - prev;
+            widen(buf.add(prev), out.add(o), run);
+            o += run;
+            prev = seg.pos;
+            rem -= run + n;
+            // Copy, or find that the segment needs escaping. Large same-kind
+            // strings are checked while being copied.
             #[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
             let fused =
-                check && std::mem::size_of::<D>() == kind as usize && bytes >= 512 && HAS_AVX2;
+                std::mem::size_of::<D>() == kind as usize && n * kind as usize >= 512 && HAS_AVX2;
             #[cfg(not(all(target_arch = "x86_64", target_feature = "sse4.1")))]
             let fused = false;
-            if check && !fused && kind_needs_escape(kind, d as *const u8, n) {
-                *st = FillState { seg: i, o, prev };
-                return false;
-            }
-            let before = FillState { seg: i, o, prev };
-            widen(buf.add(prev), out.add(o), seg.pos - prev);
-            o += seg.pos - prev;
-            prev = seg.pos;
-            #[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
-            if fused {
-                let dst = out.add(o) as *mut u8;
-                let esc = match kind {
-                    ffi::PyUnicode_1BYTE_KIND => {
-                        kscan::copy_scan_avx2::<1>(d as *const u8, dst, bytes)
+            let escape = if fused {
+                #[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
+                {
+                    let (src, dst, bytes) =
+                        (d as *const u8, out.add(o) as *mut u8, n * kind as usize);
+                    match kind {
+                        ffi::PyUnicode_1BYTE_KIND => kscan::copy_scan_avx2::<1>(src, dst, bytes),
+                        ffi::PyUnicode_2BYTE_KIND => kscan::copy_scan_avx2::<2>(src, dst, bytes),
+                        _ => kscan::copy_scan_avx2::<4>(src, dst, bytes),
                     }
-                    ffi::PyUnicode_2BYTE_KIND => {
-                        kscan::copy_scan_avx2::<2>(d as *const u8, dst, bytes)
-                    }
-                    _ => kscan::copy_scan_avx2::<4>(d as *const u8, dst, bytes),
-                };
-                if esc {
-                    // What was written from `before.o` on is rewritten later.
-                    *st = before;
-                    return false;
                 }
-                o += n;
-                i += 1;
-                continue;
-            }
-            if seg.extra == 0 {
+                #[cfg(not(all(target_arch = "x86_64", target_feature = "sse4.1")))]
+                false
+            } else if kind_needs_escape(kind, d as *const u8, n) {
+                true
+            } else {
                 match kind {
                     ffi::PyUnicode_1BYTE_KIND => widen(d as *const u8, out.add(o), n),
                     ffi::PyUnicode_2BYTE_KIND => widen(d as *const u16, out.add(o), n),
                     _ => widen(d as *const u32, out.add(o), n),
                 }
+                false
+            };
+            if !escape {
                 o += n;
-            } else {
-                let w = match kind {
-                    ffi::PyUnicode_1BYTE_KIND => widen_escaped(d as *const u8, out.add(o), n),
-                    ffi::PyUnicode_2BYTE_KIND => widen_escaped(d as *const u16, out.add(o), n),
-                    _ => widen_escaped(d as *const u32, out.add(o), n),
-                };
-                debug_assert_eq!(w, n + seg.extra);
-                o += n + seg.extra;
+                continue;
             }
-            i += 1;
+            let extra = match kind {
+                ffi::PyUnicode_1BYTE_KIND => escape_extra(d as *const u8, n),
+                ffi::PyUnicode_2BYTE_KIND => escape_extra(d as *const u16, n),
+                _ => escape_extra(d as *const u32, n),
+            };
+            let need = o + n + extra + rem;
+            if need > cap {
+                cap = need + need / 16;
+                // On failure `*s` is left intact (the caller releases it).
+                if ffi::PyUnicode_Resize(s, cap as ffi::Py_ssize_t) != 0 {
+                    return None;
+                }
+                out = ffi::PyUnicode_DATA(*s) as *mut D;
+            }
+            let w = match kind {
+                ffi::PyUnicode_1BYTE_KIND => widen_escaped(d as *const u8, out.add(o), n),
+                ffi::PyUnicode_2BYTE_KIND => widen_escaped(d as *const u16, out.add(o), n),
+                _ => widen_escaped(d as *const u32, out.add(o), n),
+            };
+            debug_assert_eq!(w, n + extra);
+            o += w;
         }
-        widen(buf.add(prev), out.add(o), self.buf.len() - prev);
-        o += self.buf.len() - prev;
-        *st = FillState { seg: i, o, prev };
-        true
+        let run = self.buf.len() - prev;
+        widen(buf.add(prev), out.add(o), run);
+        o += run;
+        debug_assert!(o <= cap);
+        if o < cap {
+            // Shorten in place like `Out::into_object`: a str does not record
+            // its allocation size, so a shorter length plus the terminating
+            // NUL is valid, and freeing a block of the size that was
+            // allocated keeps glibc from mmapping the next one.
+            (*(*s as *mut ffi::PyASCIIObject)).length = o as ffi::Py_ssize_t;
+            *out.add(o) = D::from_u32(0);
+        }
+        Some(())
     }
-}
-
-/// Progress of `Serializer::fill`: next segment, units written, buffer
-/// offset copied up to.
-#[derive(Clone, Copy, Default)]
-struct FillState {
-    seg: usize,
-    o: usize,
-    prev: usize,
 }
 
 /// Writes `sep` (if `ns == 1`) and `"<escaped>"`; the caller guarantees

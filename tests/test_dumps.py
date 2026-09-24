@@ -95,6 +95,10 @@ class TestStrings:
                 for k in (0, 1, 2, 50):
                     obj = [a * 3] * k + ["x" + b + "\n\"" + a] + [b * 2, "plain", a + "\\"] + [{a: b}] * k
                     assert both(obj) == ref(obj)
+                    # Escapes beyond the result's slack force it to grow.
+                    for heavy in (a + "\n" * 1000, a + "\x01" * 300 + b, (a + '"') * 500):
+                        obj = [b * 40] * k + [heavy, a, "tail"] + [heavy] * (k % 3)
+                        assert both(obj) == ref(obj)
 
     def test_str_result_kinds(self):
         for obj in (["a", "é"], ["a", "日"], ["a", "😀"], ["é", "日", "😀"], ["plain"]):
