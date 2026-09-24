@@ -279,6 +279,53 @@ class TestErrorHandling:
         with pytest.raises(ValueError, match="JSON parsing error"):
             rjson.loads('[1, 2, 3,]')
 
+    @pytest.mark.parametrize("doc", ["[1] x", "{} {}", "1 2", "null,"])
+    def test_loads_trailing_characters_raises(self, doc):
+        with pytest.raises(ValueError, match="JSON parsing error"):
+            rjson.loads(doc)
+
+    @pytest.mark.parametrize("conv", [str, lambda s: s.encode(), lambda s: bytearray(s.encode())])
+    def test_loads_accepts_str_bytes_bytearray(self, conv):
+        doc = '{"a": [1, 2.5, "héllo \U0001F600", null, true]}'
+        assert rjson.loads(conv(doc)) == {"a": [1, 2.5, "héllo \U0001F600", None, True]}
+
+    @pytest.mark.parametrize("bad", [None, 1, ["[]"], memoryview(b"[]")])
+    def test_loads_rejects_other_input_types(self, bad):
+        with pytest.raises(TypeError):
+            rjson.loads(bad)
+
+    def test_loads_invalid_utf8_bytes_raises(self):
+        with pytest.raises(ValueError):
+            rjson.loads(b'"\xff"')
+
+    def test_loads_trailing_whitespace_ok(self):
+        assert rjson.loads("[1] \n\t ") == [1]
+
+    @pytest.mark.parametrize(
+        "obj", ["\ud800", ["\ud800"], {"a": "\ud800"}, {"\ud800": 1}, ["x", 1, "\udfff"]]
+    )
+    def test_dumps_lone_surrogate_raises_cleanly(self, obj):
+        # must raise the encode error itself, not SystemError
+        # ("returned a result with an exception set")
+        with pytest.raises(UnicodeEncodeError):
+            rjson.dumps(obj)
+
+
+class TestStringLayout:
+    """ASCII fast path must honour the running interpreter's str layout
+    (the data offset changed in CPython 3.12)."""
+
+    @pytest.mark.parametrize("n", [0, 1, 7, 8, 15, 16, 31, 32, 33, 100, 1000])
+    def test_ascii_lengths(self, n):
+        s = "".join(chr(97 + i % 26) for i in range(n))
+        assert rjson.dumps(s) == '"' + s + '"'
+        assert rjson.dumps({s: [s, s]}) == '{"%s":["%s","%s"]}' % (s, s, s)
+
+    def test_non_ascii_kinds(self):
+        for s in ["caf\u00e9", "\u65e5\u672c", "\U0001F600", "a\u00e9\u65e5\U0001F600"]:
+            assert rjson.loads(rjson.dumps(s)) == s
+            assert rjson.loads(rjson.dumps([s, {s: s}])) == [s, {s: s}]
+
 
 class TestRoundTrip:
     """Test round-trip consistency (dumps -> loads == original)."""

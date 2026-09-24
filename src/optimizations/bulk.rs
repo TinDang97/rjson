@@ -10,47 +10,7 @@ use pyo3::prelude::*;
 use pyo3::ffi;
 use pyo3::types::{PyList, PyInt, PyFloat, PyString, PyBool};
 
-// ============================================================================
-// Phase 10.6: Fast ASCII String Extraction (duplicated from lib.rs for perf)
-// ============================================================================
-
-/// Simplified PyASCIIObject structure for fast ASCII detection
-#[repr(C)]
-struct PyASCIIObject {
-    _ob_refcnt: isize,
-    _ob_type: *mut ffi::PyTypeObject,
-    length: isize,
-    _hash: isize,
-    state: u32,
-}
-
-const STATE_ASCII_MASK: u32 = 0b01000000;
-
-#[cfg(target_pointer_width = "64")]
-const ASCII_DATA_OFFSET: usize = 48;
-
-#[cfg(target_pointer_width = "32")]
-const ASCII_DATA_OFFSET: usize = 24;
-
-/// Fast string extraction - ASCII path avoids PyUnicode_AsUTF8AndSize overhead
-#[inline(always)]
-unsafe fn extract_string_fast(str_ptr: *mut ffi::PyObject) -> (*const u8, usize) {
-    let ascii_obj = str_ptr as *const PyASCIIObject;
-    let state = (*ascii_obj).state;
-
-    if state & STATE_ASCII_MASK != 0 {
-        // FAST PATH: ASCII string - direct buffer access
-        let length = (*ascii_obj).length as usize;
-        let data_ptr = (str_ptr as *const u8).add(ASCII_DATA_OFFSET);
-        (data_ptr, length)
-    } else {
-        // SLOW PATH: Non-ASCII - use PyUnicode_AsUTF8AndSize
-        let mut size: ffi::Py_ssize_t = 0;
-        let data_ptr = ffi::PyUnicode_AsUTF8AndSize(str_ptr, &mut size);
-        // Note: We assume data_ptr is not null here since caller verified it's a string
-        (data_ptr as *const u8, size as usize)
-    }
-}
+// Phase 10.6 fast ASCII string access: see crate::pystr (version-correct).
 
 /// Type of homogeneous array detected
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -349,14 +309,8 @@ pub unsafe fn serialize_string_array_bulk(
         let item_ptr = ffi::PyList_GET_ITEM(list_ptr, i);
 
         // PHASE 10.6: Fast ASCII path avoids PyUnicode_AsUTF8AndSize overhead
-        let (str_data, str_size) = extract_string_fast(item_ptr);
-
-        if str_data.is_null() {
-            return Err(pyo3::exceptions::PyValueError::new_err("String must be valid UTF-8"));
-        }
-
+        let str_slice = crate::pystr::utf8(list.py(), item_ptr)?;
         // SAFETY: Python guarantees UTF-8 validity for PyUnicode objects
-        let str_slice = std::slice::from_raw_parts(str_data, str_size);
         let s = std::str::from_utf8_unchecked(str_slice);
 
         // Use the provided string serialization function (handles escaping)

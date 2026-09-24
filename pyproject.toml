@@ -13,7 +13,10 @@ dependencies = [
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
-compatibility = "linux"
+# `compatibility = "linux"` produced plain `linux_x86_64` wheels, which PyPI
+# rejects. Leave it unset so maturin auditwheel-checks and tags the highest
+# manylinux policy the binary satisfies; CI builds inside manylinux2014
+# containers (maturin-action `manylinux: auto`) for broad glibc coverage.
 
 [dependency-groups]
 dev = [

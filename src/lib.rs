@@ -1,76 +1,19 @@
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
-use pyo3::types::{PyBool, PyFloat, PyInt, PyString, PyList, PyTuple, PyDict, PyAny, PyBytes};
+use pyo3::types::{PyBool, PyFloat, PyInt, PyString, PyList, PyTuple, PyDict, PyAny};
 use pyo3::ffi;  // For direct C API access
 use serde::de::{self, Visitor, MapAccess, SeqAccess, Deserializer, DeserializeSeed};
 use std::fmt;
 
 // Performance optimizations module
 mod optimizations;
-use optimizations::{object_cache, type_cache, bulk, extreme, simd_parser, simd_escape, unlikely};
+mod entry;
+mod pystr;
+use optimizations::{object_cache, type_cache, bulk, simd_escape, unlikely};
 use type_cache::FastType;
 
-// ============================================================================
-// Phase 10.6: Fast ASCII String Extraction
-// ============================================================================
-//
-// PyUnicode_AsUTF8AndSize is slow for non-ASCII strings because Python stores
-// them in UCS-2/UCS-4 format and must convert to UTF-8 on demand.
-//
-// For ASCII strings (the common case in JSON), we can access the buffer directly
-// by reading the PyASCIIObject structure. This matches what orjson does.
-//
-// WARNING: This is CPython-specific and version-dependent!
-// Tested on Python 3.8-3.13. The layout has been stable since Python 3.3.
-
-/// Simplified PyASCIIObject structure (CPython internal)
-/// We only need the fields up to and including the state flags.
-#[repr(C)]
-struct PyASCIIObject {
-    /// PyObject_HEAD: ob_refcnt, ob_type
-    _ob_refcnt: isize,
-    _ob_type: *mut ffi::PyTypeObject,
-    /// String length (number of characters, not bytes for non-ASCII)
-    length: isize,
-    /// Cached hash value (-1 if not computed)
-    _hash: isize,
-    /// State flags packed as a u32
-    /// Bits: interned(2), kind(3), compact(1), ascii(1), ready(1), ...
-    state: u32,
-}
-
-/// Bit mask to extract the 'ascii' flag from state
-/// The ascii flag is bit 6 (after interned:2, kind:3, compact:1)
-const STATE_ASCII_MASK: u32 = 0b01000000;  // bit 6
-
-/// Offset from PyASCIIObject to the actual character data
-/// For compact ASCII strings, data follows immediately after:
-/// PyASCIIObject (on 64-bit: 8+8+8+8+4 = 36, aligned to 40) + wstr (8) = 48
-/// But actually for ASCII-only compact strings, there's no wstr field stored,
-/// so the data starts right after the null terminator padding.
-///
-/// The correct formula: sizeof(PyASCIIObject) rounded up to pointer alignment
-/// On 64-bit Linux: sizeof(PyASCIIObject) = 40, data at offset 40
-/// But we need to account for the compact representation!
-///
-/// For Python 3.12+: The structure is:
-/// - PyObject_HEAD (16 bytes)
-/// - length (8 bytes)
-/// - hash (8 bytes)
-/// - state (4 bytes + 4 padding) = 40 total
-/// - Then string data follows for compact ASCII
-///
-/// Actually, let me be more careful. The safest approach is to use the
-/// PyUnicode_DATA macro equivalent, which is:
-/// ((void*)((PyASCIIObject*)(op))->data) for non-legacy strings
-/// But actually compact strings store data inline after the struct.
-///
-/// For maximum safety, compute offset based on known structure:
-#[cfg(target_pointer_width = "64")]
-const ASCII_DATA_OFFSET: usize = 48;  // PyASCIIObject(40) + padding to 8-byte alignment for data
-
-#[cfg(target_pointer_width = "32")]
-const ASCII_DATA_OFFSET: usize = 24;  // PyASCIIObject(20) + padding
+// Phase 10.6 fast ASCII string access now lives in `pystr.rs` (version-correct
+// via pyo3::ffi::PyUnicode_IS_COMPACT_ASCII / PyUnicode_DATA).
 
 // Note: Phase 10.7 attempted inline UTF-8 encoding by reading PyUnicode_KIND
 // and encoding UCS-2/UCS-4 data directly. However, this was slower than
@@ -85,30 +28,11 @@ const ASCII_DATA_OFFSET: usize = 24;  // PyASCIIObject(20) + padding
 /// # Safety
 /// Caller must ensure str_ptr is a valid PyUnicode object
 #[inline]
-unsafe fn write_json_string_direct(buf: &mut Vec<u8>, str_ptr: *mut ffi::PyObject) {
-    let ascii_obj = str_ptr as *const PyASCIIObject;
-    let state = (*ascii_obj).state;
-    let length = (*ascii_obj).length as usize;
-
-    // Check ASCII flag first (most common case in JSON)
-    if state & STATE_ASCII_MASK != 0 {
-        // FAST PATH: Pure ASCII - direct buffer access, no conversion needed
-        let data_ptr = (str_ptr as *const u8).add(ASCII_DATA_OFFSET);
-        let bytes = std::slice::from_raw_parts(data_ptr, length);
-        simd_escape::write_json_string_simd(buf, std::str::from_utf8_unchecked(bytes));
-        return;
-    }
-
-    // Non-ASCII path: Use PyUnicode_AsUTF8AndSize which benefits from Python's UTF-8 cache
-    // Note: Inline UTF-8 encoding was tested but is slower due to:
-    // 1. Per-byte encoding overhead
-    // 2. No benefit from Python's UTF-8 cache on repeated calls
-    let mut size: ffi::Py_ssize_t = 0;
-    let utf8_ptr = ffi::PyUnicode_AsUTF8AndSize(str_ptr, &mut size);
-    if !utf8_ptr.is_null() {
-        let bytes = std::slice::from_raw_parts(utf8_ptr as *const u8, size as usize);
-        simd_escape::write_json_string_simd(buf, std::str::from_utf8_unchecked(bytes));
-    }
+unsafe fn write_json_string_direct(buf: &mut Vec<u8>, str_ptr: *mut ffi::PyObject) -> PyResult<()> {
+    let py = Python::assume_gil_acquired();
+    let bytes = pystr::utf8(py, str_ptr)?;
+    simd_escape::write_json_string_simd(buf, std::str::from_utf8_unchecked(bytes));
+    Ok(())
 }
 
 // Note: Inline UTF-8 encoding functions (write_json_string_latin1, write_json_string_ucs2,
@@ -277,11 +201,17 @@ impl<'de, 'py> Visitor<'de> for PyObjectVisitor<'py> {
                     return Err(SerdeDeError::custom("Failed to create key string"));
                 }
 
-                // Insert: PyDict_SetItem does NOT steal references
-                let result = object_cache::set_dict_item_direct(dict_ptr, key_ptr, value.as_ptr());
+                // Insert: PyDict_SetItem does NOT steal references.
+                // Take ownership of the raw pointer and DECREF directly: dropping a
+                // `PyObject` (Py<T>) goes through PyO3's register_decref, which does a
+                // thread-local GIL_COUNT lookup (and defers to the reference pool when
+                // called from a raw FFI entry point).
+                let value_ptr = value.into_ptr();
+                let result = object_cache::set_dict_item_direct(dict_ptr, key_ptr, value_ptr);
 
-                // Clean up key (we own it, PyDict_SetItem increfs it)
+                // Clean up key and value (we own them, PyDict_SetItem increfs both)
                 ffi::Py_DECREF(key_ptr);
+                ffi::Py_DECREF(value_ptr);
 
                 if result < 0 {
                     ffi::Py_DECREF(dict_ptr);
@@ -294,7 +224,7 @@ impl<'de, 'py> Visitor<'de> for PyObjectVisitor<'py> {
     }
 }
 
-/// Seed for deserializing JSON to Python objects (public for simd_parser fallback)
+/// Seed for deserializing JSON to Python objects
 pub(crate) struct PyObjectSeed<'py> {
     pub(crate) py: Python<'py>,
 }
@@ -320,38 +250,25 @@ impl<'de> de::DeserializeSeed<'de> for KeySeed {
     }
 }
 
-/// Parses a JSON string into a Python object.
+/// Parses JSON bytes into a Python object (called from `entry::loads`).
 ///
-/// Uses serde_json with direct Python object creation via Visitor pattern.
-/// This provides single-pass parsing without intermediate representations.
-///
-/// # Arguments
-/// * `json_str` - The JSON string to parse.
-///
-/// # Returns
-/// A PyObject representing the parsed JSON, or a PyValueError on error.
-#[pyfunction]
-fn loads(json_str: &str) -> PyResult<PyObject> {
-    Python::with_gil(|py| {
-        let mut de = serde_json::Deserializer::from_str(json_str);
-        DeserializeSeed::deserialize(PyObjectSeed { py }, &mut de)
-            .map_err(|e| PyValueError::new_err(format!("JSON parsing error: {e}")))
-    })
-}
-
-/// Parses JSON using SIMD-accelerated parser (always uses simd-json)
-///
-/// This function always uses the SIMD parser regardless of input size.
-/// Use this when you know you have large JSON inputs.
-///
-/// # Arguments
-/// * `json_str` - The JSON string to parse.
-///
-/// # Returns
-/// A PyObject representing the parsed JSON, or a PyValueError on error.
-#[pyfunction]
-fn loads_simd(json_str: &str) -> PyResult<PyObject> {
-    simd_parser::loads_simd(json_str)
+/// Uses serde_json with direct Python object creation via the Visitor pattern
+/// (single pass, no intermediate representation). Trailing non-whitespace is
+/// rejected (`de.end()`); it used to be silently ignored.
+/// `is_str`: input came from a Python str, so it is known-valid UTF-8.
+#[inline]
+pub(crate) fn loads_impl(py: Python<'_>, input: &[u8], is_str: bool) -> PyResult<*mut ffi::PyObject> {
+    let r = if is_str {
+        // SAFETY: PyUnicode UTF-8 data is always valid UTF-8
+        let s = unsafe { std::str::from_utf8_unchecked(input) };
+        let mut de = serde_json::Deserializer::from_str(s);
+        DeserializeSeed::deserialize(PyObjectSeed { py }, &mut de).and_then(|v| de.end().map(|_| v))
+    } else {
+        let mut de = serde_json::Deserializer::from_slice(input);
+        DeserializeSeed::deserialize(PyObjectSeed { py }, &mut de).and_then(|v| de.end().map(|_| v))
+    };
+    r.map(|o| o.into_ptr())
+        .map_err(|e| PyValueError::new_err(format!("JSON parsing error: {e}")))
 }
 
 /// Write a JSON string with proper escaping to a buffer
@@ -487,7 +404,7 @@ impl JsonBuffer {
                 // 1. Checking ASCII flag for fast path (direct buffer access)
                 // 2. For non-ASCII: Reading PyUnicode_KIND and encoding inline
                 unsafe {
-                    write_json_string_direct(&mut self.buf, s_val.as_ptr());
+                    write_json_string_direct(&mut self.buf, s_val.as_ptr())?;
                 }
 
                 Ok(())
@@ -613,7 +530,7 @@ impl JsonBuffer {
                         }
 
                         // PHASE 10.7: Direct Unicode buffer access with inline UTF-8 encoding
-                        write_json_string_direct(&mut self.buf, key_ptr);
+                        write_json_string_direct(&mut self.buf, key_ptr)?;
                         self.buf.push(b':');
 
                         // Serialize value (wrap in Bound for safe handling)
@@ -692,78 +609,24 @@ fn estimate_json_size(obj: &Bound<'_, PyAny>) -> usize {
     }
 }
 
-/// Dumps a Python object into a JSON string.
+/// Serializes a Python object (called from `entry::dumps`).
 ///
-/// Phase 2 Optimizations:
-/// - Direct buffer writing (bypasses serde_json)
-/// - itoa for 10x faster integer formatting
-/// - ryu for 5x faster float formatting
-/// - Pre-sized buffer allocation
-///
-/// PHASE 14 Optimization:
-/// - Thread-local buffer reuse to avoid repeated allocations
-/// - Buffer grows to max needed size and stays allocated
-///
-/// # Arguments
-/// * `py` - The Python GIL token.
-/// * `data` - The Python object to serialize.
-///
-/// # Returns
-/// A JSON string, or a PyValueError on error.
-#[pyfunction]
-fn dumps(_py: Python, data: &Bound<'_, PyAny>) -> PyResult<String> {
+/// Writes into the reused thread-local buffer and hands the bytes to `finish`,
+/// which builds the Python result directly from them (no intermediate String;
+/// the old `buf.clone()` cost a malloc+memcpy per call and N bytes of peak RSS).
+#[inline]
+pub(crate) fn dumps_impl<R>(
+    data: &Bound<'_, PyAny>,
+    finish: impl FnOnce(&[u8]) -> PyResult<R>,
+) -> PyResult<R> {
     let capacity = estimate_json_size(data);
-
-    // PHASE 14 OPTIMIZATION: Reuse thread-local buffer
     object_cache::get_serialize_buffer(capacity, |buf| {
         let mut buffer = JsonBuffer { buf: std::mem::take(buf) };
         let result = buffer.serialize_pyany(data);
-
-        // Put buffer back (keeping capacity for next call)
         *buf = buffer.buf;
-
-        result.map(|_| {
-            // SAFETY: We only write valid UTF-8 (JSON is always UTF-8)
-            unsafe { String::from_utf8_unchecked(buf.clone()) }
-        })
+        result?;
+        finish(buf)
     })
-}
-
-/// EXTREME OPTIMIZATION: dumps_bytes() - The "Nuclear Option"
-///
-/// Returns PyBytes instead of String for zero-copy performance.
-/// This is 10-20% faster than dumps() but breaks API compatibility.
-///
-/// Optimizations:
-/// - Zero-copy: Returns bytes directly, no UTF-8 validation
-/// - Direct C API: Bypasses PyO3 completely for serialization
-/// - AVX2 SIMD: String escape detection (when available)
-/// - Aggressive inlining: Single massive function, no calls
-/// - Zero abstraction: Direct CPython API, no safety layer
-///
-/// WARNING: More unsafe code, harder to maintain, but MAXIMUM PERFORMANCE
-///
-/// # Arguments
-/// * `py` - The Python GIL token.
-/// * `data` - The Python object to serialize.
-///
-/// # Returns
-/// PyBytes containing JSON (not validated as UTF-8 string)
-#[pyfunction]
-fn dumps_bytes(py: Python, data: &Bound<'_, PyAny>) -> PyResult<Py<PyBytes>> {
-    unsafe {
-        // SAFETY: We transmute Python to 'static for the serializer.
-        // This is safe because we don't actually store it beyond this function call.
-        let py_static = std::mem::transmute::<Python, Python<'static>>(py);
-
-        let obj_ptr = data.as_ptr();
-        let capacity = extreme::estimate_size_fast(obj_ptr);
-
-        let mut serializer = extreme::DirectSerializer::new(py_static, capacity);
-        serializer.serialize_direct(obj_ptr)?;
-
-        Ok(serializer.into_pybytes(py))
-    }
 }
 
 /// Python module definition for rjson.
@@ -782,11 +645,7 @@ fn rjson(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // OPTIMIZATION: Initialize all caches at module load time
     object_cache::init_cache(py);
     type_cache::init_type_cache(py);
-    simd_parser::init_string_intern(py);  // Phase 9: String interning
 
-    m.add_function(wrap_pyfunction!(loads, m)?)?;
-    m.add_function(wrap_pyfunction!(loads_simd, m)?)?;  // Phase 7: SIMD loads
-    m.add_function(wrap_pyfunction!(dumps, m)?)?;
-    m.add_function(wrap_pyfunction!(dumps_bytes, m)?)?;  // Nuclear option
+    entry::register(m)?; // loads / dumps as raw METH_O builtins
     Ok(())
 }

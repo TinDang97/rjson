@@ -245,8 +245,12 @@ pub fn get_none_ptr() -> *mut ffi::PyObject {
 // allows reusing the same buffer across calls.
 
 // Thread-local buffer for dumps serialization
+const INITIAL_CAPACITY: usize = 4096;
+/// Largest buffer kept alive between calls (per thread).
+const RETAIN_LIMIT: usize = 1 << 20;
+
 thread_local! {
-    static SERIALIZE_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(4096));
+    static SERIALIZE_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(INITIAL_CAPACITY));
 }
 
 /// Get a thread-local buffer for serialization, clearing it first
@@ -271,7 +275,13 @@ where
         if current_cap < min_capacity {
             buf.reserve(min_capacity - current_cap);
         }
-        f(&mut buf)
+        let r = f(&mut buf);
+        // Don't pin the high-water mark forever: one 100 MB dumps() would
+        // otherwise keep 100 MB resident per thread for the process lifetime.
+        if buf.capacity() > RETAIN_LIMIT {
+            *buf = Vec::with_capacity(INITIAL_CAPACITY);
+        }
+        r
     })
 }
 
