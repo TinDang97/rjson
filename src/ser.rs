@@ -4,6 +4,11 @@
 //! Design notes
 //! - Type dispatch is a chain of exact `ob_type` pointer comparisons against the
 //!   builtin type objects; no PyO3 wrappers, no per-element refcounting.
+//! - Writers take the output cursor and return the advanced one (null on
+//!   error), so it stays in a register; see `Cur`.
+//! - Dicts are iterated over their entry array directly on CPython 3.11-3.13
+//!   (gated and self-tested, see `dictiter`), else with `PyDict_Next`. Runs of
+//!   exact ints/floats in lists use a register-resident loop.
 //! - Output is written straight into the result object (`Out`): a `bytes`
 //!   object, or a compact ASCII `str`, sized from the previous output length on
 //!   this thread, grown with realloc and shortened at the end. No final copy,
@@ -11,7 +16,8 @@
 //! - Every write reserves its worst case before writing through raw pointers, so
 //!   no write can go past the allocation (the old SIMD escaper could).
 //! - Separators are fused into the next value's write (one length update per
-//!   element instead of two).
+//!   element instead of two); short (<= 16-byte) compact ASCII strings are
+//!   written inline with one SSSE3 shuffle.
 //! - Numbers: ints are read inline from the digit array (layout per Python
 //!   version, verified at init) and formatted with a small inline formatter or
 //!   itoap; floats are formatted in place with zmij (shortest round-trip, same
@@ -26,10 +32,11 @@
 //!   are handled correctly.
 //! - `str` output: when a non-ASCII string is written we do not UTF-8 encode it.
 //!   We leave a hole in the (pure ASCII) buffer and remember the source object.
-//!   At the end the result `str` is allocated once with the exact kind and length
-//!   and filled by widening the ASCII runs and copying the source strings' native
-//!   UCS1/UCS2/UCS4 data. This avoids both the UTF-8 encode and the full UTF-8
-//!   decode that `PyUnicode_FromStringAndSize` would do.
+//!   At the end the result `str` is allocated once with the exact kind and
+//!   filled by widening the ASCII runs and copying the source strings' native
+//!   UCS1/UCS2/UCS4 data, each checked for (and, rarely, copied with) escapes
+//!   right before it is copied. This avoids both the UTF-8 encode and the full
+//!   UTF-8 decode that `PyUnicode_FromStringAndSize` would do.
 //! - Recursion is limited to `RECURSION_LIMIT` nested containers, which also
 //!   turns circular references into an error instead of a stack overflow.
 

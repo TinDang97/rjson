@@ -13,8 +13,8 @@ remaining gaps: [docs/PERFORMANCE_REVIEW.md](docs/PERFORMANCE_REVIEW.md).
 | | CPython 3.11 (PGO build) | CPython 3.13 (plain release build) |
 |---|---|---|
 | `loads` | **0.74x** | **0.98x** |
-| `dumps_bytes` (→ `bytes`, like `orjson.dumps`) | **0.82x** | **0.94x** |
-| `dumps` (→ `str`) | 1.00x | 1.11x |
+| `dumps_bytes` (→ `bytes`, like `orjson.dumps`) | **0.82x** | **0.71x** |
+| `dumps` (→ `str`) | 1.00x | **0.83x** |
 
 Largest gaps remaining: `dumps` → `str` on non-ASCII text (a `str` result must be built
 in UCS2/UCS4), `loads` of escape-heavy strings and float arrays.

@@ -27,6 +27,26 @@ Numbers are rjson time divided by orjson time on the same run, so **below 1.00 m
 | records | 1.60 | **0.54** | 1.01 | 2.10 | **0.84** | **0.97** | **0.82** | **0.97** |
 | **geomean** | **1.48** | **0.74** | **0.98** | **2.59** | **1.00** | **1.11** | **0.82** | **0.94** |
 
+### dumps, second round (branch `wip-dumps`)
+
+Plain release builds (no PGO), same host. Measured by interleaving `rjson.dumps`, `rjson.dumps_bytes`, `orjson.dumps` and `orjson.dumps(x).decode()` in each round and taking the best of 21 rounds, which is less noisy than the median-of-7 in `corpus_benchmark.py`. The cells are the mean of two runs. The last column compares `dumps` with the like-for-like `str` result from orjson.
+
+| case | 3.11 str before → after | 3.11 bytes before → after | 3.13 str before → after | 3.13 bytes before → after | 3.13 str vs `orjson.dumps().decode()` |
+|---|---|---|---|---|---|
+| twitter | 1.57 → 1.12 | 0.95 → **0.66** | 1.60 → 1.14 | 0.95 → **0.67** | **0.54** |
+| citm_catalog | 1.15 → **0.85** | 1.01 → **0.77** | 1.14 → **0.90** | 1.01 → **0.80** | **0.68** |
+| canada | 0.89 → **0.84** | 0.89 → **0.84** | 0.91 → **0.84** | 0.91 → **0.83** | **0.76** |
+| github | 0.98 → **0.69** | 0.91 → **0.62** | 0.98 → **0.70** | 0.91 → **0.63** | **0.56** |
+| small_dict | 0.74 → **0.71** | 0.71 → **0.68** | 0.80 → **0.73** | 0.82 → **0.72** | **0.50** |
+| unicode_strings | 4.64 → 2.32 | 1.07 → **0.98** | 4.51 → 2.24 | 1.08 → **0.97** | **0.12** |
+| escaped_strings | 0.37 → **0.40** | 0.38 → **0.39** | 0.37 → **0.39** | 0.37 → **0.38** | **0.36** |
+| int_array | 1.02 → **0.89** | 1.03 → **0.89** | 1.05 → **0.85** | 1.06 → **0.85** | **0.76** |
+| float_array | 0.84 → **0.76** | 0.84 → **0.77** | 0.88 → **0.78** | 0.87 → **0.78** | **0.74** |
+| records | 1.00 → **0.65** | 0.99 → **0.65** | 0.98 → **0.66** | 0.98 → **0.66** | **0.61** |
+| **geomean** | 1.06 → **0.83** | 0.85 → **0.70** | 1.07 → **0.83** | 0.87 → **0.71** | **0.51** |
+
+`dumps` → `str` is still above 1.0 on twitter and unicode_strings. Most of what is left is memory traffic that comes from the return type: five emoji make twitter's 403k-character result UCS4 (1.6 MB, against 467 KB of UTF-8), and filling it takes about 100 µs of the 248 µs. Without the fill, str mode is faster than bytes mode.
+
 **The 3.11 loads numbers include a garbage-collector pause.** CPython 3.10 and 3.11 run cyclic-GC passes while a large document is being built. `loads` pauses the collector for the duration of the call and restores its previous state afterwards (§5, decision 2). CPython 3.12+ already defers collection until the call returns, so the 3.13 column is the like-for-like parser comparison.
 
 **Other metrics** (from the build review):
@@ -81,6 +101,18 @@ Dropping serde for a hand-written single-pass parser took the geomean from 1.48 
 4. **Escaping.** AVX-512VL/AVX2 kernels selected at runtime, an SSE2 baseline, and exact worst-case reservation. escaped_strings is 0.33× orjson.
 5. **Build target.** `x86-64-v2`. On the benchmark host, `native`/v3 made zmij about 1.6× slower because of the BMI2 code it generates.
 
+Second round (branch `wip-dumps`, results above):
+
+6. **Cursor in a register.** Writers take the output cursor and return the new one, and `Out::len` is only synced on growth. Errors are a null cursor: `Result<*mut u8, _>` does not fit in one register, and LLVM spilled it to the stack where code paths merge.
+7. **Direct dict iteration** on 3.11–3.13 in place of `PyDict_Next`. This was the biggest win (twitter bytes 0.88 → 0.66, records 0.89 → 0.66). The layout is private, so it has a build-time gate and an import-time self-test; see CLAUDE.md.
+8. **Lists.** Runs of exact ints and floats are written by a loop that keeps the item array and the capacity limit in registers and checks the exact type of every item (int_array 1.09 → 0.85). Compact ASCII strings of up to 16 bytes are written inline with one SSSE3 shuffle, because the 16 bytes that end at the string's end lie inside the object.
+9. **The bytes-slower-than-str anomaly was glibc page faults.** Output buffers were allocated with 1/8 headroom and then shrunk with realloc on every call. Freeing the shrunk block only raises glibc's dynamic mmap threshold to the shrunk size, so every later (larger) request was mmapped again and page-faulted its whole output. Measured: 390 faults per call, and 571 µs instead of 144 µs for a 1.6 MB result. Whether this happened depended on what the process had freed before, which is why citm, int_array and canada ratios moved between runs. The headroom is now 1/16, below the 1/8 shrink threshold, and the size hints are kept per mode.
+10. **Unsplit 256-bit loads and stores.** The generic x86-64-v2 tuning makes LLVM split every unaligned 256-bit access, even inside AVX2/AVX-512 functions. The escape kernels now use `vmovdqu` through inline asm.
+11. **Non-ASCII `str` output.** The escape scan narrows UCS2/UCS4 to bytes with saturating packs, checking 64 or 128 bytes per test. The check happens while the result is filled, so each string is read from cache and large same-kind strings are copied and checked in one pass. Escaping is done during the fill instead of by building a temporary `str`. unicode_strings went from 5.0× to 2.2×.
+12. **Large strings.** Strings over 64 KiB are escaped in pieces sized to the room left in the buffer. The old code reserved 6× per chunk, which forced a doubling realloc.
+
+Tried and reverted, because each measured slower: SWAR digit formatting for all ints (on small ints the multiply chain costs more than the predicted branches it replaces), an inline 17–32-byte string path (code growth in the dict loop), inlining nested small lists (no gain on canada), and AVX2 widening for the `str` fill (memory-bound).
+
 ### Build and entry points (`src/entry.rs`, `Cargo.toml`, `scripts/`)
 
 - **Raw `METH_O` entry points** replace `#[pyfunction]`, saving about 8 ns per call. They keep PyO3's trampoline so panics are caught and PyO3's GIL bookkeeping stays correct.
@@ -92,12 +124,12 @@ Dropping serde for a hand-written single-pass parser took the geomean from 1.48 
 
 | # | gap (3.13, no PGO) | idea | expected | risk |
 |---|---|---|---|---|
-| 1 | `dumps` → `str` with non-ASCII text: unicode_strings 5.0×, twitter 1.5× | This is set by the `str` return type itself: twitter's output is 1.6 MB as UCS4 but 467 KB as UTF-8. Either (a) make `dumps` return `bytes` like orjson, which breaks the API (decision 1), or (b) AVX2 widening/copy for UCS2/UCS4 and skip the temporary ASCII buffer once the output is known to be non-ASCII. | (a) all cases ≤ 1.1×; (b) about −20–30% on those cases | (a) API; (b) low |
-| 2 | `dumps_bytes` is slower than `dumps` → `str` on int- and number-heavy documents (citm 1.41× vs 1.18×, int_array 1.26× vs 1.21×) | This is unexpected, since bytes mode does strictly less work. Check the bytes growth path (`_PyBytes_Resize` copying on growth) and whether the size hint is shared between the two modes. | brings citm/int_array under 1.0 | low |
+| 1 | `dumps` → `str` with non-ASCII text: now unicode_strings 2.2×, twitter 1.1× (was 5.0× and 1.5×) | The rest is the memory traffic of a UCS2/UCS4 result. Options: (a) make `dumps` return `bytes` (decision 1), or (b) non-temporal stores for multi-MB results, which help benchmarks but not real consumers. | (a) all cases below 1.0 | (a) API |
+| 2 | ~~`dumps_bytes` slower than `dumps` → `str`~~ **fixed**: glibc mmap-threshold page faults from the buffer shrink (§3 dumps item 9) | — | — | — |
 | 3 | `loads` escaped_strings 1.46× | Handle every escape in a 16/32-byte block from the backslash bitmask. Stop tracking non-ASCII per chunk. Add an AVX2 kernel with runtime detection. | ~1.0× | low |
 | 4 | `loads` float_array 1.13×, canada 1.02× | Parse integer and fraction digits in one pass; fast path for the `d+.d{1,15}` shape (≈150 → ≈90 instructions per float). | ~0.9× | low |
 | 5 | `loads` on 3.12+ is at parity on twitter/records/canada | `_PyDict_SetItem_KnownHash` with the cached key hash; inline key comparison instead of `memcmp`; for `str` input, parse non-ASCII directly from its internal form. | −5–10% | low |
-| 6 | `dumps` int_array 1.21× | Homogeneous-list loop with a per-item exact type check (the correct version of the old bulk path). | ~1.0× | low |
+| 6 | ~~`dumps` int_array 1.21×~~ **done**: 0.85× with the per-item-checked list loop. Next: canada/float_array spend about 60% of their time in zmij, which orjson uses too | a faster shortest-float formatter | −10–20% on float-heavy docs | medium |
 | 7 | Release wheels without PGO | Build PGO wheels in CI for every Python version, and train on a separate workload so the benchmark isn't overfitted. | −7–10% | build-only |
 | 8 | Non-x86 | NEON kernels for escaping and whitespace. The SWAR fallback is untested on aarch64. | parity on Apple Silicon / Graviton | medium |
 
@@ -129,7 +161,7 @@ Dropping serde for a hand-written single-pass parser took the geomean from 1.48 
 uv venv .venv -p 3.11 && . .venv/bin/activate
 uv pip install maturin orjson pytest
 maturin develop --release
-python -m pytest tests -q                      # 212 tests
+python -m pytest tests -q                      # 240 tests
 # corpora: twitter/citm_catalog/canada from serde-rs/json-benchmark data/,
 # github.json from ijl/orjson data/github.json.xz
 RJSON_BENCH_DATA=/path/to/corpus python benches/corpus_benchmark.py
