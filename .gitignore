@@ -9,3 +9,6 @@ wheels/
 # Virtual environments
 .venv
 target/
+
+# Claude Code agent worktrees
+.claude/worktrees/
