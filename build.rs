@@ -14,18 +14,18 @@ fn main() {
     // (plus an init-time self-test). Other versions use PyDict_Next.
     println!("cargo::rustc-check-cfg=cfg(rjson_dict_direct)");
     let cfg = pyo3_build_config::get();
-    let minor = if cfg.implementation == pyo3_build_config::PythonImplementation::CPython
-        && cfg.version.major == 3
+    let minor = if cfg.implementation() == pyo3_build_config::PythonImplementation::CPython
+        && cfg.version().major == 3
     {
-        cfg.version.minor
+        cfg.version().minor
     } else {
         0
     };
     let free_threaded = cfg
-        .build_flags
+        .build_flags()
         .0
         .contains(&pyo3_build_config::BuildFlag::Py_GIL_DISABLED);
-    if (11..=13).contains(&minor) && !free_threaded && !cfg.abi3 {
+    if (11..=13).contains(&minor) && !free_threaded && !matches!(cfg.target_abi().kind(), pyo3_build_config::PythonAbiKind::Stable(_)) {
         println!("cargo:rustc-cfg=rjson_dict_direct");
     }
 }

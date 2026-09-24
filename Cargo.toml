@@ -8,14 +8,14 @@ name = "rjson"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.24.0", features = ["extension-module"] }
+pyo3 = { version = "0.29", features = ["extension-module"] }
 itoap = "1.0"        # integer formatting straight into the output buffer (dumps)
 zmij = "1.0"         # shortest round-trip float formatting, same output as orjson (dumps)
 simdutf8 = "0.1"     # SIMD UTF-8 validation for bytes input to loads
 fast-float = "0.2"   # correctly rounded fallback for >19-digit floats in loads
 
 [build-dependencies]
-pyo3-build-config = "0.24.0"
+pyo3-build-config = "0.29"
 
 [profile.release]
 # No DWARF in shipped artifacts: identical .text (verified), but the .so drops

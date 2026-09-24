@@ -17,6 +17,8 @@ src/
   parser.rs   # loads: single-pass parser building PyObjects directly
   lemire.rs   # Eisel-Lemire float conversion (vendored from fast-float, MIT/Apache)
   ser.rs      # dumps/dumps_bytes: direct serializer writing into the result object
+  compat.rs   # version-portable str accessors (3.14: own bitfield reader + import self-test)
+              # and extern decls of private-but-exported C-API symbols
 build.rs      # pyo3_build_config::use_pyo3_cfgs() -> Py_3_10/Py_3_12... cfgs
 tests/        # test_rjson.py (general + regressions), test_dumps.py (serializer)
 benches/corpus_benchmark.py   # reference benchmark vs orjson (ratio, same process; --output-json)
@@ -50,7 +52,7 @@ docs/PERFORMANCE_REVIEW.md    # review findings, results, ranked roadmap
 - Recursion limit 254 (also catches circular references).
 
 ### Entry points (`entry.rs`)
-- `METH_O` functions through `pyo3::impl_::trampoline::binaryfunc` (doc-hidden PyO3 API, keeps panics caught and GIL bookkeeping correct). ~8 ns/call cheaper than `#[pyfunction]`.
+- `METH_O` functions through PyO3's `impl_::trampoline` (`get_trampoline_function!(binaryfunc, ..)`; doc-hidden PyO3 API, keeps panics caught and GIL bookkeeping correct; re-check on every PyO3 upgrade). ~8 ns/call cheaper than `#[pyfunction]`.
 - Keyword options in future: use `METH_FASTCALL | METH_KEYWORDS` with hand-parsed kwnames, not PyO3 `FunctionDescription`.
 
 ## Hard Rules (learned from bugs found in review)
@@ -62,6 +64,7 @@ docs/PERFORMANCE_REVIEW.md    # review findings, results, ranked roadmap
 - **Check every C-API NULL return** and propagate the Python error; never return success with an exception set.
 - **Never set `target-cpu=native`** or global `+avx2`: use `#[target_feature]` + runtime detection.
 - **Never pass extra flags via `RUSTFLAGS`**: it silently replaces `.cargo/config.toml`'s rustflags (x86-64-v2). Use `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`, which cargo merges (the old PGO script built x86-64 v1 wheels this way).
+- **Private CPython symbols/layouts are version-gated and listed here**: `_PyBytes_Resize`, `_PyDict_NewPresized` (compat.rs), `_PyDict_FromItems` (parser.rs, 3.13 only), dict keys layout (ser.rs, `rjson_dict_direct`, 3.11-3.13), str state bitfield (compat.rs, 3.14). Re-verify each against the new version's headers before widening a gate.
 - Keep the module GIL-only (no free-threading declaration) until borrowed list/dict iteration is audited.
 - `panic = "abort"` is set: a panic kills the interpreter, so do not `unwrap` on Python-derived data.
 
@@ -71,7 +74,7 @@ docs/PERFORMANCE_REVIEW.md    # review findings, results, ranked roadmap
 uv venv .venv -p 3.11 && . .venv/bin/activate
 uv pip install maturin orjson pytest
 maturin develop --release          # build + install into the venv
-python -m pytest tests -q          # must pass on 3.9-3.13 (CI runs all of them)
+python -m pytest tests -q          # must pass on 3.9-3.14 (CI runs all of them)
 benches/fetch_corpus.sh            # corpora -> benches/data/ (default --data)
 python benches/corpus_benchmark.py
 scripts/build_pgo.sh python3.11 python3.13   # PGO wheels -> target/wheels/

@@ -35,7 +35,7 @@
 use pyo3::exceptions::PyTypeError;
 use pyo3::ffi;
 use pyo3::prelude::*;
-use pyo3::sync::GILOnceCell;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::PyType;
 use std::ptr;
 
@@ -123,7 +123,7 @@ struct Fail;
 
 type PResult<T> = Result<T, Fail>;
 
-static JSON_DECODE_ERROR: GILOnceCell<Py<PyType>> = GILOnceCell::new();
+static JSON_DECODE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 
 #[cold]
 #[inline(never)]
@@ -136,7 +136,7 @@ fn raise_decode_error(py: Python<'_>, msg: &str, doc: &[u8], pos: usize) -> PyEr
     let full = format!("JSON parsing error: {msg}");
     let ty = JSON_DECODE_ERROR.get_or_try_init(py, || -> PyResult<Py<PyType>> {
         let m = py.import("json")?;
-        Ok(m.getattr("JSONDecodeError")?.downcast_into::<PyType>()?.unbind())
+        Ok(m.getattr("JSONDecodeError")?.cast_into::<PyType>()?.unbind())
     });
     match ty {
         Ok(ty) => PyErr::from_type(ty.bind(py).clone(), (full, doc_str.into_owned(), char_pos)),
@@ -1438,7 +1438,7 @@ unsafe fn build_dict(kv: *const *mut ffi::PyObject, n: usize) -> *mut ffi::PyObj
     // Presizing small dicts made 8-key records ~80 bytes larger each (and
     // later lookups take the generic path), so only presize large dicts
     // where avoiding repeated resizes pays (same threshold as orjson).
-    let dict = if n > 8 { ffi::_PyDict_NewPresized(n as ffi::Py_ssize_t) } else { ffi::PyDict_New() };
+    let dict = if n > 8 { crate::compat::_PyDict_NewPresized(n as ffi::Py_ssize_t) } else { ffi::PyDict_New() };
     if dict.is_null() {
         return dict;
     }
@@ -1461,7 +1461,7 @@ unsafe fn build_dict(kv: *const *mut ffi::PyObject, n: usize) -> *mut ffi::PyObj
 unsafe fn new_ascii_str(bytes: &[u8]) -> *mut ffi::PyObject {
     let s = ffi::PyUnicode_New(bytes.len() as ffi::Py_ssize_t, 127);
     if !s.is_null() {
-        ptr::copy_nonoverlapping(bytes.as_ptr(), ffi::PyUnicode_DATA(s) as *mut u8, bytes.len());
+        ptr::copy_nonoverlapping(bytes.as_ptr(), crate::compat::PyUnicode_DATA(s) as *mut u8, bytes.len());
     }
     s
 }
@@ -1486,8 +1486,8 @@ unsafe fn new_utf8_str(bytes: &[u8]) -> *mut ffi::PyObject {
     if s.is_null() {
         return s;
     }
-    let data = ffi::PyUnicode_DATA(s);
-    match ffi::PyUnicode_KIND(s) {
+    let data = crate::compat::PyUnicode_DATA(s);
+    match crate::compat::PyUnicode_KIND(s) {
         1 => decode_into(bytes, data as *mut u8),
         2 => decode_into(bytes, data as *mut u16),
         _ => decode_into(bytes, data as *mut u32),

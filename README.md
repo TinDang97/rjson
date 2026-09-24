@@ -40,7 +40,7 @@ rjson.dumps_bytes(obj)   # -> bytes (UTF-8; fastest, same type as orjson.dumps)
 
 ## Installation
 
-Ensure you have Rust and Python (3.9–3.13) installed and that your Python interpreter matches your system architecture (e.g., arm64 for Apple Silicon Macs).
+Ensure you have Rust and Python (3.9–3.14) installed and that your Python interpreter matches your system architecture (e.g., arm64 for Apple Silicon Macs).
 
 1. **Install Maturin**:
 
@@ -125,8 +125,7 @@ if __name__ == "__main__":
 - High-performance JSON serialization and deserialization
 - Rust-backed core for speed and safety
 - Pythonic API: `loads` and `dumps` functions
-- Tested in CI on CPython 3.9–3.13: Linux x86_64 and aarch64, macOS arm64, Windows x86_64
-  (3.14 needs a PyO3 upgrade)
+- Tested in CI on CPython 3.9–3.14: Linux x86_64 and aarch64, macOS arm64, Windows x86_64
 - Supports `dict`, `list`, `tuple`, `str`, `int`, `float`, `bool`, `None` and subclasses
 - Simple installation with Maturin
 

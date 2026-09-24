@@ -9,6 +9,7 @@
 
 use pyo3::prelude::*;
 
+mod compat;
 mod entry;
 mod lemire;
 mod parser;
@@ -17,6 +18,7 @@ mod ser;
 /// Python module definition for rjson.
 #[pymodule]
 fn rjson(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    compat::self_test(py)?;
     ser::init(py);
     entry::register(m)?; // loads / dumps / dumps_bytes as raw METH_O builtins
     Ok(())

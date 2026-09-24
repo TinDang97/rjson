@@ -30,8 +30,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # PyO3 0.24 supports up to CPython 3.13.
-        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        # PyO3 0.29 supports CPython 3.8-3.14 (3.14 str access: src/compat.rs).
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
         arch: [x86_64, aarch64]
         include:
           - arch: x86_64
@@ -84,7 +84,7 @@ jobs:
           docker run --rm -v "$PWD":/io -w /io \
             -e MATURIN_VERSION -e CARGO_TERM_COLOR \
             quay.io/pypa/musllinux_1_2_${{ matrix.arch }} \
-            scripts/ci_build_pgo_container.sh 3.9 3.10 3.11 3.12 3.13
+            scripts/ci_build_pgo_container.sh 3.9 3.10 3.11 3.12 3.13 3.14
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-musllinux-${{ matrix.arch }}
@@ -97,7 +97,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
         arch: [arm64, x86_64]
         include:
           - arch: arm64
@@ -133,7 +133,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
     defaults:
       run:
         shell: bash

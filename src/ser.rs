@@ -1276,7 +1276,7 @@ impl Out {
         let rc = if self.unicode {
             ffi::PyUnicode_Resize(&mut self.obj, cap as ffi::Py_ssize_t)
         } else {
-            ffi::_PyBytes_Resize(&mut self.obj, cap as ffi::Py_ssize_t)
+            crate::compat::_PyBytes_Resize(&mut self.obj, cap as ffi::Py_ssize_t)
         };
         if rc != 0 {
             Self::oom(cap);
@@ -1647,7 +1647,7 @@ impl Serializer {
         sep: u8,
         ns: usize,
     ) -> CurResult {
-        if ffi::PyUnicode_IS_COMPACT_ASCII(obj) != 0 {
+        if crate::compat::PyUnicode_IS_COMPACT_ASCII(obj) != 0 {
             let len = (*(obj as *mut ffi::PyASCIIObject)).length as usize;
             let data = (obj as *mut ffi::PyASCIIObject).add(1) as *const u8;
             #[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
@@ -1658,7 +1658,7 @@ impl Serializer {
             }
             return self.write_utf8(p, data, len, sep, ns);
         }
-        if !self.str_mode && ffi::PyUnicode_IS_COMPACT(obj) != 0 {
+        if !self.str_mode && crate::compat::PyUnicode_IS_COMPACT(obj) != 0 {
             // bytes output, non-ASCII string whose UTF-8 form is cached.
             let c = obj as *mut ffi::PyCompactUnicodeObject;
             if !(*c).utf8.is_null() {
@@ -1681,8 +1681,8 @@ impl Serializer {
             }
         }
         let len = ffi::PyUnicode_GET_LENGTH(obj) as usize;
-        if ffi::PyUnicode_IS_ASCII(obj) != 0 {
-            return self.write_utf8(p, ffi::PyUnicode_DATA(obj) as *const u8, len, 0, 0);
+        if crate::compat::PyUnicode_IS_ASCII(obj) != 0 {
+            return self.write_utf8(p, crate::compat::PyUnicode_DATA(obj) as *const u8, len, 0, 0);
         }
         if self.str_mode {
             return self.write_str_segment(p, obj, len);
@@ -1705,7 +1705,7 @@ impl Serializer {
         obj: *mut ffi::PyObject,
         len: usize,
     ) -> CurResult {
-        let kind = ffi::PyUnicode_KIND(obj);
+        let kind = crate::compat::PyUnicode_KIND(obj);
         // Strong reference to the string whose native data will be copied.
         ffi::Py_INCREF(obj);
         let p = self.put(p, b'"');
@@ -2000,13 +2000,13 @@ impl Serializer {
     /// place to the written length. None (exception set) if growing failed.
     unsafe fn fill<D: Unit>(&self, s: &mut *mut ffi::PyObject, mut cap: usize) -> Option<()> {
         let buf = self.buf.as_ptr();
-        let mut out = ffi::PyUnicode_DATA(*s) as *mut D;
+        let mut out = crate::compat::PyUnicode_DATA(*s) as *mut D;
         let (mut o, mut prev) = (0usize, 0usize);
         // Units still to write, not counting escapes.
         let mut rem = self.buf.len() + self.seg_chars;
         for seg in &self.segs {
-            let d = ffi::PyUnicode_DATA(seg.obj);
-            let kind = ffi::PyUnicode_KIND(seg.obj);
+            let d = crate::compat::PyUnicode_DATA(seg.obj);
+            let kind = crate::compat::PyUnicode_KIND(seg.obj);
             let n = seg.nchars;
             let run = seg.pos - prev;
             widen(buf.add(prev), out.add(o), run);
@@ -2059,7 +2059,7 @@ impl Serializer {
                 if ffi::PyUnicode_Resize(s, cap as ffi::Py_ssize_t) != 0 {
                     return None;
                 }
-                out = ffi::PyUnicode_DATA(*s) as *mut D;
+                out = crate::compat::PyUnicode_DATA(*s) as *mut D;
             }
             let w = match kind {
                 ffi::PyUnicode_1BYTE_KIND => widen_escaped(d as *const u8, out.add(o), n),
@@ -2101,7 +2101,7 @@ unsafe fn write_utf8_unchecked(p: Cur, src: *const u8, len: usize, sep: u8, ns: 
 /// UTF-8 view of a (non-ASCII) string, using CPython's cached copy when present.
 #[inline(always)]
 unsafe fn utf8_of(obj: *mut ffi::PyObject) -> Result<(*const u8, usize), SerError> {
-    if ffi::PyUnicode_IS_COMPACT(obj) != 0 {
+    if crate::compat::PyUnicode_IS_COMPACT(obj) != 0 {
         let c = obj as *mut ffi::PyCompactUnicodeObject;
         if !(*c).utf8.is_null() {
             return Ok(((*c).utf8 as *const u8, (*c).utf8_length as usize));

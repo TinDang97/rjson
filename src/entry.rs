@@ -13,8 +13,9 @@
 //! | raw `METH_O` + PyO3 trampoline (this file)   | 19.6        |
 //! | raw `METH_O`, no trampoline                  | 17.6        |
 //!
-//! We keep PyO3's trampoline (`impl_::trampoline::binaryfunc`, present with
-//! the same signature in 0.24 .. 0.29): for ~2 ns it maintains PyO3's
+//! We keep PyO3's trampoline (`impl_::trampoline`, reached through the
+//! `get_trampoline_function!` macro since 0.29; its shape changes between
+//! PyO3 releases, so re-check it on upgrade): for ~2 ns it maintains PyO3's
 //! GIL_COUNT, so dropping a `Py<T>` anywhere below decrefs immediately
 //! instead of being deferred to PyO3's global reference pool, and it traps
 //! panics at the FFI boundary. It is a `#[doc(hidden)]` API: PyO3 is pinned
@@ -52,17 +53,17 @@ unsafe fn dumps_bytes_body(py: Python<'_>, _m: *mut ffi::PyObject, arg: *mut ffi
 
 /// `loads(obj: str | bytes | bytearray | memoryview) -> Any`
 unsafe extern "C" fn loads(module: *mut ffi::PyObject, arg: *mut ffi::PyObject) -> *mut ffi::PyObject {
-    pyo3::impl_::trampoline::binaryfunc(module, arg, loads_body)
+    pyo3::impl_::trampoline::get_trampoline_function!(binaryfunc, loads_body)(module, arg)
 }
 
 /// `dumps(obj: Any) -> str`
 unsafe extern "C" fn dumps(module: *mut ffi::PyObject, arg: *mut ffi::PyObject) -> *mut ffi::PyObject {
-    pyo3::impl_::trampoline::binaryfunc(module, arg, dumps_body)
+    pyo3::impl_::trampoline::get_trampoline_function!(binaryfunc, dumps_body)(module, arg)
 }
 
 /// `dumps_bytes(obj: Any) -> bytes` (UTF-8, like `orjson.dumps`)
 unsafe extern "C" fn dumps_bytes(module: *mut ffi::PyObject, arg: *mut ffi::PyObject) -> *mut ffi::PyObject {
-    pyo3::impl_::trampoline::binaryfunc(module, arg, dumps_bytes_body)
+    pyo3::impl_::trampoline::get_trampoline_function!(binaryfunc, dumps_bytes_body)(module, arg)
 }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +105,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         let def = def as *const ffi::PyMethodDef as *mut ffi::PyMethodDef;
         unsafe {
             let f = ffi::PyCFunction_NewEx(def, m.as_ptr(), modname.as_ptr());
-            let f = Bound::from_owned_ptr_or_err(py, f)?.downcast_into::<PyCFunction>()?;
+            let f = Bound::from_owned_ptr_or_err(py, f)?.cast_into::<PyCFunction>()?;
             let name = std::ffi::CStr::from_ptr((*def).ml_name).to_str().unwrap_or_default();
             m.add(name, f)?;
         }

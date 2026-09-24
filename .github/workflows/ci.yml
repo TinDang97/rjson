@@ -46,10 +46,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # PyO3 0.24 supports CPython 3.7-3.13; 3.14 needs a PyO3 upgrade
-        # (see docs/PERFORMANCE_REVIEW.md, "Platform and tooling").
+        # PyO3 0.29 supports CPython 3.8-3.14 (3.14 str access: src/compat.rs).
         os: [ubuntu-24.04]
-        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
         include:
           # SSE2/AVX2 escape kernels (the runner may have AVX-512).
           - os: ubuntu-24.04

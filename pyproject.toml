@@ -7,9 +7,9 @@ name = "rjson"
 version = "0.1.0"
 description = "Fast JSON for Python, written in Rust against the CPython C API"
 readme = "README.md"
-# CI-tested on CPython 3.9-3.13 (x86_64, aarch64, macOS, Windows). 3.8 also
-# builds and passes but is EOL and not tested; 3.14 needs a PyO3 upgrade
-# (0.24 refuses to build for it; 0.29 verified). PyPy/GraalPy/free-threaded: unsupported.
+# CI-tested on CPython 3.9-3.14 (x86_64, aarch64, macOS, Windows). 3.8 also
+# builds and passes but is EOL and not tested. 3.14 verified on 3.14.0rc2 (PyO3 0.29).
+# PyPy/GraalPy/free-threaded: unsupported.
 requires-python = ">=3.9"
 dependencies = [
 ]
