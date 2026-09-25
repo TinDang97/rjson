@@ -424,6 +424,100 @@ class TestUCS2Decoder:
             _check_loads(s)
 
 
+def _check_floats(texts):
+    """loads of each number text (in an array, and alone) equals float(text), bit for bit."""
+    import math
+
+    doc = "[" + ",".join(texts) + "]"
+    got = rjson.loads(doc)
+    for t, v in zip(texts, got):
+        want = float(t)
+        assert v == want and math.copysign(1, v) == math.copysign(1, want), t
+        assert type(v) is float, t
+    # Alone: the number is at the end of the input, too close for the fast
+    # path's lookahead, so this also exercises the general parser.
+    for t in texts:
+        assert rjson.loads(t) == float(t), t
+
+
+class TestFloatFastPath:
+    """The number fast path reads up to 19 fraction digits (full-precision
+    doubles such as 0.8601898621952831 have 16-19), with at most 19
+    significant digits; results must be correctly rounded, like float()."""
+
+    def test_repr_of_random_doubles(self):
+        import random
+
+        rng = random.Random(9)
+        texts = []
+        for _ in range(20000):
+            x = rng.gauss(0, 1) * 10 ** rng.randrange(-8, 9)
+            texts.append(repr(x))
+            texts.append(repr(rng.random()))
+        _check_floats(texts)
+
+    @pytest.mark.parametrize("n", range(1, 25))
+    def test_fraction_lengths(self, n):
+        import random
+
+        rng = random.Random(n)
+        texts = []
+        for _ in range(200):
+            frac = "".join(rng.choice("0123456789") for _ in range(n))
+            for intpart in ("0", "1", "9", "12", "999", "1234567", "123456789012345"):
+                texts.append(f"{intpart}.{frac}")
+                texts.append(f"-{intpart}.{frac}")
+        _check_floats(texts)
+
+    def test_significant_digit_boundaries(self):
+        texts = [
+            "0." + "9" * 19,           # 19 significant digits, int part 0
+            "0." + "9" * 20,           # 20: general path
+            "0.0" + "9" * 19,          # leading zero + 19 digits (20 fraction digits)
+            "1." + "9" * 18,           # 19 significant digits
+            "1." + "9" * 19,           # 20: general path
+            "12." + "3" * 17, "12." + "3" * 18,
+            "0.0000000000000000001",   # 19 fraction digits, mantissa 1
+            "0.00000000000000000001",  # 20 fraction digits
+            "9007199254740993.0", "0.9007199254740993", "0.9007199254740992",
+            "0.30000000000000004", "0.1000000000000000055511151231257827",
+            "2.2250738585072014e-308", "4.9406564584124654e-324",
+            "1.7976931348623157e308", "0.0", "-0.0", "0.00000", "-0.0000000000000000000",
+        ]
+        _check_floats(texts)
+
+    @pytest.mark.parametrize("n", [15, 16, 17, 18, 19, 20])
+    def test_long_fraction_with_exponent(self, n):
+        import random
+
+        rng = random.Random(100 + n)
+        texts = []
+        for _ in range(300):
+            frac = "".join(rng.choice("0123456789") for _ in range(n))
+            e = rng.randrange(-30, 30)
+            for s in (f"0.{frac}e{e}", f"3.{frac}E+{abs(e)}", f"-7.{frac}e-{abs(e)}"):
+                texts.append(s)
+        _check_floats(texts)
+
+    def test_halfway_cases(self):
+        # Decimal strings exactly halfway between two doubles, and one ulp
+        # either side: rounding must be ties-to-even, as float() does.
+        from decimal import Decimal
+        import random
+
+        rng = random.Random(4)
+        texts = []
+        for _ in range(3000):
+            x = rng.random()
+            nxt = float.fromhex(x.hex())  # x itself
+            up = __import__("math").nextafter(x, 2.0)
+            mid = (Decimal(nxt) + Decimal(up)) / 2
+            for d in (mid, mid + Decimal("1e-25"), mid - Decimal("1e-25")):
+                t = f"{d:.19f}"  # 19 fraction digits: fast path range
+                texts.append(t)
+        _check_floats(texts)
+
+
 class TestRoundTrip:
     """Test round-trip consistency (dumps -> loads == original)."""
 

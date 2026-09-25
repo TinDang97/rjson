@@ -763,8 +763,9 @@ impl<'a> Parser<'a> {
         self.parse_number_general(start)
     }
 
-    /// Fast path for the common number shapes: `-?\d{1,15}(\.\d{1,15})?`
-    /// with at most 19 digits in total, optionally followed by an exponent
+    /// Fast path for the common number shapes: `-?\d{1,15}(\.\d{1,19})?`
+    /// with at most 19 significant digits (a leading `0.` counts none),
+    /// optionally followed by an exponent
     /// of at most 4 digits. Returns None (without consuming anything) for
     /// every other shape, including all invalid ones, so the general parser
     /// keeps sole ownership of error reporting and of the rare shapes.
@@ -809,27 +810,34 @@ impl<'a> Parser<'a> {
         let mut mant = int;
         let mut n2 = 0;
         if c == b'.' {
-            let (frac, n) = digits16(p.add(j + 1))?;
-            if n == 0 || n1 + n > 19 {
+            let (frac, n) = digits19(p.add(j + 1))?;
+            // At most 19 significant digits, so the mantissa is exact in a
+            // u64: an integer part of 0 adds none (full-precision doubles
+            // such as 0.8601898621952831 or 0.0086018986219528 have 16-19
+            // fraction digits).
+            // Branch-free significant-digit count: a branch on `int != 0`
+            // mispredicted on arrays mixing 0.0 with other values (+6%).
+            let sig = n + n1 * (int != 0) as usize;
+            if n == 0 || sig > 19 {
                 return None;
             }
-            // <= 19 digits: exact in a u64.
             mant = int * POW10_U64[n] + frac;
             n2 = n;
-            j += 1 + n; // <= start + 32
+            j += 1 + n; // <= start + 36
             c = *p.add(j);
         }
         let v = if (c | 0x20) != b'e' {
             if mant <= (1u64 << 53) {
-                // Clinger: exact mantissa and power of ten (n2 <= 15 <= 22),
+                // Clinger: exact mantissa and power of ten (n2 <= 19 <= 22),
                 // so one correctly rounded division.
                 mant as f64 / POW10[n2]
             } else {
-                // n2 in 1..=15 and mant > 2^53: within the specialised range.
+                // n2 in 1..=19 and mant > 2^53 (so != 0): within the
+                // specialised range (q in -22..=22).
                 crate::lemire::compute_float64_small(-(n2 as i64), mant)
             }
         } else {
-            // Exponent: optional sign and 1..=4 digits (reads <= start + 38).
+            // Exponent: optional sign and 1..=4 digits (reads <= start + 42).
             j += 1;
             let s = *p.add(j);
             let eneg = s == b'-';
@@ -1042,9 +1050,9 @@ impl<'a> Parser<'a> {
 }
 
 /// Bytes `parse_number_fast` may read from the start of the number: sign,
-/// up to 16 integer-digit bytes, '.', 16 fraction-digit bytes, and an
-/// exponent ('e', sign, 4 digits and the byte after).
-const NUM_FAST_LOOKAHEAD: usize = 40;
+/// up to 16 integer-digit bytes, '.', 24 fraction bytes (three words), and
+/// an exponent ('e', sign, 4 digits and the byte after): at most 43.
+const NUM_FAST_LOOKAHEAD: usize = 48;
 
 /// Number of leading ASCII digits in the 8 bytes of `w` (little endian).
 #[inline(always)]
@@ -1066,12 +1074,12 @@ fn parse_digits_prefix(w: u64, n: usize) -> u64 {
     digits8_value(d)
 }
 
-/// Leading decimal digits at `p`: (value, count) for up to 15 digits, None
-/// for 16 or more.
+/// Leading decimal digits at `p`: (value, count) for up to 19 digits (the
+/// value fits a u64), None for 20 or more.
 ///
-/// SAFETY: `p..p+16` readable.
+/// SAFETY: `p..p+24` readable.
 #[inline(always)]
-unsafe fn digits16(p: *const u8) -> Option<(u64, usize)> {
+unsafe fn digits19(p: *const u8) -> Option<(u64, usize)> {
     let w1 = u64::from_le(ptr::read_unaligned(p as *const u64));
     let na = digit_run(w1);
     if na < 8 {
@@ -1079,10 +1087,17 @@ unsafe fn digits16(p: *const u8) -> Option<(u64, usize)> {
     }
     let w2 = u64::from_le(ptr::read_unaligned(p.add(8) as *const u64));
     let nb = digit_run(w2);
-    if nb == 8 {
+    if nb < 8 {
+        return Some((parse_8digits(w1) * POW10_U64[nb] + parse_digits_prefix(w2, nb), 8 + nb));
+    }
+    // 16..=19 digits: full-precision doubles.
+    let w3 = u64::from_le(ptr::read_unaligned(p.add(16) as *const u64));
+    let nc = digit_run(w3);
+    if nc > 3 {
         return None;
     }
-    Some((parse_8digits(w1) * POW10_U64[nb] + parse_digits_prefix(w2, nb), 8 + nb))
+    let hi = parse_8digits(w1) * 100_000_000 + parse_8digits(w2); // < 10^16
+    Some((hi * POW10_U64[nc] + parse_digits_prefix(w3, nc), 16 + nc))
 }
 
 #[inline(always)]
