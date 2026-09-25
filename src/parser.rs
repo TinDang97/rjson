@@ -1635,21 +1635,67 @@ pub(crate) unsafe fn get_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyRes
         });
     }
     if ffi::PyMemoryView_Check(obj) != 0 {
-        let mut view: ffi::Py_buffer = std::mem::zeroed();
-        if ffi::PyObject_GetBuffer(obj, &mut view, ffi::PyBUF_C_CONTIGUOUS) != 0 {
-            return Err(PyErr::fetch(py));
-        }
-        // No terminator guarantee for arbitrary buffers: copy and append one.
-        let len = view.len as usize;
-        let mut owned = Vec::with_capacity(len + 1);
-        if len > 0 {
-            owned.extend_from_slice(std::slice::from_raw_parts(view.buf as *const u8, len));
-        }
-        owned.push(0);
-        ffi::PyBuffer_Release(&mut view);
-        return Ok(Input { ptr: owned.as_ptr(), len, utf8_valid: false, owned: Some(owned) });
+        return memoryview_input(py, obj);
     }
-    Err(PyTypeError::new_err("Input must be bytes, bytearray, memoryview, or str"))
+    Err(input_type_error(py, obj))
+}
+
+/// Copies a memoryview's bytes (in C order, like `mv.tobytes()`) and appends
+/// the NUL terminator `parse` needs. Accepts any layout: contiguous views are
+/// copied directly, strided (`mv[::2]`), Fortran-ordered or indirect
+/// (suboffsets) views are gathered with `PyBuffer_ToContiguous`. Requesting
+/// `PyBUF_C_CONTIGUOUS` instead raised `BufferError` for non-contiguous views.
+#[inline(never)]
+unsafe fn memoryview_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyResult<Input> {
+    let mut view: ffi::Py_buffer = std::mem::zeroed();
+    // FULL_RO = strides + suboffsets + format, read-only: the most general
+    // request, so every memoryview can satisfy it (a released one raises).
+    if ffi::PyObject_GetBuffer(obj, &mut view, ffi::PyBUF_FULL_RO) != 0 {
+        return Err(PyErr::fetch(py));
+    }
+    // `view.len` is the total byte size (product(shape) * itemsize) for any layout.
+    let len = view.len as usize;
+    let mut owned: Vec<u8> = Vec::with_capacity(len + 1);
+    if len > 0 {
+        if ffi::PyBuffer_IsContiguous(&view, b'C' as std::os::raw::c_char) != 0 {
+            owned.extend_from_slice(std::slice::from_raw_parts(view.buf as *const u8, len));
+        } else {
+            // SAFETY: `owned` has capacity for `len` bytes; on success
+            // PyBuffer_ToContiguous has written exactly `view.len` bytes.
+            // `&mut view`: pyo3-ffi declares `src` as `*mut` before 3.11 and
+            // `*const` from 3.11 on; CPython only reads it.
+            let len_ssize = view.len;
+            let rc = ffi::PyBuffer_ToContiguous(
+                owned.as_mut_ptr() as *mut std::os::raw::c_void,
+                &mut view,
+                len_ssize,
+                b'C' as std::os::raw::c_char,
+            );
+            if rc != 0 {
+                ffi::PyBuffer_Release(&mut view);
+                return Err(PyErr::fetch(py));
+            }
+            owned.set_len(len);
+        }
+    }
+    owned.push(0);
+    ffi::PyBuffer_Release(&mut view);
+    Ok(Input { ptr: owned.as_ptr(), len, utf8_valid: false, owned: Some(owned) })
+}
+
+#[cold]
+#[inline(never)]
+fn input_type_error(py: Python<'_>, obj: *mut ffi::PyObject) -> PyErr {
+    use pyo3::types::PyTypeMethods;
+    // SAFETY: `obj` is the (borrowed, live) argument of `loads`.
+    let ty = unsafe { Bound::from_borrowed_ptr(py, obj) }.get_type();
+    let name = ty
+        .fully_qualified_name()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    PyTypeError::new_err(format!(
+        "loads() argument must be str, bytes, bytearray or memoryview, not {name}"
+    ))
 }
 
 #[inline(always)]

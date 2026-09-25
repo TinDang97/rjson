@@ -233,7 +233,9 @@ class TestCodec:
         with pytest.raises(codec_mod.DecodeError):
             make_codec().decode(12)  # type: ignore[arg-type]
         with pytest.raises(codec_mod.DecodeError):
-            make_codec().decode(memoryview(b"[1, 2]")[::2])  # not C-contiguous
+            make_codec().decode(memoryview(b"[1, 2]")[::2])  # strided view of b"[,2": invalid
+        plain = codec_mod.Codec(envelope=False, type_hooks=False)
+        assert plain.decode(memoryview(b"[ 1 ]")[::2]) == [1]  # strided views are accepted
 
     def test_extra_envelope_keys_are_accepted(self):
         payload = b'{"schema":"orders","version":1,"tagged":false,"data":1,"trace":"t"}'

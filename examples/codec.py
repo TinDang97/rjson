@@ -336,7 +336,7 @@ def _loads(data: Buffer | str) -> Any:
         return rjson.loads(data)
     except json.JSONDecodeError as exc:
         raise DecodeError(f"invalid JSON: {exc}") from exc
-    except (TypeError, BufferError) as exc:  # wrong input type, non-contiguous memoryview
+    except TypeError as exc:  # wrong input type (any memoryview layout is accepted)
         raise DecodeError(f"cannot decode {type(data).__name__}: {exc}") from exc
 
 

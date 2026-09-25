@@ -12,6 +12,7 @@ Tests cover:
 
 import pytest
 import rjson
+import json
 import math
 
 
@@ -656,6 +657,107 @@ class TestLoadsParser:
     def test_unsupported_input_type(self):
         with pytest.raises(TypeError):
             rjson.loads(123)
+
+
+def _spread(doc: bytes, filler: bytes = b" ") -> bytes:
+    """doc interleaved with filler, so that ``_spread(doc)[::2] == doc``."""
+    return b"".join(bytes([c]) + filler for c in doc)
+
+
+class TestMemoryviewLayouts:
+    """Regression: non-contiguous memoryviews raised BufferError (the view
+    was requested as C-contiguous). Every layout must now parse exactly like
+    ``rjson.loads(mv.tobytes())``."""
+
+    DOC = '{"a": [1, 2.5, "héllo \U0001F600", null, true], "b": {"c": -3}}'.encode()
+
+    def check(self, mv):
+        expected = rjson.loads(mv.tobytes())
+        assert rjson.loads(mv) == expected
+        return expected
+
+    def test_strided(self):
+        mv = memoryview(_spread(self.DOC))[::2]
+        assert not mv.c_contiguous
+        assert self.check(mv) == rjson.loads(self.DOC)
+
+    def test_strided_from_bytearray_and_offset(self):
+        buf = bytearray(b"xx" + _spread(b"[1,2,3]"))
+        mv = memoryview(buf)[2::2]
+        assert self.check(mv) == [1, 2, 3]
+
+    def test_negative_stride(self):
+        mv = memoryview(self.DOC[::-1])[::-1]
+        assert not mv.c_contiguous
+        assert self.check(mv) == rjson.loads(self.DOC)
+
+    def test_strided_multibyte_items(self):
+        # itemsize 2: the view's bytes are gathered item by item.
+        doc = b"[10, 20, 30] "  # odd length -> pad to whole items
+        doc += b" " * (len(doc) % 2)
+        raw = b"".join(doc[i : i + 2] + b"##" for i in range(0, len(doc), 2))
+        mv = memoryview(raw).cast("H")[::2]
+        assert mv.tobytes() == doc
+        assert self.check(mv) == [10, 20, 30]
+
+    def test_multidimensional_c_contiguous(self):
+        doc = b"[1, 2]  "
+        mv = memoryview(doc).cast("B", shape=[2, 4])
+        assert self.check(mv) == [1, 2]
+
+    def test_strided_single_byte_and_empty(self):
+        assert rjson.loads(memoryview(b"7x")[::2]) == 7
+        with pytest.raises(json.JSONDecodeError, match="empty"):
+            rjson.loads(memoryview(b"")[::2])
+        with pytest.raises(json.JSONDecodeError, match="empty"):
+            rjson.loads(memoryview(b"abc")[3::2])
+
+    def test_strided_invalid_json_matches_tobytes(self):
+        # memoryview(b"[1,2]")[::2] is b"[,]": the same error either way.
+        mv = memoryview(b"[1,2]")[::2]
+        with pytest.raises(json.JSONDecodeError) as a:
+            rjson.loads(mv)
+        with pytest.raises(json.JSONDecodeError) as b:
+            rjson.loads(mv.tobytes())
+        assert (a.value.msg, a.value.pos) == (b.value.msg, b.value.pos)
+
+    def test_strided_invalid_utf8(self):
+        with pytest.raises(json.JSONDecodeError):
+            rjson.loads(memoryview(_spread(b'"\xff"'))[::2])
+
+    def test_released_memoryview_raises_valueerror(self):
+        mv = memoryview(b"[1]")
+        mv.release()
+        with pytest.raises(ValueError):
+            rjson.loads(mv)
+
+    def test_strided_does_not_leak_or_pin_the_buffer(self):
+        # The exported buffer must be released: resizing a bytearray fails
+        # with BufferError while a view on it is still held.
+        buf = bytearray(_spread(b"[1]"))
+        for _ in range(100):
+            assert rjson.loads(memoryview(buf)[::2]) == [1]
+        buf.extend(b"  ")  # would raise BufferError if an export leaked
+
+
+class TestInputTypeErrors:
+    @pytest.mark.parametrize("bad", [None, 1, 1.5, ["[]"], {"a": 1}, object()])
+    def test_rejected_with_type_name(self, bad):
+        with pytest.raises(TypeError) as ei:
+            rjson.loads(bad)
+        msg = str(ei.value)
+        assert type(bad).__name__ in msg
+        assert "str, bytes, bytearray or memoryview" in msg
+        assert "rjson.rjson" not in msg
+
+    def test_other_buffer_objects_are_rejected(self):
+        # Only memoryview is accepted among generic buffers (wrap others in one).
+        import array
+
+        a = array.array("B", b"[1]")
+        with pytest.raises(TypeError, match="array.array"):
+            rjson.loads(a)
+        assert rjson.loads(memoryview(a)) == [1]
 
 
 if __name__ == "__main__":
