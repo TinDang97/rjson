@@ -39,8 +39,9 @@ rjson's API is `loads`, `dumps` (bytes), `dumps_str` (str). It has no keyword op
   `str` that cannot be encoded to UTF-8 later on.
 - **Nesting limit 254 for `dumps`** (orjson: 254; `json`: the recursion limit). `loads`
   accepts 1024 levels.
-- **Error messages** start with `JSON parsing error: `. `pos`, `lineno`, `colno` and `doc`
-  match `json`.
+- **Error messages** differ in wording from `json` (`exc.msg` is the bare reason, as in
+  orjson). `pos`, `lineno`, `colno` and `doc` match `json` for delimiter errors
+  (missing/trailing `,` or `:`, extra data).
 
 ## Performance notes (measured, CPython 3.13, noisy host)
 

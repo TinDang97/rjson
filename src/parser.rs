@@ -142,11 +142,12 @@ fn raise_decode_error(py: Python<'_>, msg: &str, doc: &[u8], pos: usize) -> PyEr
     let doc_str = String::from_utf8_lossy(doc);
     let pos = pos.min(doc.len());
     let char_pos = doc[..pos].iter().filter(|&&b| (b & 0xC0) != 0x80).count();
-    let full = format!("JSON parsing error: {msg}");
+    // `msg` is the bare reason, as with json/orjson (`exc.msg`); JSONDecodeError
+    // formats str(exc) as "<msg>: line L column C (char P)".
     let ty = decode_error_type(py);
     match ty {
-        Ok(ty) => PyErr::from_type(ty.bind(py).clone(), (full, doc_str.into_owned(), char_pos)),
-        Err(_) => pyo3::exceptions::PyValueError::new_err(full),
+        Ok(ty) => PyErr::from_type(ty.bind(py).clone(), (msg.to_owned(), doc_str.into_owned(), char_pos)),
+        Err(_) => pyo3::exceptions::PyValueError::new_err(msg.to_owned()),
     }
 }
 
@@ -240,6 +241,20 @@ impl<'a> Parser<'a> {
         Err(Fail)
     }
 
+    /// Trailing comma before `]`/`}` (at `self.pos`). Reported at the comma,
+    /// the last non-whitespace byte before the bracket, like `json` and
+    /// orjson (`[1,]` -> char 2, column 3); found by scanning back so the
+    /// success path does not track the comma's position.
+    #[cold]
+    #[inline(never)]
+    fn err_trailing_comma<T>(&self) -> PResult<T> {
+        let mut i = self.pos.min(self.buf.len());
+        while i > 0 && is_ws(self.buf[i - 1]) {
+            i -= 1;
+        }
+        self.err("trailing comma is not allowed", i.saturating_sub(1))
+    }
+
     #[cold]
     #[inline(never)]
     fn err_unexpected<T>(&self, expected: &'static str) -> PResult<T> {
@@ -323,7 +338,7 @@ impl<'a> Parser<'a> {
                         self.pos += 1;
                         self.skip_ws();
                         if self.peek() == b']' {
-                            return self.err("trailing comma is not allowed", self.pos);
+                            return self.err_trailing_comma();
                         }
                     }
                     b']' => {
@@ -376,7 +391,7 @@ impl<'a> Parser<'a> {
                         self.pos += 1;
                         self.skip_ws();
                         if self.peek() == b'}' {
-                            return self.err("trailing comma is not allowed", self.pos);
+                            return self.err_trailing_comma();
                         }
                     }
                     b'}' => {

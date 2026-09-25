@@ -269,20 +269,20 @@ class TestErrorHandling:
             rjson.dumps_str({1: "value"})
 
     def test_loads_invalid_json_raises(self):
-        with pytest.raises(ValueError, match="JSON parsing error"):
+        with pytest.raises(json.JSONDecodeError, match="expected a string key"):
             rjson.loads("{invalid json}")
 
     def test_loads_truncated_json_raises(self):
-        with pytest.raises(ValueError, match="JSON parsing error"):
+        with pytest.raises(json.JSONDecodeError, match="unexpected end of data"):
             rjson.loads('{"key": "incomplete')
 
     def test_loads_trailing_comma_raises(self):
-        with pytest.raises(ValueError, match="JSON parsing error"):
+        with pytest.raises(json.JSONDecodeError, match="trailing comma"):
             rjson.loads('[1, 2, 3,]')
 
     @pytest.mark.parametrize("doc", ["[1] x", "{} {}", "1 2", "null,"])
     def test_loads_trailing_characters_raises(self, doc):
-        with pytest.raises(ValueError, match="JSON parsing error"):
+        with pytest.raises(json.JSONDecodeError, match="unexpected content after document"):
             rjson.loads(doc)
 
     @pytest.mark.parametrize("conv", [str, lambda s: s.encode(), lambda s: bytearray(s.encode()), lambda s: memoryview(s.encode())])
@@ -417,7 +417,7 @@ class TestLoadsParser:
     """Regression tests for the hand-written loads parser."""
 
     def test_trailing_content_rejected(self):
-        with pytest.raises(ValueError, match="JSON parsing error"):
+        with pytest.raises(json.JSONDecodeError, match="unexpected content after document"):
             rjson.loads("1 2")
         with pytest.raises(ValueError):
             rjson.loads("[1] x")
@@ -863,6 +863,81 @@ class TestModuleSurface:
             pytest.skip("rjson not installed as a package")
         assert (pkg.parent / "__init__.pyi").is_file()
         assert (pkg.parent / "py.typed").is_file()
+
+
+# Documents whose error position (pos/lineno/colno) matches json.loads exactly.
+SAME_POSITION_AS_JSON = [
+    # trailing commas: reported at the comma (was: at the closing bracket)
+    "[1,]",
+    '{"a":1,}',
+    "[ 1 , ]",
+    '{"a":1 ,  }',
+    "[1,\n]",
+    "[1,\n\n  ]",
+    '{"a":\n1,\n}',
+    '["é",]',
+    '{"é":"😀" , }',
+    "[[1,],2]",
+    "\n\n [1,\n  2,]",
+    # other delimiter / structure errors
+    "[1 2]",
+    '{"a" 1}',
+    '{"a":}',
+    "[",
+    "[1,",
+    '{"a":1 "b":2}',
+    "[1,,2]",
+    "{,}",
+    "]",
+    "{1:2}",
+    "[1]x",
+    "[1] x",
+    "{} {}",
+    '{"a":1}}',
+    "[true false]",
+    '"a\tb"',
+    '"éé\\x"',
+]
+
+
+def _json_error(doc):
+    try:
+        json.loads(doc)
+    except json.JSONDecodeError as e:
+        return e
+    raise AssertionError(f"json accepted {doc!r}")
+
+
+class TestDecodeErrorMessages:
+    @pytest.mark.parametrize("doc", SAME_POSITION_AS_JSON, ids=repr)
+    @pytest.mark.parametrize(
+        "conv", [str, str.encode, lambda s: memoryview(s.encode())], ids=["str", "bytes", "memoryview"]
+    )
+    def test_position_matches_json(self, doc, conv):
+        expected = _json_error(doc)
+        with pytest.raises(json.JSONDecodeError) as ei:
+            rjson.loads(conv(doc))
+        e = ei.value
+        assert (e.pos, e.lineno, e.colno) == (expected.pos, expected.lineno, expected.colno)
+        assert e.doc == doc
+
+    @pytest.mark.parametrize("doc,col", [("[1,]", 3), ('{"a":1,}', 7), ("[1, 2, 3,]", 9)])
+    def test_trailing_comma_column(self, doc, col):
+        # Regression: the column pointed at the closing bracket (one past json's).
+        with pytest.raises(json.JSONDecodeError) as ei:
+            rjson.loads(doc)
+        assert ei.value.colno == col
+        assert ei.value.msg == "trailing comma is not allowed"
+
+    @pytest.mark.parametrize("doc", ["[1,]", "{", "tru", "", '"\\x"', b'"\xff"', "[1] x", "1" * 5 + "."])
+    def test_msg_is_the_bare_reason(self, doc):
+        # Regression: .msg started with "JSON parsing error: " (json/orjson have no prefix).
+        with pytest.raises(json.JSONDecodeError) as ei:
+            rjson.loads(doc)
+        e = ei.value
+        assert not e.msg.startswith("JSON parsing error")
+        assert e.msg and e.msg[0].islower()
+        assert str(e) == f"{e.msg}: line {e.lineno} column {e.colno} (char {e.pos})"
 
 
 if __name__ == "__main__":
