@@ -12,7 +12,9 @@ import datetime as dt
 import decimal
 import enum
 import importlib.util
+import io
 import json
+import logging
 import subprocess
 import sys
 import uuid
@@ -20,6 +22,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+import rjson
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 
@@ -246,3 +249,218 @@ class TestCodec:
     def test_demo_runs(self):
         out = run_demo("codec")
         assert "round-trip equal: True" in out
+
+
+# ---------------------------------------------------------------------------------------
+# examples/json_logging.py
+# ---------------------------------------------------------------------------------------
+
+logging_mod = load_example("json_logging")
+
+
+@pytest.fixture
+def json_logger():
+    """A logger writing JSON lines into a StringIO; yields (logger, read_lines)."""
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging_mod.JSONFormatter(static_fields={"service": "svc"}))
+    logger = logging.getLogger(f"test_examples.{uuid.uuid4().hex}")
+    logger.propagate = False
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+
+    def lines():
+        return [json.loads(line) for line in stream.getvalue().splitlines()]
+
+    yield logger, lines
+    logger.removeHandler(handler)
+
+
+class Unreprable:
+    def __repr__(self):
+        raise RuntimeError("boom")
+
+    __str__ = __repr__
+
+
+class TestJSONFormatter:
+    def test_core_fields(self, json_logger):
+        logger, lines = json_logger
+        logger.warning("hello %s", "wörld", extra={"user": "ada", "n": 3})
+        (line,) = lines()
+        assert list(line)[:4] == ["ts", "level", "logger", "message"]
+        assert line["level"] == "WARNING"
+        assert line["logger"] == logger.name
+        assert line["message"] == "hello wörld"
+        assert line["service"] == "svc"
+        assert line["user"] == "ada" and line["n"] == 3
+        assert dt.datetime.fromisoformat(line["ts"].replace("Z", "+00:00")).tzinfo is not None
+
+    @pytest.mark.parametrize("created", [0.0, 1.9995, 1727250000.123456, 1727250000.999999,
+                                         1727250001.0, -1.5])
+    def test_timestamp_matches_datetime(self, created):
+        ref = dt.datetime.fromtimestamp(created, dt.timezone.utc)
+        expected = ref.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        assert logging_mod._utc_iso(created) == expected
+        assert logging_mod._utc_iso(created) == expected  # cached second
+
+    def test_one_line_per_record(self, json_logger):
+        logger, lines = json_logger
+        logger.info("multi\nline\r\nmessage")
+        assert lines()[0]["message"] == "multi\nline\r\nmessage"
+
+    def test_exception_info(self, json_logger):
+        logger, lines = json_logger
+        try:
+            raise KeyError("missing")
+        except KeyError:
+            logger.exception("failed")
+        (line,) = lines()
+        assert line["level"] == "ERROR"
+        assert "KeyError: 'missing'" in line["exc_info"]
+        assert line["exc_info"].startswith("Traceback")
+
+    def test_stack_info(self, json_logger):
+        logger, lines = json_logger
+        logger.info("here", stack_info=True)
+        assert "Stack (most recent call last)" in lines()[0]["stack_info"]
+
+    def test_unserializable_extras_are_stringified(self, json_logger):
+        logger, lines = json_logger
+        cyclic: list = []
+        cyclic.append(cyclic)
+        logger.info("x", extra={
+            "when": dt.datetime(2024, 1, 2, 3, 4, 5),
+            "id": uuid.UUID(int=1),
+            "amount": decimal.Decimal("1.50"),
+            "color": Color.RED,
+            "nan": float("nan"),
+            "nested": {1: {2, 3}, "inf": [float("-inf")]},
+            "big": 2**100,
+            "obj": object(),
+            "bad": Unreprable(),
+            "cyclic": cyclic,
+            "order": Order(uuid.UUID(int=2), decimal.Decimal("3"), Color.GREEN,
+                           dt.datetime(2024, 1, 1)),
+        })
+        (line,) = lines()
+        assert line["when"] == "2024-01-02T03:04:05"
+        assert line["id"] == str(uuid.UUID(int=1))
+        assert line["amount"] == "1.50"
+        assert line["color"] == "red"
+        assert line["nan"] == "nan"
+        assert line["nested"] == {"1": [2, 3], "inf": ["-inf"]}
+        assert line["big"] == 2**100
+        assert line["obj"].startswith("<object object")
+        assert line["bad"] == "<unprintable Unreprable>"
+        assert "<max depth exceeded>" in json.dumps(line["cyclic"])
+        assert line["order"]["color"] == "green"
+
+    def test_colliding_extra_is_renamed(self, json_logger):
+        logger, lines = json_logger
+        logger.info("x", extra={"level": "custom", "ts": 1, "service": "other"})
+        (line,) = lines()
+        assert line["level"] == "INFO" and line["extra_level"] == "custom"
+        assert line["extra_ts"] == 1
+        assert line["service"] == "svc" and line["extra_service"] == "other"
+
+    def test_bad_format_args_do_not_raise(self):
+        # Formatted directly: pytest's own capture handler re-raises the TypeError.
+        record = logging.LogRecord("n", logging.INFO, __file__, 1, "%d items", ("x",), None)
+        line = json.loads(logging_mod.JSONFormatter().format(record))
+        assert line["message"] == "'%d items' % ('x',) (message formatting failed)"
+
+    def test_lone_surrogate_is_replaced(self, json_logger):
+        logger, lines = json_logger
+        logger.info("bad \ud800 text", extra={"k": "\udfff"})
+        (line,) = lines()
+        assert line["message"] == "bad \ufffd text" and line["k"] == "\ufffd"
+
+    def test_output_is_valid_utf8_json(self):
+        record = logging.LogRecord("n", logging.INFO, __file__, 1, "é \ud83d", (), None)
+        text = logging_mod.JSONFormatter(include_location=True).format(record)
+        assert rjson.loads(text.encode("utf-8"))["line"] == 1
+
+    def test_setup_json_logging(self):
+        stream = io.StringIO()
+        root = logging.getLogger()
+        old_level = root.level
+        handler = logging_mod.setup_json_logging(logging.DEBUG, stream)
+        try:
+            logging.getLogger("test_examples.setup").debug("dbg")
+        finally:
+            root.removeHandler(handler)
+            root.setLevel(old_level)
+        assert json.loads(stream.getvalue())["message"] == "dbg"
+
+
+class TestNDJSON:
+    def test_round_trip_binary(self):
+        buf = io.BytesIO()
+        records = [{"i": i, "s": "a\nb\u2028c", "f": 0.1} for i in range(100)]
+        assert logging_mod.write_ndjson(buf, records) == 100
+        assert buf.getvalue().count(b"\n") == 100
+        buf.seek(0)
+        assert list(logging_mod.read_ndjson(buf)) == records
+
+    def test_round_trip_text_file(self, tmp_path):
+        path = tmp_path / "data.ndjson"
+        with path.open("w", encoding="utf-8") as fp:
+            assert logging_mod.write_ndjson(fp, [{"é": 1}, [2]]) == 2
+        with path.open(encoding="utf-8") as fp:
+            assert list(logging_mod.read_ndjson(fp)) == [{"é": 1}, [2]]
+
+    def test_empty_input(self):
+        assert logging_mod.write_ndjson(io.BytesIO(), []) == 0
+        assert list(logging_mod.read_ndjson(io.BytesIO(b""))) == []
+
+    def test_blank_lines_and_crlf(self):
+        data = b'\n{"a":1}\r\n   \n\t\n[2]\n{"b":3}'  # no trailing newline on the last line
+        assert list(logging_mod.read_ndjson(io.BytesIO(data))) == [{"a": 1}, [2], {"b": 3}]
+
+    def test_bad_line_raises_with_line_number(self):
+        data = io.BytesIO(b'{"a":1}\n\n{"a":\n{"a":3}\n')
+        reader = logging_mod.read_ndjson(data)
+        assert next(reader) == {"a": 1}
+        with pytest.raises(logging_mod.NDJSONError) as info:
+            next(reader)
+        assert info.value.lineno == 3
+        assert isinstance(info.value, ValueError)
+        assert isinstance(info.value.__cause__, json.JSONDecodeError)
+
+    def test_invalid_utf8_line_is_reported_not_fatal(self, caplog):
+        data = io.BytesIO(b'{"a":1}\n"\xff"\n{"a":2}\n')
+        with caplog.at_level(logging.WARNING):
+            assert list(logging_mod.read_ndjson(data, on_error="skip")) == [{"a": 1}, {"a": 2}]
+        assert "line 2" in caplog.text
+
+    def test_skip_mode_logs_each_bad_line(self, caplog):
+        data = io.BytesIO(b"x\n[1]\ny\n")
+        with caplog.at_level(logging.WARNING):
+            assert list(logging_mod.read_ndjson(data, on_error="skip")) == [[1]]
+        assert "line 1" in caplog.text and "line 3" in caplog.text
+
+    def test_invalid_on_error(self):
+        with pytest.raises(ValueError):
+            list(logging_mod.read_ndjson([], on_error="ignore"))  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("bad", [object(), float("nan"), {1: 2}, "\ud800"], ids=repr)
+    def test_unserializable_record(self, bad):
+        buf = io.BytesIO()
+        with pytest.raises(ValueError) as info:
+            logging_mod.write_ndjson(buf, [{"ok": 1}, {"bad": bad}])
+        assert isinstance(info.value, logging_mod.NDJSONError)
+        assert info.value.lineno == 2
+        assert buf.getvalue() == b'{"ok":1}\n'  # nothing of the bad record was written
+
+    def test_lone_surrogate_in_text_mode_writes_nothing(self):
+        buf = io.StringIO()
+        with pytest.raises(UnicodeEncodeError):
+            logging_mod.write_ndjson(buf, [{"ok": 1}, {"bad": "\ud800"}])
+        assert buf.getvalue() == '{"ok":1}\n'
+
+    def test_demo_runs(self):
+        out = run_demo("json_logging")
+        first = json.loads(out.splitlines()[0])
+        assert first["message"] == "user ada logged in" and first["ratio"] == "nan"
+        assert "raise mode: line 6" in out
