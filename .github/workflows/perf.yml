@@ -63,7 +63,9 @@ jobs:
             (cd "$side" && maturin build --release -i python -o "$RUNNER_TEMP/wheels-$side")
             python -m venv "$RUNNER_TEMP/venv-$side"
             "$RUNNER_TEMP/venv-$side/bin/python" -m pip install -q orjson
-            "$RUNNER_TEMP/venv-$side/bin/python" -m pip install -q --no-index --find-links "$RUNNER_TEMP/wheels-$side" rjson
+            # Install by file, not by name: the base ref may predate the
+            # rjson -> pyrjson distribution rename (one wheel per directory).
+            "$RUNNER_TEMP/venv-$side/bin/python" -m pip install -q --no-index "$RUNNER_TEMP/wheels-$side"/*.whl
           done
       - name: Benchmark (interleaved)
         run: |

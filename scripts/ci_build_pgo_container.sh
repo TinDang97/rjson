@@ -36,6 +36,6 @@ for py in "${PYS[@]}"; do
     venv=$(mktemp -d)
     "$py" -m venv "$venv"
     "$venv/bin/python" -m pip install -q pytest
-    "$venv/bin/python" -m pip install -q --no-index --find-links "$ROOT/dist" rjson
+    "$venv/bin/python" -m pip install -q --no-index --find-links "$ROOT/dist" pyrjson
     "$venv/bin/python" -m pytest tests -q -p no:cacheprovider
 done
