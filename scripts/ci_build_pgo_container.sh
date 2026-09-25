@@ -2,7 +2,7 @@
 # Build + test PGO wheels inside a PyPA manylinux/musllinux image (CI helper).
 #
 #   docker run --rm -v "$PWD":/io -w /io quay.io/pypa/musllinux_1_2_x86_64 \
-#       scripts/ci_build_pgo_container.sh 3.9 3.10 3.11 3.12 3.13
+#       scripts/ci_build_pgo_container.sh 3.10 3.11 3.12 3.13
 #
 # Installs a minimal Rust toolchain with llvm-tools, then runs
 # scripts/build_pgo.sh for each /opt/python/cp3X-cp3X interpreter (wheels ->

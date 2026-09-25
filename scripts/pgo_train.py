@@ -223,7 +223,7 @@ def main():
     docs = documents()
     t0 = time.perf_counter()
     for name, obj in docs.items():
-        for fn in (rjson.dumps, rjson.dumps_bytes):
+        for fn in (rjson.dumps, rjson.dumps_str):
             run(fn, obj)
         if name == "subclasses":
             continue
@@ -243,7 +243,7 @@ def main():
                 pass
         for bad in (float("nan"), {1: 2}, object(), "\ud800", {"a": set()}):
             try:
-                rjson.dumps_bytes(bad)
+                rjson.dumps(bad)
             except (ValueError, TypeError, UnicodeEncodeError):
                 pass
     print(f"pgo_train: {len(docs)} documents, {time.perf_counter() - t0:.1f}s", file=sys.stderr)

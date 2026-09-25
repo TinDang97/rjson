@@ -44,11 +44,11 @@ unsafe fn loads_body(py: Python<'_>, _m: *mut ffi::PyObject, arg: *mut ffi::PyOb
 }
 
 unsafe fn dumps_body(py: Python<'_>, _m: *mut ffi::PyObject, arg: *mut ffi::PyObject) -> PyResult<*mut ffi::PyObject> {
-    crate::ser::dumps_raw(py, arg, true)
+    crate::ser::dumps_raw(py, arg, false)
 }
 
-unsafe fn dumps_bytes_body(py: Python<'_>, _m: *mut ffi::PyObject, arg: *mut ffi::PyObject) -> PyResult<*mut ffi::PyObject> {
-    crate::ser::dumps_raw(py, arg, false)
+unsafe fn dumps_str_body(py: Python<'_>, _m: *mut ffi::PyObject, arg: *mut ffi::PyObject) -> PyResult<*mut ffi::PyObject> {
+    crate::ser::dumps_raw(py, arg, true)
 }
 
 /// `loads(obj: str | bytes | bytearray | memoryview) -> Any`
@@ -56,14 +56,15 @@ unsafe extern "C" fn loads(module: *mut ffi::PyObject, arg: *mut ffi::PyObject) 
     pyo3::impl_::trampoline::get_trampoline_function!(binaryfunc, loads_body)(module, arg)
 }
 
-/// `dumps(obj: Any) -> str`
+/// `dumps(obj: Any) -> bytes` (UTF-8, like `orjson.dumps`); also exported
+/// as `dumps_bytes`, its name before `dumps` switched from `str` to `bytes`.
 unsafe extern "C" fn dumps(module: *mut ffi::PyObject, arg: *mut ffi::PyObject) -> *mut ffi::PyObject {
     pyo3::impl_::trampoline::get_trampoline_function!(binaryfunc, dumps_body)(module, arg)
 }
 
-/// `dumps_bytes(obj: Any) -> bytes` (UTF-8, like `orjson.dumps`)
-unsafe extern "C" fn dumps_bytes(module: *mut ffi::PyObject, arg: *mut ffi::PyObject) -> *mut ffi::PyObject {
-    pyo3::impl_::trampoline::get_trampoline_function!(binaryfunc, dumps_bytes_body)(module, arg)
+/// `dumps_str(obj: Any) -> str` (like `json.dumps(obj, ensure_ascii=False)`, compact)
+unsafe extern "C" fn dumps_str(module: *mut ffi::PyObject, arg: *mut ffi::PyObject) -> *mut ffi::PyObject {
+    pyo3::impl_::trampoline::get_trampoline_function!(binaryfunc, dumps_str_body)(module, arg)
 }
 
 // ---------------------------------------------------------------------------
@@ -72,7 +73,7 @@ unsafe extern "C" fn dumps_bytes(module: *mut ffi::PyObject, arg: *mut ffi::PyOb
 
 /// `PyMethodDef`s must outlive the function objects created from them.
 /// Wrapped so the raw pointers inside can live in a `static`.
-struct MethodDefs([ffi::PyMethodDef; 3]);
+struct MethodDefs([ffi::PyMethodDef; 4]);
 // SAFETY: the table is immutable after construction and only read by CPython.
 unsafe impl Sync for MethodDefs {}
 
@@ -87,13 +88,19 @@ static METHODS: MethodDefs = MethodDefs([
         ml_name: c"dumps".as_ptr(),
         ml_meth: ffi::PyMethodDefPointer { PyCFunction: dumps },
         ml_flags: ffi::METH_O,
-        ml_doc: c"dumps(obj, /)\n--\n\nSerialize a Python object to a JSON str.".as_ptr(),
+        ml_doc: c"dumps(obj, /)\n--\n\nSerialize a Python object to compact UTF-8 JSON bytes (like orjson.dumps).".as_ptr(),
+    },
+    ffi::PyMethodDef {
+        ml_name: c"dumps_str".as_ptr(),
+        ml_meth: ffi::PyMethodDefPointer { PyCFunction: dumps_str },
+        ml_flags: ffi::METH_O,
+        ml_doc: c"dumps_str(obj, /)\n--\n\nSerialize a Python object to a compact JSON str (non-ASCII kept as-is).".as_ptr(),
     },
     ffi::PyMethodDef {
         ml_name: c"dumps_bytes".as_ptr(),
-        ml_meth: ffi::PyMethodDefPointer { PyCFunction: dumps_bytes },
+        ml_meth: ffi::PyMethodDefPointer { PyCFunction: dumps },
         ml_flags: ffi::METH_O,
-        ml_doc: c"dumps_bytes(obj, /)\n--\n\nSerialize a Python object to UTF-8 JSON bytes (fastest; like orjson.dumps).".as_ptr(),
+        ml_doc: c"dumps_bytes(obj, /)\n--\n\nAlias of dumps (returns bytes); kept for compatibility.".as_ptr(),
     },
 ]);
 

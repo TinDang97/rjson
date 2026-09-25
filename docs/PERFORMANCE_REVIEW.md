@@ -11,7 +11,7 @@ The loads, dumps and build reviews each prototyped and measured their changes, a
 
 ## 1. Results
 
-Numbers are rjson time divided by orjson time on the same run, so **below 1.00 means rjson is faster**. They come from `benches/corpus_benchmark.py --repeat 11` on an x86_64 Xeon (4 cores, otherwise idle) against orjson 3.11, with **plain release builds (no PGO)** of the current branch. Treat single cells as ±5–10% and trust the geomeans. `dumps` returns `str`; `dumps_bytes` returns `bytes`, the same type `orjson.dumps` returns.
+Numbers are rjson time divided by orjson time on the same run, so **below 1.00 means rjson is faster**. They come from `benches/corpus_benchmark.py --repeat 11` on an x86_64 Xeon (4 cores, otherwise idle) against orjson 3.12.0, with **plain release builds (no PGO)** of the current branch. Treat single cells as ±5–10% and trust the geomeans. `dumps` returns `str`; `dumps_bytes` returns `bytes`, the same type `orjson.dumps` returns.
 
 | case | loads before | loads 3.11 | loads 3.13 | dumps before | dumps 3.11 | dumps 3.13 | dumps_bytes 3.11 | dumps_bytes 3.13 |
 |---|---|---|---|---|---|---|---|---|
@@ -83,7 +83,7 @@ unicode_strings got about 5% slower on 3.11/3.12 (flat on 3.13); bisecting point
 | `dumps` of a 79 MB output, peak memory | 3N | ~1N (writes into the result object) | 1N |
 | memory held after a large `dumps` | 77 MB per thread, forever | 0 | 0 |
 | per-call time, `loads('1')` / `dumps(None)` | 41 / 55 ns | ~25 / ~35 ns | 67 / 53 ns |
-| Python versions verified | 3.11 only (3.12+ crashed) | 3.9–3.14 (3.14.0rc2) x86_64; 3.9, 3.12 aarch64 (qemu) | 3.9–3.14 |
+| Python versions verified | 3.11 only (3.12+ crashed) | 3.10–3.14 (3.14.0rc2) x86_64; 3.9, 3.12 aarch64 (qemu); `requires-python >=3.10` | 3.9–3.14 |
 
 ## 2. Correctness and safety defects found (all fixed on this branch)
 
@@ -184,16 +184,18 @@ Tried and reverted, because each measured slower: SWAR digit formatting for all 
 
 - **PyO3 upgrade: done (0.24 → 0.29).** Needed for 3.14, since pyo3-ffi 0.24 refuses to build for it. `src/compat.rs` declares `_PyBytes_Resize` / `_PyDict_NewPresized` (no longer re-exported by pyo3-ffi, still exported by CPython) and provides the str accessors: on 3.14, pyo3-ffi drops the inline `PyUnicode_IS_*ASCII` readers and makes `KIND`/`DATA` out-of-line calls, so compat.rs reads the GIL build's unchanged `state` bitfield itself behind an import-time self-test against libpython, and refuses to compile for `Py_GIL_DISABLED`. All 247 tests pass on 3.9–3.14.0rc2. Private symbols and layouts in use, and their version gates, are listed in CLAUDE.md.
 - **Free-threaded builds (3.13t/3.14t).** Keep the module marked as GIL-requiring. The serializer iterates lists and dicts through borrowed references and would need critical sections before it could drop that. orjson doesn't support free-threading either.
-- **CI.** `.github/workflows/ci.yml`: clippy, then build + pytest on 3.9–3.14 (ubuntu x86_64), a no-AVX-512 variant, ubuntu-24.04-arm (3.9, 3.13), macos-14 and Windows (3.13). `cargo fmt --check` is not enforced yet (`entry.rs` and `parser.rs` are not rustfmt-clean) and clippy warnings are not fatal (one in `ser.rs`; five more dead-code/unused warnings only on aarch64).
+- **CI.** `.github/workflows/ci.yml`: clippy, then build + pytest on 3.10–3.14 (ubuntu x86_64), a no-AVX-512 variant, ubuntu-24.04-arm (3.10, 3.13), macos-14 and Windows (3.13). `cargo fmt --check` is not enforced yet (`entry.rs` and `parser.rs` are not rustfmt-clean) and clippy warnings are not fatal (one in `ser.rs`; five more dead-code/unused warnings only on aarch64).
 - **Performance regression gate.** `.github/workflows/perf.yml` (PRs labelled `perf`, or manual): builds base and head in one job, runs `corpus_benchmark.py --output-json` for both, interleaved ×5 on 3.11 and 3.13, and `benches/perf_gate.py` fails if any geomean is more than 5% worse. Corpora come from `benches/fetch_corpus.sh` (sha256-pinned). On this dev host, two runs of the same build differ by 1–3% in geomean, so 5% with 5 rounds is about the floor. Still to add: per-call time on tiny documents, `.so` size, import time and peak memory.
 - **Fuzzing.** Both review rounds ran differential fuzzers against stdlib `json` (≈150k `dumps` cases, plus `loads` value/error/float fuzzing), but the scripts live outside the repo. Next: check them in under `tests/fuzz/` and run a random-structure fuzzer under ASan in CI.
 - **Feature parity.** orjson also offers indent, sorted keys, `default=`, and serialization of datetime, UUID, dataclasses and numpy. Add them behind `METH_FASTCALL|METH_KEYWORDS` with hand-parsed keyword names, resolving those types lazily so import time stays low.
 
-## 5. Decisions for the maintainer
+## 5. Decisions (resolved)
 
-1. **Return type of `dumps`.** Today `dumps` returns `str`, matching stdlib, and `dumps_bytes` returns `bytes`, matching orjson. Making `dumps` return `bytes` would win every serialization benchmark, but it breaks the API. Recommendation: keep both functions, document `dumps_bytes` as the fast path, and decide before 1.0.
-2. **GC pause in `loads` on 3.10/3.11.** It is on by default. It is the largest single win on 3.11 (citm 0.96 → 0.62 before the other work). It restores the previous GC state and does nothing on 3.12+. The trade-off: no cyclic collection happens during one `loads` call.
-3. **Lone surrogates in `dumps` → `str`.** They are passed through, as `json.dumps(ensure_ascii=False)` does. `dumps_bytes` raises `UnicodeEncodeError`, and orjson always raises.
+1. **`dumps` returns `bytes`** (like `orjson.dumps`). `dumps_str` returns `str`, and `dumps_bytes` stays as an alias of `dumps`. Callers that relied on `dumps` returning `str` move to `dumps_str` or `.decode()`. In the tables above, "dumps_bytes" is today's `dumps` and "dumps → str" is today's `dumps_str`.
+2. **Private CPython internals are kept**, each gated to the versions checked and, where it reads a layout, self-tested at import (list in CLAUDE.md).
+3. **Minimum Python is 3.10** (`requires-python >=3.10`; CI and wheels cover 3.10–3.14).
+4. **GC pause in `loads` on 3.10/3.11** stays on by default; it restores the previous GC state and does nothing on 3.12+.
+5. **Lone surrogates:** `dumps` (bytes) raises `UnicodeEncodeError`, as orjson does; `dumps_str` passes them through, as `json.dumps(ensure_ascii=False)` does.
 
 ## 6. Reproducing
 
@@ -201,10 +203,11 @@ Tried and reverted, because each measured slower: SWAR digit formatting for all 
 uv venv .venv -p 3.11 && . .venv/bin/activate
 uv pip install maturin orjson pytest
 maturin develop --release
-python -m pytest tests -q                      # 247 tests
+python -m pytest tests -q                      # 250 tests
 benches/fetch_corpus.sh                        # corpora -> benches/data/ (sha256-pinned)
-python benches/corpus_benchmark.py [--output-json results.json]
+python benches/corpus_benchmark.py [--json] [--output-json results.json]
+python benches/make_charts.py results.json     # README charts -> docs/img/
 scripts/build_pgo.sh python3.11 python3.13     # PGO wheels -> target/wheels/
 python benches/perf_gate.py --base base-*.json --head head-*.json
-scripts/test_aarch64_qemu.sh 3.9 3.12          # aarch64 cross-build + tests under qemu
+scripts/test_aarch64_qemu.sh 3.10 3.12          # aarch64 cross-build + tests under qemu
 ```

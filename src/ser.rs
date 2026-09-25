@@ -1,5 +1,5 @@
-//! Direct CPython-API JSON serializer backing `dumps` (-> `str`) and
-//! `dumps_bytes` (-> `bytes`).
+//! Direct CPython-API JSON serializer backing `dumps` (-> `bytes`, also
+//! exported as `dumps_bytes`) and `dumps_str` (-> `str`).
 //!
 //! Design notes
 //! - Type dispatch is a chain of exact `ob_type` pointer comparisons against the
@@ -1184,7 +1184,7 @@ thread_local! {
     /// Size of the previous output buffer on this thread, per mode ([bytes,
     /// str]): the capacity hint. Kept per mode because a str-mode buffer
     /// holds only the ASCII parts of non-ASCII output, so a shared hint made
-    /// alternating dumps/dumps_bytes calls grow and then shrink the buffer.
+    /// alternating dumps/dumps_str calls grow and then shrink the buffer.
     static LAST_LEN: [Cell<usize>; 2] = const { [Cell::new(0), Cell::new(0)] };
 }
 
@@ -1697,7 +1697,7 @@ impl Serializer {
     /// `str` output: record the non-ASCII string instead of encoding it.
     ///
     /// Like `json.dumps(..., ensure_ascii=False)`, lone surrogates are copied
-    /// through (a `str` can hold them); `dumps_bytes` rejects them because
+    /// through (a `str` can hold them); `dumps` (bytes) rejects them because
     /// they cannot be encoded as UTF-8.
     unsafe fn write_str_segment(
         &mut self,

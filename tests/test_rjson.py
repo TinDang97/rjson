@@ -19,71 +19,71 @@ class TestBasicTypes:
     """Test serialization and deserialization of basic Python types."""
 
     def test_none(self):
-        assert rjson.dumps(None) == "null"
+        assert rjson.dumps_str(None) == "null"
         assert rjson.loads("null") is None
 
     def test_bool_true(self):
-        assert rjson.dumps(True) == "true"
+        assert rjson.dumps_str(True) == "true"
         assert rjson.loads("true") is True
 
     def test_bool_false(self):
-        assert rjson.dumps(False) == "false"
+        assert rjson.dumps_str(False) == "false"
         assert rjson.loads("false") is False
 
     def test_integer_zero(self):
-        assert rjson.dumps(0) == "0"
+        assert rjson.dumps_str(0) == "0"
         assert rjson.loads("0") == 0
 
     def test_integer_positive(self):
-        assert rjson.dumps(42) == "42"
+        assert rjson.dumps_str(42) == "42"
         assert rjson.loads("42") == 42
 
     def test_integer_negative(self):
-        assert rjson.dumps(-42) == "-42"
+        assert rjson.dumps_str(-42) == "-42"
         assert rjson.loads("-42") == -42
 
     def test_integer_large(self):
         large_int = 9223372036854775807  # Max i64
-        assert rjson.dumps(large_int) == str(large_int)
+        assert rjson.dumps_str(large_int) == str(large_int)
         assert rjson.loads(str(large_int)) == large_int
 
     def test_integer_very_large(self):
         # Python arbitrary precision int
         # Integers beyond 64 bits round-trip exactly (same as stdlib json)
         very_large = 123456789012345678901234567890
-        result = rjson.dumps(very_large)
+        result = rjson.dumps_str(very_large)
         loaded = rjson.loads(result)
         assert isinstance(loaded, int)
         assert loaded == very_large
         assert rjson.loads(str(-very_large)) == -very_large
 
     def test_float_zero(self):
-        assert rjson.dumps(0.0) == "0.0"
+        assert rjson.dumps_str(0.0) == "0.0"
         assert rjson.loads("0.0") == 0.0
 
     def test_float_positive(self):
-        assert rjson.dumps(3.14) == "3.14"
+        assert rjson.dumps_str(3.14) == "3.14"
         assert rjson.loads("3.14") == 3.14
 
     def test_float_negative(self):
-        assert rjson.dumps(-3.14) == "-3.14"
+        assert rjson.dumps_str(-3.14) == "-3.14"
         assert rjson.loads("-3.14") == -3.14
 
     def test_float_scientific(self):
         val = 1.23e-10
-        serialized = rjson.dumps(val)
+        serialized = rjson.dumps_str(val)
         assert rjson.loads(serialized) == pytest.approx(val)
 
     def test_string_empty(self):
-        assert rjson.dumps("") == '""'
+        assert rjson.dumps_str("") == '""'
         assert rjson.loads('""') == ""
 
     def test_string_simple(self):
-        assert rjson.dumps("hello") == '"hello"'
+        assert rjson.dumps_str("hello") == '"hello"'
         assert rjson.loads('"hello"') == "hello"
 
     def test_string_with_spaces(self):
-        assert rjson.dumps("hello world") == '"hello world"'
+        assert rjson.dumps_str("hello world") == '"hello world"'
         assert rjson.loads('"hello world"') == "hello world"
 
 
@@ -91,49 +91,49 @@ class TestCollections:
     """Test serialization and deserialization of collections."""
 
     def test_list_empty(self):
-        assert rjson.dumps([]) == "[]"
+        assert rjson.dumps_str([]) == "[]"
         assert rjson.loads("[]") == []
 
     def test_list_single(self):
-        assert rjson.dumps([1]) == "[1]"
+        assert rjson.dumps_str([1]) == "[1]"
         assert rjson.loads("[1]") == [1]
 
     def test_list_multiple(self):
-        assert rjson.dumps([1, 2, 3]) == "[1,2,3]"
+        assert rjson.dumps_str([1, 2, 3]) == "[1,2,3]"
         assert rjson.loads("[1,2,3]") == [1, 2, 3]
 
     def test_list_mixed_types(self):
         data = [1, "two", 3.0, None, True]
-        serialized = rjson.dumps(data)
+        serialized = rjson.dumps_str(data)
         assert rjson.loads(serialized) == data
 
     def test_tuple_empty(self):
         # Tuples serialize as arrays
-        assert rjson.dumps(()) == "[]"
+        assert rjson.dumps_str(()) == "[]"
 
     def test_tuple_single(self):
-        assert rjson.dumps((1,)) == "[1]"
+        assert rjson.dumps_str((1,)) == "[1]"
 
     def test_tuple_multiple(self):
-        assert rjson.dumps((1, 2, 3)) == "[1,2,3]"
+        assert rjson.dumps_str((1, 2, 3)) == "[1,2,3]"
 
     def test_dict_empty(self):
-        assert rjson.dumps({}) == "{}"
+        assert rjson.dumps_str({}) == "{}"
         assert rjson.loads("{}") == {}
 
     def test_dict_single(self):
-        result = rjson.dumps({"a": 1})
+        result = rjson.dumps_str({"a": 1})
         assert result == '{"a":1}'
         assert rjson.loads(result) == {"a": 1}
 
     def test_dict_multiple(self):
         data = {"a": 1, "b": 2, "c": 3}
-        serialized = rjson.dumps(data)
+        serialized = rjson.dumps_str(data)
         assert rjson.loads(serialized) == data
 
     def test_dict_mixed_values(self):
         data = {"int": 1, "str": "hello", "float": 3.14, "none": None, "bool": True}
-        serialized = rjson.dumps(data)
+        serialized = rjson.dumps_str(data)
         assert rjson.loads(serialized) == data
 
 
@@ -142,12 +142,12 @@ class TestNestedStructures:
 
     def test_nested_lists(self):
         data = [[1, 2], [3, 4], [5, 6]]
-        serialized = rjson.dumps(data)
+        serialized = rjson.dumps_str(data)
         assert rjson.loads(serialized) == data
 
     def test_nested_dicts(self):
         data = {"outer": {"inner": {"deep": "value"}}}
-        serialized = rjson.dumps(data)
+        serialized = rjson.dumps_str(data)
         assert rjson.loads(serialized) == data
 
     def test_mixed_nesting(self):
@@ -158,7 +158,7 @@ class TestNestedStructures:
             ],
             "count": 2,
         }
-        serialized = rjson.dumps(data)
+        serialized = rjson.dumps_str(data)
         assert rjson.loads(serialized) == data
 
     def test_deep_nesting(self):
@@ -169,7 +169,7 @@ class TestNestedStructures:
             current["nested"] = {"level": i}
             current = current["nested"]
 
-        serialized = rjson.dumps(data)
+        serialized = rjson.dumps_str(data)
         assert rjson.loads(serialized) == data
 
 
@@ -178,28 +178,28 @@ class TestUnicode:
 
     def test_unicode_simple(self):
         data = "hello 世界"
-        serialized = rjson.dumps(data)
+        serialized = rjson.dumps_str(data)
         assert rjson.loads(serialized) == data
 
     def test_unicode_emoji(self):
         data = "Hello 👋 🌍"
-        serialized = rjson.dumps(data)
+        serialized = rjson.dumps_str(data)
         assert rjson.loads(serialized) == data
 
     def test_unicode_various(self):
         data = {"русский": "текст", "中文": "文本", "العربية": "نص"}
-        serialized = rjson.dumps(data)
+        serialized = rjson.dumps_str(data)
         assert rjson.loads(serialized) == data
 
     def test_escaped_characters(self):
         data = 'quote" backslash\\ newline\n tab\t'
-        serialized = rjson.dumps(data)
+        serialized = rjson.dumps_str(data)
         assert rjson.loads(serialized) == data
 
     def test_control_characters(self):
         # Test various control characters
         data = "line1\nline2\rline3\tcolumn"
-        serialized = rjson.dumps(data)
+        serialized = rjson.dumps_str(data)
         assert rjson.loads(serialized) == data
 
 
@@ -208,36 +208,36 @@ class TestEdgeCases:
 
     def test_integer_cache_boundary_negative(self):
         # Test integer caching boundary at -256
-        assert rjson.dumps(-256) == "-256"
-        assert rjson.dumps(-257) == "-257"
+        assert rjson.dumps_str(-256) == "-256"
+        assert rjson.dumps_str(-257) == "-257"
         assert rjson.loads("-256") == -256
         assert rjson.loads("-257") == -257
 
     def test_integer_cache_boundary_positive(self):
         # Test integer caching boundary at 256
-        assert rjson.dumps(256) == "256"
-        assert rjson.dumps(257) == "257"
+        assert rjson.dumps_str(256) == "256"
+        assert rjson.dumps_str(257) == "257"
         assert rjson.loads("256") == 256
         assert rjson.loads("257") == 257
 
     def test_empty_string_key(self):
         data = {"": "empty key"}
-        serialized = rjson.dumps(data)
+        serialized = rjson.dumps_str(data)
         assert rjson.loads(serialized) == data
 
     def test_string_with_quotes(self):
         data = 'He said "hello"'
-        serialized = rjson.dumps(data)
+        serialized = rjson.dumps_str(data)
         assert rjson.loads(serialized) == data
 
     def test_list_of_empty_lists(self):
         data = [[], [], []]
-        serialized = rjson.dumps(data)
+        serialized = rjson.dumps_str(data)
         assert rjson.loads(serialized) == data
 
     def test_dict_of_empty_dicts(self):
         data = {"a": {}, "b": {}, "c": {}}
-        serialized = rjson.dumps(data)
+        serialized = rjson.dumps_str(data)
         assert rjson.loads(serialized) == data
 
 
@@ -246,26 +246,26 @@ class TestErrorHandling:
 
     def test_dumps_nan_raises(self):
         with pytest.raises(ValueError, match="Cannot serialize non-finite float"):
-            rjson.dumps(float("nan"))
+            rjson.dumps_str(float("nan"))
 
     def test_dumps_infinity_raises(self):
         with pytest.raises(ValueError, match="Cannot serialize non-finite float"):
-            rjson.dumps(float("inf"))
+            rjson.dumps_str(float("inf"))
 
     def test_dumps_negative_infinity_raises(self):
         with pytest.raises(ValueError, match="Cannot serialize non-finite float"):
-            rjson.dumps(float("-inf"))
+            rjson.dumps_str(float("-inf"))
 
     def test_dumps_unsupported_type_raises(self):
         class CustomClass:
             pass
 
         with pytest.raises(ValueError, match="Unsupported Python type"):
-            rjson.dumps(CustomClass())
+            rjson.dumps_str(CustomClass())
 
     def test_dumps_dict_non_string_key_raises(self):
         with pytest.raises(ValueError, match="keys must be strings"):
-            rjson.dumps({1: "value"})
+            rjson.dumps_str({1: "value"})
 
     def test_loads_invalid_json_raises(self):
         with pytest.raises(ValueError, match="JSON parsing error"):
@@ -309,9 +309,9 @@ class TestErrorHandling:
         # str output passes surrogates through like
         # json.dumps(ensure_ascii=False); bytes output cannot encode them.
         import json
-        assert rjson.dumps(obj) == json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+        assert rjson.dumps_str(obj) == json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
         with pytest.raises(UnicodeEncodeError):
-            rjson.dumps_bytes(obj)
+            rjson.dumps(obj)
 
 
 class TestStringLayout:
@@ -321,13 +321,13 @@ class TestStringLayout:
     @pytest.mark.parametrize("n", [0, 1, 7, 8, 15, 16, 31, 32, 33, 100, 1000])
     def test_ascii_lengths(self, n):
         s = "".join(chr(97 + i % 26) for i in range(n))
-        assert rjson.dumps(s) == '"' + s + '"'
-        assert rjson.dumps({s: [s, s]}) == '{"%s":["%s","%s"]}' % (s, s, s)
+        assert rjson.dumps_str(s) == '"' + s + '"'
+        assert rjson.dumps_str({s: [s, s]}) == '{"%s":["%s","%s"]}' % (s, s, s)
 
     def test_non_ascii_kinds(self):
         for s in ["caf\u00e9", "\u65e5\u672c", "\U0001F600", "a\u00e9\u65e5\U0001F600"]:
-            assert rjson.loads(rjson.dumps(s)) == s
-            assert rjson.loads(rjson.dumps([s, {s: s}])) == [s, {s: s}]
+            assert rjson.loads(rjson.dumps_str(s)) == s
+            assert rjson.loads(rjson.dumps_str([s, {s: s}])) == [s, {s: s}]
 
 
 class TestRoundTrip:
@@ -335,7 +335,7 @@ class TestRoundTrip:
 
     def test_roundtrip_simple_dict(self):
         original = {"name": "test", "value": 42, "active": True}
-        assert rjson.loads(rjson.dumps(original)) == original
+        assert rjson.loads(rjson.dumps_str(original)) == original
 
     def test_roundtrip_complex_nested(self):
         original = {
@@ -345,7 +345,7 @@ class TestRoundTrip:
             ],
             "metadata": {"count": 2, "timestamp": None},
         }
-        assert rjson.loads(rjson.dumps(original)) == original
+        assert rjson.loads(rjson.dumps_str(original)) == original
 
     def test_roundtrip_all_types(self):
         original = {
@@ -358,7 +358,7 @@ class TestRoundTrip:
             "list": [1, 2, 3],
             "dict": {"nested": "value"},
         }
-        assert rjson.loads(rjson.dumps(original)) == original
+        assert rjson.loads(rjson.dumps_str(original)) == original
 
 
 class TestPerformance:
@@ -367,13 +367,13 @@ class TestPerformance:
     def test_large_list(self):
         # Test with reasonably large list
         data = list(range(10000))
-        serialized = rjson.dumps(data)
+        serialized = rjson.dumps_str(data)
         assert len(rjson.loads(serialized)) == 10000
 
     def test_large_dict(self):
         # Test with reasonably large dict
         data = {f"key_{i}": i for i in range(1000)}
-        serialized = rjson.dumps(data)
+        serialized = rjson.dumps_str(data)
         assert len(rjson.loads(serialized)) == 1000
 
     def test_deeply_nested_list(self):
@@ -385,7 +385,7 @@ class TestPerformance:
             current.append(new_list)
             current = new_list
 
-        serialized = rjson.dumps(data)
+        serialized = rjson.dumps_str(data)
         result = rjson.loads(serialized)
         assert isinstance(result, list)
 
@@ -397,16 +397,16 @@ class TestCompatibility:
         import json
 
         for value in [None, True, False, 0, 42, -10, 3.14, "hello"]:
-            assert rjson.dumps(value) == json.dumps(value, separators=(",", ":"))
+            assert rjson.dumps_str(value) == json.dumps(value, separators=(",", ":"))
 
     def test_output_matches_json_collections(self):
         import json
 
         data = [1, 2, 3]
-        assert rjson.dumps(data) == json.dumps(data, separators=(",", ":"))
+        assert rjson.dumps_str(data) == json.dumps(data, separators=(",", ":"))
 
         data = {"a": 1, "b": 2}
-        rjson_result = rjson.dumps(data)
+        rjson_result = rjson.dumps_str(data)
         json_result = json.dumps(data, separators=(",", ":"), sort_keys=True)
         # Note: dict order may differ, so we parse and compare
         assert rjson.loads(rjson_result) == json.loads(json_result)

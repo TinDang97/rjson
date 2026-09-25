@@ -4,7 +4,7 @@ name: Perf gate
 # labelled `perf` and on manual dispatch. Builds base and head (plain release,
 # no PGO) in the same job, runs benches/corpus_benchmark.py for both,
 # interleaved, and fails if any rjson/orjson geomean (loads, dumps,
-# dumps_bytes) is more than 5% worse than base. The ratio to orjson, timed in
+# dumps_str) is more than 5% worse than base. The ratio to orjson, timed in
 # the same process, cancels most runner speed drift.
 
 on:

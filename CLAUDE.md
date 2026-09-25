@@ -4,8 +4,9 @@
 
 **rjson** is a JSON library for Python written in Rust directly against the CPython C API (PyO3 is used only for module setup and the entry-point trampoline). Goal: beat orjson on every metric while staying correct on every supported CPython version.
 
-- API: `loads(str | bytes | bytearray | memoryview)`, `dumps(obj) -> str`, `dumps_bytes(obj) -> bytes`
-- Status: experimental; APIs may change (open decision: whether `dumps` should return `bytes`)
+- API: `loads(str | bytes | bytearray | memoryview)`, `dumps(obj) -> bytes` (like orjson), `dumps_str(obj) -> str`, `dumps_bytes` = alias of `dumps`
+- Supported: CPython 3.10-3.14 (`requires-python >=3.10`), GIL builds only
+- Status: experimental; APIs may change before 1.0
 - Current numbers, remaining gaps and roadmap: **`docs/PERFORMANCE_REVIEW.md`** (keep it updated when performance changes)
 
 ## Repository Structure
@@ -13,10 +14,10 @@
 ```
 src/
   lib.rs      # module definition only
-  entry.rs    # raw METH_O entry points (loads, dumps, dumps_bytes) + registration
+  entry.rs    # raw METH_O entry points (loads, dumps, dumps_str, dumps_bytes alias) + registration
   parser.rs   # loads: single-pass parser building PyObjects directly
   lemire.rs   # Eisel-Lemire float conversion (vendored from fast-float, MIT/Apache)
-  ser.rs      # dumps/dumps_bytes: direct serializer writing into the result object
+  ser.rs      # dumps (bytes) / dumps_str (str): direct serializer writing into the result object
   compat.rs   # version-portable str accessors (3.14: own bitfield reader + import self-test)
               # and extern decls of private-but-exported C-API symbols
 build.rs      # pyo3_build_config::use_pyo3_cfgs() -> Py_3_10/Py_3_12... cfgs
@@ -24,6 +25,7 @@ tests/        # test_rjson.py (general + regressions), test_dumps.py (serializer
 benches/corpus_benchmark.py   # reference benchmark vs orjson (ratio, same process; --output-json)
 benches/fetch_corpus.sh       # download the corpora (sha256-pinned) into benches/data/
 benches/perf_gate.py          # compare base/head benchmark runs, fail on >5% geomean regression
+benches/make_charts.py        # README charts (docs/img/*.svg) + table from a --json --output-json run
 scripts/build_pgo.sh, scripts/pgo_train.py   # PGO wheel build; training is synthetic, disjoint from the benchmark
 .github/workflows/            # ci.yml (clippy + tests), wheels.yml (PGO wheels), perf.yml (perf gate, label `perf`)
 docs/PERFORMANCE_REVIEW.md    # review findings, results, ranked roadmap
@@ -74,7 +76,7 @@ docs/PERFORMANCE_REVIEW.md    # review findings, results, ranked roadmap
 uv venv .venv -p 3.11 && . .venv/bin/activate
 uv pip install maturin orjson pytest
 maturin develop --release          # build + install into the venv
-python -m pytest tests -q          # must pass on 3.9-3.14 (CI runs all of them)
+python -m pytest tests -q          # must pass on 3.10-3.14 (CI runs all of them)
 benches/fetch_corpus.sh            # corpora -> benches/data/ (default --data)
 python benches/corpus_benchmark.py
 scripts/build_pgo.sh python3.11 python3.13   # PGO wheels -> target/wheels/

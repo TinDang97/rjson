@@ -1,4 +1,4 @@
-"""Regression tests for the dumps / dumps_bytes serializer.
+"""Regression tests for the dumps (-> bytes) / dumps_str (-> str) serializer.
 
 The reference is the stdlib: ``json.dumps(obj, ensure_ascii=False,
 separators=(",", ":"))``. Floats are excluded from those comparisons because
@@ -20,8 +20,8 @@ def ref(obj):
 
 def both(obj):
     """Serialize with both entry points and check they agree."""
-    s = rjson.dumps(obj)
-    b = rjson.dumps_bytes(obj)
+    s = rjson.dumps_str(obj)
+    b = rjson.dumps(obj)
     assert isinstance(s, str)
     assert isinstance(b, bytes)
     assert s.encode("utf-8") == b
@@ -30,6 +30,20 @@ def both(obj):
 
 ALPHABET = ["a", " ", '"', "\\", "\n", "\t", "\r", "\b", "\f", "\x00", "\x01", "\x1f", "\x7f",
             "/", "é", "ÿ", "Ā", "日", "￿", "😀", "\U0010ffff"]
+
+
+class TestApi:
+    def test_dumps_returns_bytes(self):
+        assert rjson.dumps({"a": [1, "é"]}) == '{"a":[1,"é"]}'.encode()
+        assert isinstance(rjson.dumps(None), bytes)
+
+    def test_dumps_str_returns_str(self):
+        assert rjson.dumps_str({"a": [1, "é"]}) == '{"a":[1,"é"]}'
+
+    def test_dumps_bytes_is_alias_of_dumps(self):
+        obj = {"k": [1, 2.5, "x", None, True]}
+        assert rjson.dumps_bytes(obj) == rjson.dumps(obj)
+        assert isinstance(rjson.dumps_bytes(obj), bytes)
 
 
 class TestStrings:
@@ -54,7 +68,7 @@ class TestStrings:
         for tail in ("", "\n" * 10, "\x01" * 70000, '"' * 200000):
             for body in (plain, "\xe9" * 150000, "\u65e5" * 100000, "b\\" * 100000):
                 s = body + tail
-                for f in (rjson.dumps, rjson.dumps_bytes):
+                for f in (rjson.dumps_str, rjson.dumps):
                     f(plain)  # size hint = len(plain)
                 assert both(s) == ref(s)
                 assert both([plain, s]) == ref([plain, s])
@@ -102,19 +116,19 @@ class TestStrings:
 
     def test_str_result_kinds(self):
         for obj in (["a", "é"], ["a", "日"], ["a", "😀"], ["é", "日", "😀"], ["plain"]):
-            s = rjson.dumps(obj)
+            s = rjson.dumps_str(obj)
             assert s == ref(obj)
             assert max(map(ord, s)) == max(map(ord, ref(obj)))
 
     def test_lone_surrogates(self):
         # str output behaves like json.dumps(ensure_ascii=False) ...
         for s in ("\ud800", "a\udfffb", "\ud800\n"):
-            assert rjson.dumps([s]) == ref([s])
+            assert rjson.dumps_str([s]) == ref([s])
         # ... bytes output cannot encode them.
         with pytest.raises(UnicodeEncodeError):
-            rjson.dumps_bytes(["a\ud800b"])
+            rjson.dumps(["a\ud800b"])
         with pytest.raises(UnicodeEncodeError):
-            rjson.dumps_bytes({"\ud800": 1})
+            rjson.dumps({"\ud800": 1})
 
 
 class TestNumbers:
@@ -142,9 +156,9 @@ class TestNumbers:
         if not hasattr(sys, "get_int_max_str_digits"):
             pytest.skip("no int max str digits limit")
         with pytest.raises(ValueError):
-            rjson.dumps(10**5000)
+            rjson.dumps_str(10**5000)
         with pytest.raises(ValueError):
-            rjson.dumps_bytes([10**5000])
+            rjson.dumps([10**5000])
 
     def test_float_format(self):
         vals = [0.0, -0.0, 1.0, 0.1, 1.5, 123456789.0, 1e16, 1e-7, 5e-324, 1.7976931348623157e308]
@@ -154,7 +168,7 @@ class TestNumbers:
 
     @pytest.mark.parametrize("v", [float("nan"), float("inf"), float("-inf")])
     def test_non_finite(self, v):
-        for f in (rjson.dumps, rjson.dumps_bytes):
+        for f in (rjson.dumps_str, rjson.dumps):
             with pytest.raises(ValueError, match="non-finite"):
                 f([1.0, v])
 
@@ -210,7 +224,7 @@ class TestListScalarRun:
 
     @pytest.mark.parametrize("v", [float("nan"), float("inf"), float("-inf")])
     def test_non_finite_late(self, v):
-        for f in (rjson.dumps, rjson.dumps_bytes):
+        for f in (rjson.dumps_str, rjson.dumps):
             with pytest.raises(ValueError, match="non-finite"):
                 f([1.0] * 1000 + [v])
             with pytest.raises(ValueError, match="non-finite"):
@@ -218,7 +232,7 @@ class TestListScalarRun:
 
     def test_growth_inside_run(self):
         # Output far larger than the size hint of the previous call.
-        rjson.dumps([])
+        rjson.dumps_str([])
         for obj in ([-(2**59)] * 20000, [1.2345678901234567e-300] * 20000, list(range(10**6))):
             assert json.loads(both(obj)) == obj
 
@@ -253,7 +267,7 @@ class TestDictLayouts:
         # only has str keys left must serialize in order.
         d = {"a": 1, 2: "b", "c": 3}
         with pytest.raises(ValueError, match="keys must be strings"):
-            rjson.dumps(d)
+            rjson.dumps_str(d)
         del d[2]
         assert both(d) == ref(d)
 
@@ -314,7 +328,7 @@ class TestSubclasses:
         assert both(obj) == ref(obj)
 
     def test_unsupported(self):
-        for f in (rjson.dumps, rjson.dumps_bytes):
+        for f in (rjson.dumps_str, rjson.dumps):
             with pytest.raises(ValueError, match="Unsupported Python type"):
                 f([1, {"a": object()}])
             with pytest.raises(ValueError, match="keys must be strings"):
@@ -327,7 +341,7 @@ class TestRecursion:
         a.append(a)
         d = {}
         d["d"] = d
-        for f in (rjson.dumps, rjson.dumps_bytes):
+        for f in (rjson.dumps_str, rjson.dumps):
             with pytest.raises(ValueError, match="depth"):
                 f(a)
             with pytest.raises(ValueError, match="depth"):
@@ -341,9 +355,9 @@ class TestRecursion:
             return x
         assert both(nest(253)) == "[" * 254 + "]" * 254
         with pytest.raises(ValueError):
-            rjson.dumps(nest(254))
+            rjson.dumps_str(nest(254))
         with pytest.raises(ValueError):
-            rjson.dumps(nest(200000))
+            rjson.dumps_str(nest(200000))
 
 
 class TestOutputBuffer:
@@ -368,9 +382,9 @@ def test_large_output_does_not_refault_every_call():
 
     s = "\U0001f600" * 400000  # 1.6 MB of UTF-8
     for _ in range(5):
-        rjson.dumps_bytes(s)
+        rjson.dumps(s)
     before = resource.getrusage(resource.RUSAGE_SELF).ru_minflt
     for _ in range(20):
-        assert len(rjson.dumps_bytes(s)) == 1600002
+        assert len(rjson.dumps(s)) == 1600002
     faults = (resource.getrusage(resource.RUSAGE_SELF).ru_minflt - before) / 20
     assert faults < 100  # was ~390 (one per 4 KiB page)

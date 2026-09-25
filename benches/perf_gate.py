@@ -7,7 +7,7 @@ comparison uses the per-case median ratio across runs::
     python benches/perf_gate.py --base b1.json b2.json b3.json \\
                                 --head h1.json h2.json h3.json [--threshold 0.05]
 
-For every op (loads, dumps, dumps_bytes) the geomean of the rjson/orjson ratio
+For every op (loads, dumps, dumps_str) the geomean of the rjson/orjson ratio
 is computed over the cases present on both sides. Comparing ratios (not raw
 times) cancels most of the runner's speed drift, since orjson is timed in the
 same process. Exits 1 if any op's geomean got more than ``--threshold`` worse

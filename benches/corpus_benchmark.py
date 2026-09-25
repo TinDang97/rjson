@@ -11,8 +11,9 @@ Usage:
                                        [--json] [--output-json PATH]
 
 Reports the median time per call and the ratio rjson/orjson (< 1.0 means
-rjson is faster). For dumps, ``rjson`` is ``rjson.dumps`` (-> str) and
-``rjson_b`` is ``rjson.dumps_bytes`` (-> bytes, the same type orjson returns).
+rjson is faster). ``dumps`` compares ``rjson.dumps`` with ``orjson.dumps``
+(both -> bytes); the extra ``str`` row times ``rjson.dumps_str`` (-> str)
+against the same ``orjson.dumps`` timing.
 
 ``--json`` also times the stdlib ``json`` module. ``--output-json PATH``
 additionally writes the per-case times, ratios and geomeans as JSON (used by
@@ -104,10 +105,10 @@ def main():
     libs = [("rjson", rjson.loads, rjson.dumps), ("orjson", orjson.loads, orjson.dumps)]
     if args.json:
         libs.append(("json", json.loads, json.dumps))
-    dumps_bytes = getattr(rjson, "dumps_bytes", None)
+    dumps_str = getattr(rjson, "dumps_str", None)
 
     print(f"{'case':18} {'op':6} " + " ".join(f"{n:>10}" for n, _, _ in libs) + "   rjson/orjson")
-    geo = {"loads": [], "dumps": [], "dumps_bytes": []}
+    geo = {"loads": [], "dumps": [], "dumps_str": []}
     rows = []  # machine-readable results for --output-json
     for name, (obj, text) in cases.items():
         if args.only and args.only not in name:
@@ -124,13 +125,13 @@ def main():
             rows.append({"case": name, "op": op, "times": {n: t for (n, _, _), t in zip(libs, times)}, "ratio": ratio})
             flag = "WIN " if ratio < 1 else "    "
             print(f"{name:18} {op:6} " + " ".join(f"{fmt(t):>10}" for t in times) + f"   {ratio:5.2f}x {flag}")
-            if op == "dumps" and dumps_bytes is not None:
-                tb = bench(dumps_bytes, obj, args.repeat)
+            if op == "dumps" and dumps_str is not None:
+                tb = bench(dumps_str, obj, args.repeat)
                 rb = tb / times[1]
-                geo["dumps_bytes"].append(rb)
-                rows.append({"case": name, "op": "dumps_bytes", "times": {"rjson": tb, "orjson": times[1]}, "ratio": rb})
+                geo["dumps_str"].append(rb)
+                rows.append({"case": name, "op": "dumps_str", "times": {"rjson": tb, "orjson": times[1]}, "ratio": rb})
                 flag = "WIN " if rb < 1 else "    "
-                print(f"{name:18} {'bytes':6} {fmt(tb):>10} {'':>10}" + " " * (11 * (len(libs) - 2)) + f"   {rb:5.2f}x {flag}")
+                print(f"{name:18} {'str':6} {fmt(tb):>10} {'':>10}" + " " * (11 * (len(libs) - 2)) + f"   {rb:5.2f}x {flag}")
     geomeans = {op: statistics.geometric_mean(rs) for op, rs in geo.items() if rs}
     for op, g in geomeans.items():
         print(f"geomean rjson/orjson {op}: {g:.2f}x")
