@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="412" viewBox="0 0 880 412" role="img" aria-label="rjson speed relative to orjson per benchmark case, loads and dumps">
+<rect x="0.5" y="0.5" width="879" height="411" rx="12" fill="#fcfcfb" stroke="rgba(11,11,11,0.10)"/>
+<text x="24.0" y="34.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="15" font-weight="600" fill="#0b0b0b" text-anchor="start">Speed relative to orjson, per case (higher is better)</text>
+<text x="24.0" y="92.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="13" font-weight="400" fill="#52514e" text-anchor="start">twitter.json</text>
+<text x="24.0" y="120.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="13" font-weight="400" fill="#52514e" text-anchor="start">citm_catalog.json</text>
+<text x="24.0" y="148.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="13" font-weight="400" fill="#52514e" text-anchor="start">canada.json</text>
+<text x="24.0" y="176.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="13" font-weight="400" fill="#52514e" text-anchor="start">github.json</text>
+<text x="24.0" y="204.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="13" font-weight="400" fill="#52514e" text-anchor="start">small dict</text>
+<text x="24.0" y="232.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="13" font-weight="400" fill="#52514e" text-anchor="start">records</text>
+<text x="24.0" y="260.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="13" font-weight="400" fill="#52514e" text-anchor="start">unicode strings</text>
+<text x="24.0" y="288.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="13" font-weight="400" fill="#52514e" text-anchor="start">escaped strings</text>
+<text x="24.0" y="316.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="13" font-weight="400" fill="#52514e" text-anchor="start">int array</text>
+<text x="24.0" y="344.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="13" font-weight="400" fill="#52514e" text-anchor="start">float array</text>
+<text x="152.0" y="60.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="13" font-weight="600" fill="#0b0b0b" text-anchor="start">loads</text>
+<line x1="152.0" y1="70" x2="152.0" y2="356" stroke="#a3a29b" stroke-width="1"/>
+<text x="152.0" y="372.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="11" font-weight="400" fill="#6f6d68" text-anchor="middle" style="font-variant-numeric: tabular-nums">0×</text>
+<line x1="200.0" y1="70" x2="200.0" y2="356" stroke="#e1e0d9" stroke-width="1"/>
+<line x1="248.0" y1="70" x2="248.0" y2="356" stroke="#a3a29b" stroke-width="1"/>
+<text x="248.0" y="372.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="11" font-weight="400" fill="#6f6d68" text-anchor="middle" style="font-variant-numeric: tabular-nums">1×</text>
+<line x1="296.0" y1="70" x2="296.0" y2="356" stroke="#e1e0d9" stroke-width="1"/>
+<line x1="344.0" y1="70" x2="344.0" y2="356" stroke="#e1e0d9" stroke-width="1"/>
+<text x="344.0" y="372.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="11" font-weight="400" fill="#6f6d68" text-anchor="middle" style="font-variant-numeric: tabular-nums">2×</text>
+<line x1="392.0" y1="70" x2="392.0" y2="356" stroke="#e1e0d9" stroke-width="1"/>
+<line x1="440.0" y1="70" x2="440.0" y2="356" stroke="#e1e0d9" stroke-width="1"/>
+<text x="440.0" y="372.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="11" font-weight="400" fill="#6f6d68" text-anchor="middle" style="font-variant-numeric: tabular-nums">3×</text>
+<text x="252.0" y="66.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="11" font-weight="400" fill="#6f6d68" text-anchor="start">orjson</text>
+<path d="M152.0,80.0 H265.2 Q269.2,80.0 269.2,84.0 V92.0 Q269.2,96.0 265.2,96.0 H152.0 Z" fill="#2a78d6"/>
+<text x="275.2" y="92.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#52514e" text-anchor="start" style="font-variant-numeric: tabular-nums">1.22×</text>
+<path d="M152.0,108.0 H256.1 Q260.1,108.0 260.1,112.0 V120.0 Q260.1,124.0 256.1,124.0 H152.0 Z" fill="#2a78d6"/>
+<text x="266.1" y="120.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#52514e" text-anchor="start" style="font-variant-numeric: tabular-nums">1.13×</text>
+<path d="M152.0,136.0 H250.9 Q254.9,136.0 254.9,140.0 V148.0 Q254.9,152.0 250.9,152.0 H152.0 Z" fill="#2a78d6"/>
+<text x="260.9" y="148.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#52514e" text-anchor="start" style="font-variant-numeric: tabular-nums">1.07×</text>
+<path d="M152.0,164.0 H282.8 Q286.8,164.0 286.8,168.0 V176.0 Q286.8,180.0 282.8,180.0 H152.0 Z" fill="#2a78d6"/>
+<text x="292.8" y="176.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#52514e" text-anchor="start" style="font-variant-numeric: tabular-nums">1.40×</text>
+<path d="M152.0,192.0 H280.7 Q284.7,192.0 284.7,196.0 V204.0 Q284.7,208.0 280.7,208.0 H152.0 Z" fill="#2a78d6"/>
+<text x="290.7" y="204.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#52514e" text-anchor="start" style="font-variant-numeric: tabular-nums">1.38×</text>
+<path d="M152.0,220.0 H262.8 Q266.8,220.0 266.8,224.0 V232.0 Q266.8,236.0 262.8,236.0 H152.0 Z" fill="#2a78d6"/>
+<text x="272.8" y="232.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#52514e" text-anchor="start" style="font-variant-numeric: tabular-nums">1.20×</text>
+<path d="M152.0,248.0 H272.2 Q276.2,248.0 276.2,252.0 V260.0 Q276.2,264.0 272.2,264.0 H152.0 Z" fill="#2a78d6"/>
+<text x="282.2" y="260.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#52514e" text-anchor="start" style="font-variant-numeric: tabular-nums">1.29×</text>
+<path d="M152.0,276.0 H254.8 Q258.8,276.0 258.8,280.0 V288.0 Q258.8,292.0 254.8,292.0 H152.0 Z" fill="#2a78d6"/>
+<text x="264.8" y="288.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#52514e" text-anchor="start" style="font-variant-numeric: tabular-nums">1.11×</text>
+<path d="M152.0,304.0 H254.0 Q258.0,304.0 258.0,308.0 V316.0 Q258.0,320.0 254.0,320.0 H152.0 Z" fill="#2a78d6"/>
+<text x="264.0" y="316.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#52514e" text-anchor="start" style="font-variant-numeric: tabular-nums">1.10×</text>
+<path d="M152.0,332.0 H254.8 Q258.8,332.0 258.8,336.0 V344.0 Q258.8,348.0 254.8,348.0 H152.0 Z" fill="#2a78d6"/>
+<text x="264.8" y="344.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#52514e" text-anchor="start" style="font-variant-numeric: tabular-nums">1.11×</text>
+<text x="524.0" y="60.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="13" font-weight="600" fill="#0b0b0b" text-anchor="start">dumps</text>
+<line x1="524.0" y1="70" x2="524.0" y2="356" stroke="#a3a29b" stroke-width="1"/>
+<text x="524.0" y="372.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="11" font-weight="400" fill="#6f6d68" text-anchor="middle" style="font-variant-numeric: tabular-nums">0×</text>
+<line x1="572.0" y1="70" x2="572.0" y2="356" stroke="#e1e0d9" stroke-width="1"/>
+<line x1="620.0" y1="70" x2="620.0" y2="356" stroke="#a3a29b" stroke-width="1"/>
+<text x="620.0" y="372.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="11" font-weight="400" fill="#6f6d68" text-anchor="middle" style="font-variant-numeric: tabular-nums">1×</text>
+<line x1="668.0" y1="70" x2="668.0" y2="356" stroke="#e1e0d9" stroke-width="1"/>
+<line x1="716.0" y1="70" x2="716.0" y2="356" stroke="#e1e0d9" stroke-width="1"/>
+<text x="716.0" y="372.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="11" font-weight="400" fill="#6f6d68" text-anchor="middle" style="font-variant-numeric: tabular-nums">2×</text>
+<line x1="764.0" y1="70" x2="764.0" y2="356" stroke="#e1e0d9" stroke-width="1"/>
+<line x1="812.0" y1="70" x2="812.0" y2="356" stroke="#e1e0d9" stroke-width="1"/>
+<text x="812.0" y="372.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="11" font-weight="400" fill="#6f6d68" text-anchor="middle" style="font-variant-numeric: tabular-nums">3×</text>
+<text x="624.0" y="66.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="11" font-weight="400" fill="#6f6d68" text-anchor="start">orjson</text>
+<path d="M524.0,80.0 H662.8 Q666.8,80.0 666.8,84.0 V92.0 Q666.8,96.0 662.8,96.0 H524.0 Z" fill="#2a78d6"/>
+<text x="672.8" y="92.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#52514e" text-anchor="start" style="font-variant-numeric: tabular-nums">1.49×</text>
+<path d="M524.0,108.0 H639.6 Q643.6,108.0 643.6,112.0 V120.0 Q643.6,124.0 639.6,124.0 H524.0 Z" fill="#2a78d6"/>
+<text x="649.6" y="120.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#52514e" text-anchor="start" style="font-variant-numeric: tabular-nums">1.25×</text>
+<path d="M524.0,136.0 H633.8 Q637.8,136.0 637.8,140.0 V148.0 Q637.8,152.0 633.8,152.0 H524.0 Z" fill="#2a78d6"/>
+<text x="643.8" y="148.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#52514e" text-anchor="start" style="font-variant-numeric: tabular-nums">1.18×</text>
+<path d="M524.0,164.0 H688.7 Q692.7,164.0 692.7,168.0 V176.0 Q692.7,180.0 688.7,180.0 H524.0 Z" fill="#2a78d6"/>
+<text x="698.7" y="176.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#52514e" text-anchor="start" style="font-variant-numeric: tabular-nums">1.76×</text>
+<path d="M524.0,192.0 H648.9 Q652.9,192.0 652.9,196.0 V204.0 Q652.9,208.0 648.9,208.0 H524.0 Z" fill="#2a78d6"/>
+<text x="658.9" y="204.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#52514e" text-anchor="start" style="font-variant-numeric: tabular-nums">1.34×</text>
+<path d="M524.0,220.0 H663.8 Q667.8,220.0 667.8,224.0 V232.0 Q667.8,236.0 663.8,236.0 H524.0 Z" fill="#2a78d6"/>
+<text x="673.8" y="232.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#52514e" text-anchor="start" style="font-variant-numeric: tabular-nums">1.50×</text>
+<path d="M524.0,248.0 H617.3 Q621.3,248.0 621.3,252.0 V260.0 Q621.3,264.0 617.3,264.0 H524.0 Z" fill="#2a78d6"/>
+<text x="627.3" y="260.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#52514e" text-anchor="start" style="font-variant-numeric: tabular-nums">1.01×</text>
+<path d="M524.0,276.0 H766.8 Q770.8,276.0 770.8,280.0 V288.0 Q770.8,292.0 766.8,292.0 H524.0 Z" fill="#2a78d6"/>
+<text x="776.8" y="288.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#52514e" text-anchor="start" style="font-variant-numeric: tabular-nums">2.57×</text>
+<path d="M524.0,304.0 H629.1 Q633.1,304.0 633.1,308.0 V316.0 Q633.1,320.0 629.1,320.0 H524.0 Z" fill="#2a78d6"/>
+<text x="639.1" y="316.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#52514e" text-anchor="start" style="font-variant-numeric: tabular-nums">1.14×</text>
+<path d="M524.0,332.0 H642.8 Q646.8,332.0 646.8,336.0 V344.0 Q646.8,348.0 642.8,348.0 H524.0 Z" fill="#2a78d6"/>
+<text x="652.8" y="344.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#52514e" text-anchor="start" style="font-variant-numeric: tabular-nums">1.28×</text>
+<text x="24.0" y="396.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#6f6d68" text-anchor="start">Bar = orjson time ÷ rjson time; dumps returns bytes for both · median per call · CPython 3.13.12 · orjson 3.12.0 · x86_64</text>
+</svg>
