@@ -1,7 +1,7 @@
 # rjson integration examples
 
 Drop-in patterns for replacing `json`/`orjson` with rjson in service code. Each file is
-self-contained, typed (passes `mypy --strict` apart from rjson shipping no stubs yet) and
+self-contained, typed (passes `mypy --strict`; rjson ships type stubs) and
 runnable. `tests/test_examples.py` exercises all of them.
 
 | file | what it shows | run it |
