@@ -27,6 +27,7 @@ these today (see [`examples/`](../examples/)), and each is tracked as an issue.
 | Correct? | 0 mismatches. 565 tests, fuzzing against `json`, and output byte-identical to orjson. |
 | Memory? | Better on large `loads`: peak RSS 30–37% below orjson. Retained small results cost ~400 B instead of ~8 KB each. |
 | Safe for async services? | Yes, but each call blocks the event loop, and `to_thread` doesn't help. See [ASYNC.md](ASYNC.md). |
+| Compress / go binary? | Compress at the transport, and only payloads of a few KB and up. Use Arrow/Polars only for columnar data. See [Transfer size](#transfer-size-compression-and-binary-formats). |
 | Installable? | Not on PyPI yet. The planned distribution name is `pyrjson`; CI builds PGO wheels for Linux, macOS and Windows. |
 | Stable API? | No: 0.x, experimental. |
 
@@ -112,6 +113,94 @@ Memory side effects shared with orjson (the stdlib `json` has none of them):
 ### Performance fixes
 
 *Filled in from the performance pass on this branch.*
+
+## Transfer size: compression and binary formats
+
+Compression and binary formats are often suggested to "speed up JSON". Here is what they
+actually do, measured on CPython 3.13 with 200k flat records (24.2 MB of JSON;
+`rjson.dumps` 16.5 ms, `rjson.loads` 108 ms).
+
+### Compression makes the payload smaller, not faster to produce
+
+| codec | size | ratio | compress | decompress |
+|---|---|---|---|---|
+| lz4 | 4.1 MB | 5.9× | 22 ms | 7 ms |
+| zstd level 3 | 1.15 MB | 21× | 29 ms | 9 ms |
+| gzip level 6 | 2.4 MB | 10× | 112 ms | 30 ms |
+| brotli level 4 | 0.9 MB | 27× | 213 ms | 21 ms |
+
+Compression costs as much CPU as serialization, or more. It pays off only when the link is
+slower than the codec:
+
+- **zstd-3** saves 23 MB for 38 ms, so it wins below about 5 Gbit/s (internet, mobile,
+  cross-region).
+- **gzip-6** saves 21.8 MB for 142 ms, so it wins only below about 1.2 Gbit/s.
+- **Inside a data centre on 10 GbE or faster**, compression makes requests slower. Use lz4
+  or nothing.
+
+**Small payloads: don't compress.**
+
+| JSON size | zstd size | `rjson.dumps` | zstd compress + decompress |
+|---|---|---|---|
+| 89 B | 89 B (no gain) | 0.1 µs | 4.6 µs |
+| 881 B | 172 B | 1.0 µs | 8.4 µs |
+| 9 KB | 458 B | 4.7 µs | 15 µs |
+| 94 KB | 3 KB | 46 µs | 92 µs |
+
+A 1 KB HTTP response fits in one TCP packet, and the first round trip carries up to about
+14 KB, so compressing it saves no latency. Compress from a few KB up, or when you pay per
+stored byte at scale (Redis memory, Kafka retention). These synthetic records are
+repetitive, so real data compresses less. For floods of tiny similar messages, zstd with
+a trained dictionary is the right tool.
+
+Compression belongs in the transport, not in the JSON library:
+
+- **HTTP:** Starlette's `GZipMiddleware`, nginx or a CDN (browsers accept zstd and brotli).
+- **Kafka:** `compression.type=zstd` on the producer.
+- **Redis:** compress in the codec. [`examples/codec.py`](../examples/codec.py) supports
+  `Codec(compress="zstd")` with a 1 KB threshold, a decompression-bomb limit, and
+  compressed payloads recognized by the zstd frame magic, so mixed rollouts work.
+
+`rjson.dumps(..., compress=...)` would add nothing over `zstd.compress(rjson.dumps(x))`.
+
+### Binary formats don't help when the result is Python objects
+
+Round trip of the same 200k records:
+
+| format | size | encode | decode |
+|---|---|---|---|
+| **rjson (JSON)** | 24.2 MB | **16.5 ms** | **108 ms** |
+| ormsgpack | 18.3 MB | 35 ms | 120 ms |
+| msgpack | 18.3 MB | 86 ms | 146 ms |
+| Arrow IPC, from and back to dicts | 13.4 MB | 134 ms (`from_pylist`) + 1.4 ms | 0.01 ms + 126 ms (`to_pylist`) |
+
+Most of the decode time goes into creating Python objects (1.4 million of them here), not
+into parsing bytes. Every format that ends in dicts pays that cost, so a binary format
+only moves it around. Arrow is about twice as slow as JSON when you convert from and back
+to dicts.
+
+### Where Arrow wins: data that stays columnar
+
+Reading 24 MB of NDJSON:
+
+| reader | result | time |
+|---|---|---|
+| `rjson.loads` per line | `list[dict]` | 137 ms |
+| `pyarrow.json.read_json` | Arrow table | 40 ms |
+| `polars.read_ndjson` | DataFrame | 28 ms (then a group-by sum takes 2.2 ms) |
+
+For analytics, reading into columns and never creating dicts is about 5× faster. Once the
+data is in Arrow, passing it between processes costs almost nothing (reading an IPC
+message: 0.01 ms).
+
+### Which to use
+
+| situation | use |
+|---|---|
+| API responses, events, cache values consumed as objects | rjson |
+| the same, over slow or metered links, payloads of a few KB and up | rjson + zstd/brotli in the transport |
+| analytics / ETL over many records | Polars or pyarrow readers; Arrow IPC or Parquet between stages |
+| other languages must read it | JSON (universal), or Arrow for columnar data |
 
 ## Compatibility and migration
 

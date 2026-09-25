@@ -8,6 +8,11 @@ explicit type-hook layer on top of it:
 * An optional envelope ``{"schema": ..., "version": ..., "tagged": ..., "data": ...}`` so
   consumers can reject foreign payloads and upgrade old ones (rolling deploys, cache keys
   that outlive a release).
+* Optional zstd compression (``compress="zstd"``) for payloads above a size threshold.
+  Compressed payloads are recognized by the zstd frame magic, which no JSON document can
+  start with, so ``decode`` reads both forms and compression can be rolled out without a
+  coordinated deploy. Decompression is capped (``max_decompressed_size``) against
+  decompression bombs.
 * Round-tripping ``datetime``/``date``/``time``/``timedelta``, ``UUID``, ``Decimal``,
   ``set``/``frozenset``, ``bytes``, ``Enum`` members and dataclasses. Enum and dataclass
   types must be registered: the decoder never imports a class named by the payload
@@ -32,12 +37,25 @@ import dataclasses
 import datetime as dt
 import decimal
 import enum
+import importlib
 import json
 import uuid
 from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, Literal
 
 import rjson
+
+
+def _optional_module(name: str) -> Any:
+    try:
+        return importlib.import_module(name)
+    except ImportError:
+        return None
+
+
+# zstd backends: the standard library on Python 3.14+, else ``pip install zstandard``.
+_std_zstd: Any = _optional_module("compression.zstd")
+_zstandard: Any = _optional_module("zstandard")
 
 __all__ = [
     "TAG",
@@ -55,6 +73,8 @@ TAG = "$rjson"
 MAX_DEPTH = 254
 
 Buffer = bytes | bytearray | memoryview
+#: First four bytes of every zstd frame. JSON text cannot start with 0x28 ("(").
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 _ENVELOPE_KEYS = frozenset({"schema", "version", "tagged", "data"})
 
 
@@ -88,6 +108,16 @@ class Codec:
         envelope: Wrap payloads in the envelope. ``False`` produces bare JSON for
             interoperability with non-Python consumers; type hooks then must be off.
         type_hooks: Encode the extended types listed in the module docstring.
+        compress: ``"zstd"`` compresses encoded payloads of at least
+            ``compress_min_size`` bytes (needs Python 3.14+ or the ``zstandard`` package).
+            Worth it when bytes are expensive: Redis memory, cross-region Kafka, slow links.
+            JSON typically shrinks 10-20x, at a CPU cost comparable to ``rjson.dumps``
+            itself (see "Transfer size" in docs/PRODUCTION_READINESS.md).
+        compress_min_size: Payloads smaller than this stay plain JSON (small payloads
+            barely compress and the frame header costs ~10 bytes).
+        compress_level: zstd level; 1-3 are fast, higher levels trade CPU for size.
+        max_decompressed_size: Upper bound for a decompressed payload; larger ones raise
+            ``DecodeError`` instead of exhausting memory.
 
     Example:
         >>> codec = Codec(schema="user", version=1)
@@ -103,6 +133,10 @@ class Codec:
         migrations: Mapping[int, Callable[[Any], Any]] | None = None,
         envelope: bool = True,
         type_hooks: bool = True,
+        compress: Literal["zstd"] | None = None,
+        compress_min_size: int = 1024,
+        compress_level: int = 3,
+        max_decompressed_size: int = 64 * 1024 * 1024,
     ) -> None:
         if type_hooks and not envelope:
             raise ValueError("type_hooks require envelope=True (the envelope marks tagged data)")
@@ -113,6 +147,14 @@ class Codec:
         self.migrations = dict(migrations or {})
         self.envelope = envelope
         self.type_hooks = type_hooks
+        if compress not in (None, "zstd"):
+            raise ValueError(f"unsupported compression {compress!r} (use None or 'zstd')")
+        if compress is not None and _std_zstd is None and _zstandard is None:
+            raise ImportError("compress='zstd' needs Python 3.14+ or `pip install zstandard`")
+        self.compress = compress
+        self.compress_min_size = compress_min_size
+        self.compress_level = compress_level
+        self.max_decompressed_size = max_decompressed_size
         self._types: dict[str, type] = {}
         self._names: dict[type, str] = {}
 
@@ -159,6 +201,9 @@ class Codec:
                 non-string dict key (without type hooks), a lone surrogate, or nesting
                 deeper than 254 levels.
         """
+        return self._maybe_compress(self._encode_json(obj))
+
+    def _encode_json(self, obj: Any) -> bytes:
         if not self.envelope:
             return _dumps(obj)
         try:
@@ -168,6 +213,14 @@ class Codec:
             if not self.type_hooks or isinstance(exc, UnicodeEncodeError):
                 raise EncodeError(str(exc)) from exc
         return _dumps(self._wrap(self._to_json(obj, 0), tagged=True))
+
+    def _maybe_compress(self, raw: bytes) -> bytes:
+        if self.compress is None or len(raw) < self.compress_min_size:
+            return raw
+        if _std_zstd is not None:
+            return bytes(_std_zstd.compress(raw, level=self.compress_level))
+        assert _zstandard is not None  # checked in __init__
+        return bytes(_zstandard.ZstdCompressor(level=self.compress_level).compress(raw))
 
     def _wrap(self, data: Any, *, tagged: bool) -> dict[str, Any]:
         return {"schema": self.schema, "version": self.version, "tagged": tagged, "data": data}
@@ -245,7 +298,7 @@ class Codec:
         Raises:
             DecodeError: Invalid JSON or UTF-8, wrong schema, unknown version or type tag.
         """
-        doc = _loads(data)
+        doc = _loads(self._maybe_decompress(data))
         if not self.envelope:
             return doc
         # Extra keys are allowed so a later release can add headers (trace id, ...)
@@ -262,6 +315,33 @@ class Codec:
                 raise DecodeError("payload uses type tags but type_hooks=False")
             payload = self._from_json(payload)
         return self._migrate(payload, doc["version"])
+
+    def _maybe_decompress(self, data: Buffer | str) -> Buffer | str:
+        """Decompress zstd frames (recognized by magic); pass JSON through untouched."""
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            return data  # str input, or a wrong type that _loads reports
+        if isinstance(data, memoryview) and (data.ndim != 1 or data.itemsize != 1):
+            head = data.tobytes()[:4]  # rare layouts: correctness over a copy
+        else:
+            head = bytes(data[:4])
+        if head != ZSTD_MAGIC:
+            return data
+        limit = self.max_decompressed_size
+        try:
+            if _std_zstd is not None:
+                out = _std_zstd.ZstdDecompressor().decompress(bytes(data), max_length=limit + 1)
+            elif _zstandard is not None:
+                reader = _zstandard.ZstdDecompressor().stream_reader(bytes(data))
+                out = reader.read(limit + 1)
+            else:
+                raise DecodeError("zstd payload, but no zstd support (Python 3.14+ or zstandard)")
+        except DecodeError:
+            raise
+        except Exception as exc:  # zstd raises its own error types per backend
+            raise DecodeError(f"invalid zstd payload: {exc}") from exc
+        if len(out) > limit:
+            raise DecodeError(f"decompressed payload exceeds {limit} bytes")
+        return bytes(out)
 
     def _migrate(self, payload: Any, version: Any) -> Any:
         if type(version) is not int or version < 1 or version > self.version:
@@ -425,6 +505,13 @@ def _demo() -> None:
     print("stored bytes:", raw[:100], b"..." if len(raw) > 100 else b"")
     restored = codec.decode(memoryview(raw))
     print("round-trip equal:", restored == user)
+
+    if _std_zstd is not None or _zstandard is not None:
+        zcodec = Codec(schema="feed", compress="zstd")
+        feed = [{"id": i, "title": f"post {i}", "tags": ["news", "tech"]} for i in range(500)]
+        blob = zcodec.encode(feed)
+        print(f"zstd:            {len(rjson.dumps(feed))} B of JSON stored as {len(blob)} B")
+        print("zstd round-trip:", zcodec.decode(blob) == feed)
 
     plain = codec.encode({"hits": 3})  # plain JSON: fast path, "tagged": false
     print("plain payload:  ", plain)

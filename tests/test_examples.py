@@ -287,6 +287,79 @@ class TestCodec:
         assert "round-trip equal: True" in out
 
 
+HAS_ZSTD = codec_mod._std_zstd is not None or codec_mod._zstandard is not None
+needs_zstd = pytest.mark.skipif(not HAS_ZSTD, reason="needs Python 3.14+ or zstandard")
+
+
+class TestCodecCompression:
+    FEED = [{"id": i, "title": f"post {i}", "tags": ["news", "tech"]} for i in range(300)]
+
+    @needs_zstd
+    def test_large_payload_is_compressed_and_round_trips(self):
+        codec = make_codec(compress="zstd")
+        blob = codec.encode(self.FEED)
+        assert blob[:4] == codec_mod.ZSTD_MAGIC
+        assert len(blob) * 5 < len(make_codec().encode(self.FEED))
+        assert codec.decode(blob) == self.FEED
+        assert codec.decode(memoryview(blob)) == self.FEED
+        assert codec.decode(bytearray(blob)) == self.FEED
+
+    @needs_zstd
+    def test_small_payload_stays_plain_json(self):
+        codec = make_codec(compress="zstd")
+        blob = codec.encode({"hits": 3})
+        assert blob.startswith(b"{")
+        assert codec.decode(blob) == {"hits": 3}
+
+    @needs_zstd
+    def test_tagged_payload_is_compressed_too(self):
+        codec = make_codec(compress="zstd", compress_min_size=1)
+        order = Order(
+            uuid.UUID(int=7),
+            decimal.Decimal("1.10"),
+            Color.RED,
+            dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc),
+            ["a"],
+        )
+        blob = codec.encode(order)
+        assert blob[:4] == codec_mod.ZSTD_MAGIC
+        assert codec.decode(blob) == order
+
+    @needs_zstd
+    def test_mixed_rollout_both_directions(self):
+        # Consumers without compress= still read compressed payloads, and vice versa.
+        plain, zstd = make_codec(), make_codec(compress="zstd")
+        assert plain.decode(zstd.encode(self.FEED)) == self.FEED
+        assert zstd.decode(plain.encode(self.FEED)) == self.FEED
+
+    @needs_zstd
+    def test_decompression_bomb_is_rejected(self):
+        codec = make_codec(compress="zstd", max_decompressed_size=10_000)
+        blob = make_codec(compress="zstd").encode(self.FEED)
+        with pytest.raises(codec_mod.DecodeError, match="exceeds 10000 bytes"):
+            codec.decode(blob)
+
+    @needs_zstd
+    def test_corrupt_frame_raises_decode_error(self):
+        codec = make_codec(compress="zstd")
+        blob = codec.encode(self.FEED)
+        with pytest.raises(codec_mod.DecodeError, match="invalid zstd payload"):
+            codec.decode(blob[:4] + b"garbage" + blob[11:40])
+
+    def test_invalid_compression_name(self):
+        with pytest.raises(ValueError, match="unsupported compression"):
+            make_codec(compress="gzip")
+
+    def test_missing_backend_is_reported(self, monkeypatch):
+        monkeypatch.setattr(codec_mod, "_std_zstd", None)
+        monkeypatch.setattr(codec_mod, "_zstandard", None)
+        with pytest.raises(ImportError, match="zstandard"):
+            make_codec(compress="zstd")
+        # A compressed payload without a backend is a clean DecodeError, not a crash.
+        with pytest.raises(codec_mod.DecodeError, match="no zstd support"):
+            make_codec().decode(codec_mod.ZSTD_MAGIC + b"\x00" * 8)
+
+
 # ---------------------------------------------------------------------------------------
 # examples/json_logging.py
 # ---------------------------------------------------------------------------------------
