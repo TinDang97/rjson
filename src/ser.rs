@@ -10,7 +10,7 @@
 //!   (gated and self-tested, see `dictiter`), else with `PyDict_Next`. Runs of
 //!   exact ints/floats in lists use a register-resident loop.
 //! - Output is written straight into the result object (`Out`): a `bytes`
-//!   object, or a compact ASCII `str`, sized from the previous output length on
+//!   object, or a compact ASCII `str`, sized from the recent output lengths on
 //!   this thread, grown with realloc and shortened at the end. No final copy,
 //!   and no shared buffer that a re-entrant call could trip over.
 //! - Every write reserves its worst case before writing through raw pointers, so
@@ -1176,7 +1176,7 @@ struct Segment {
 /// Output buffer that *is* the result object: a `bytes` object (bytes mode) or
 /// a compact ASCII `str` (str mode), grown with realloc and shrunk to the final
 /// length at the end, so the output is never copied (like orjson's BytesWriter).
-/// The initial capacity comes from the previous output size on this thread.
+/// The initial capacity comes from the recent output sizes on this thread.
 struct Out {
     obj: *mut ffi::PyObject,
     data: *mut u8,
@@ -1186,11 +1186,19 @@ struct Out {
 }
 
 thread_local! {
-    /// Size of the previous output buffer on this thread, per mode ([bytes,
-    /// str]): the capacity hint. Kept per mode because a str-mode buffer
-    /// holds only the ASCII parts of non-ASCII output, so a shared hint made
-    /// alternating dumps/dumps_str calls grow and then shrink the buffer.
-    static LAST_LEN: [Cell<usize>; 2] = const { [Cell::new(0), Cell::new(0)] };
+    /// Sizes of the last two output buffers on this thread, per mode ([bytes,
+    /// str]); their minimum is the capacity hint. Kept per mode because a
+    /// str-mode buffer holds only the ASCII parts of non-ASCII output, so a
+    /// shared hint made alternating dumps/dumps_str calls grow and then
+    /// shrink the buffer.
+    ///
+    /// The minimum of two rather than the last size: a steady workload still
+    /// gets an exactly sized buffer, but one large result (a big page among
+    /// small responses) no longer makes the next small call allocate, touch
+    /// and free a block of the large size (a malloc/free of ~800 KB that
+    /// glibc may trim or mmap: 1.5-2x the time of a 150 B dumps). After a
+    /// small result, a large one grows from the small hint as before.
+    static LAST_LENS: [Cell<(usize, usize)>; 2] = const { [Cell::new((0, 0)), Cell::new((0, 0))] };
 }
 
 const MIN_CAPACITY: usize = 128;
@@ -1200,7 +1208,8 @@ const SHRINK_COPY_THRESHOLD: usize = 64 * 1024;
 
 impl Out {
     unsafe fn new(unicode: bool) -> Out {
-        let hint = LAST_LEN.with(|c| c[unicode as usize].get());
+        let (last, prev) = LAST_LENS.with(|c| c[unicode as usize].get());
+        let hint = last.min(prev);
         // Headroom stays below the shrink threshold in `into_object`, so a
         // steady workload never shrinks (see there).
         let cap = (hint + hint / 16 + 16).max(MIN_CAPACITY);
@@ -1290,9 +1299,20 @@ impl Out {
         self.cap = cap;
     }
 
+    /// Records this call's output size for the next call's capacity hint.
+    /// Called exactly once per `Out` (by `into_object`, or by `drop` when the
+    /// buffer was not handed over).
+    #[inline(always)]
+    fn record_len(&self) {
+        LAST_LENS.with(|c| {
+            let c = &c[self.unicode as usize];
+            c.set((self.len, c.get().0));
+        });
+    }
+
     /// Shrinks to the written length and hands the object over.
     unsafe fn into_object(&mut self) -> *mut ffi::PyObject {
-        LAST_LEN.with(|c| c[self.unicode as usize].set(self.len));
+        self.record_len();
         if self.cap > SHRINK_COPY_THRESHOLD && self.len < self.cap / 4 {
             let small = Self::alloc(self.len, self.unicode);
             ptr::copy_nonoverlapping(self.data, Self::data_of(small, self.unicode), self.len);
@@ -1331,7 +1351,9 @@ impl Out {
 impl Drop for Out {
     fn drop(&mut self) {
         if !self.obj.is_null() {
-            LAST_LEN.with(|c| c[self.unicode as usize].set(self.len));
+            // Non-ASCII str results (and errors) end here: the buffer's
+            // length is what the next call's buffer will hold.
+            self.record_len();
             unsafe { ffi::Py_DECREF(self.obj) };
         }
     }
@@ -1979,8 +2001,8 @@ impl Serializer {
             return self.buf.into_object();
         }
         // Non-ASCII: the buffer holds the ASCII parts; build the final string
-        // with the exact kind and drop the buffer.
-        LAST_LEN.with(|c| c[1].set(len));
+        // with the exact kind and drop the buffer (`Out::drop` records its
+        // length as the size hint).
         let total = len + self.seg_chars;
         // Escapes in the non-ASCII strings are only found while copying them;
         // leave some room so that a few do not need a realloc.

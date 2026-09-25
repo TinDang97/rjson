@@ -506,6 +506,44 @@ class TestOutputBuffer:
         for obj in (None, True, False, 0, -5, "", "x", "é", [], {}, ()):
             assert both(obj) == ref(obj)
 
+    @staticmethod
+    def _peak_alloc(fn, obj):
+        """Peak traced allocation (bytes) while running fn(obj)."""
+        import tracemalloc
+
+        tracemalloc.start()
+        try:
+            tracemalloc.reset_peak()
+            base, _ = tracemalloc.get_traced_memory()
+            out = fn(obj)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        return peak - base, out
+
+    @pytest.mark.parametrize("fn", [rjson.dumps, rjson.dumps_str], ids=["bytes", "str"])
+    def test_small_after_one_big_does_not_allocate_big(self, fn):
+        # The size hint used to be the previous result's size, so a 150 B
+        # response right after an 800 KB page allocated (and then shrink-
+        # copied out of) an 800 KB buffer.
+        big = ["x" * 100] * 8000
+        small = {"ok": True, "id": 12345, "status": "created"}
+        fn(small)
+        fn(big)
+        peak, out = self._peak_alloc(fn, small)
+        assert len(out) == len(ref(small))
+        assert peak < 16 * 1024
+
+    @pytest.mark.parametrize("fn", [rjson.dumps, rjson.dumps_str], ids=["bytes", "str"])
+    def test_repeated_big_is_presized(self, fn):
+        # A steady workload still gets an exactly sized buffer: no doubling
+        # growth (peak up to ~2x) once the size was seen twice in a row.
+        big = ["x" * 100] * 8000
+        for obj in ({"a": 1}, big, big):
+            fn(obj)
+        peak, out = self._peak_alloc(fn, big)
+        assert peak < len(out) * 1.25
+
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="glibc malloc behaviour")
 def test_large_output_does_not_refault_every_call():
