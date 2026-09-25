@@ -544,6 +544,84 @@ class TestOutputBuffer:
         peak, out = self._peak_alloc(fn, big)
         assert peak < len(out) * 1.25
 
+    @staticmethod
+    def _in_fresh_thread(func):
+        """Run func in a new thread: the size history is thread-local, so it starts empty."""
+        import threading
+
+        result, errors = [], []
+
+        def run():
+            try:
+                result.append(func())
+            except BaseException as exc:  # re-raised in the caller
+                errors.append(exc)
+
+        t = threading.Thread(target=run)
+        t.start()
+        t.join()
+        if errors:
+            raise errors[0]
+        return result[0]
+
+    @pytest.mark.parametrize(
+        "n_items",
+        # Outputs just below/above the 1 MiB large-growth threshold, a few MB
+        # (inside the 32 MiB reservation) and ~40 MB (grows past it).
+        [10_300, 10_500, 50_000, 400_000],
+    )
+    def test_growth_across_large_reserve_boundaries(self, n_items):
+        # Escapes make the worst-case reservation per string 6x its length.
+        obj = [f'item {i} "quoted" \\ tab\t é 😀' for i in range(n_items)]
+        expected = ref(obj)
+
+        def run():
+            return rjson.dumps(obj), rjson.dumps_str(obj)
+
+        out_bytes, out_str = self._in_fresh_thread(run)
+        assert out_bytes == expected.encode()
+        assert out_str == expected
+
+    def test_periodic_big_results_among_small_ones(self):
+        # The first growth jumps to the recent peak size: check jumps that are
+        # large enough, too small (fall back to doubling) and much too large.
+        small = {"ok": True, "items": [1, 2, 3]}
+        sizes = [2_000, 20_000, 2_000, 200_000, 20_000, 2_000, 400_000, 50]
+
+        def run():
+            outs = []
+            for n in sizes:
+                for _ in range(3):
+                    outs.append((small, rjson.dumps(small)))
+                big = ["y" * 50 + str(i) for i in range(n)]
+                outs.append((big, rjson.dumps(big)))
+                outs.append((big, rjson.dumps_str(big).encode()))
+            return outs
+
+        for obj, out in self._in_fresh_thread(run):
+            assert out == ref(obj).encode()
+
+    def test_large_result_does_not_keep_the_reservation(self):
+        # Growth past 1 MiB reserves 32 MiB (mmapped, pages untouched); the
+        # finished result must be shrunk back to about its length.
+        import tracemalloc
+
+        obj = ["z" * 100] * 12_000  # ~1.2 MB, grown from an empty size history
+
+        def run():
+            tracemalloc.start()
+            try:
+                base, _ = tracemalloc.get_traced_memory()
+                out = rjson.dumps(obj)
+                current, _ = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+            return current - base, out
+
+        held, out = self._in_fresh_thread(run)
+        assert out == ref(obj).encode()
+        assert held < len(out) * 1.25
+
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="glibc malloc behaviour")
 def test_large_output_does_not_refault_every_call():

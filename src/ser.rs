@@ -1183,36 +1183,80 @@ struct Out {
     len: usize,
     cap: usize,
     unicode: bool,
+    /// Capacity the first growth jumps to (the larger recent output size,
+    /// with headroom), or 0: see `reserve`.
+    jump: usize,
+}
+
+/// Recent output sizes of one mode on one thread: the capacity hints.
+#[derive(Clone, Copy)]
+struct SizeHistory {
+    /// The last two sizes; their minimum is the initial capacity. The
+    /// minimum of two rather than the last size: a steady workload still gets
+    /// an exactly sized buffer, but one large result (a big page among small
+    /// responses) no longer makes the next small call allocate, touch and
+    /// free a block of the large size (an ~800 KB malloc/free that glibc may
+    /// serve with mmap: 2x the time of a 150 B dumps).
+    last: usize,
+    prev: usize,
+    /// Largest size of the last `PEAK_CALLS` calls: where the buffer jumps
+    /// when it first has to grow (`Out::reserve`), so a periodic big result
+    /// among small ones gets one allocation of its usual size (which the
+    /// heap can reuse) instead of a chain of doublings into fresh memory.
+    peak: usize,
+    /// Calls since `peak` was set.
+    age: usize,
+}
+
+const PEAK_CALLS: usize = 64;
+
+impl SizeHistory {
+    const EMPTY: SizeHistory = SizeHistory { last: 0, prev: 0, peak: 0, age: 0 };
+
+    #[inline(always)]
+    fn push(self, len: usize) -> SizeHistory {
+        let (peak, age) = if len >= self.peak || self.age >= PEAK_CALLS {
+            (len, 0)
+        } else {
+            (self.peak, self.age + 1)
+        };
+        SizeHistory { last: len, prev: self.last, peak, age }
+    }
 }
 
 thread_local! {
-    /// Sizes of the last two output buffers on this thread, per mode ([bytes,
-    /// str]); their minimum is the capacity hint. Kept per mode because a
-    /// str-mode buffer holds only the ASCII parts of non-ASCII output, so a
-    /// shared hint made alternating dumps/dumps_str calls grow and then
-    /// shrink the buffer.
-    ///
-    /// The minimum of two rather than the last size: a steady workload still
-    /// gets an exactly sized buffer, but one large result (a big page among
-    /// small responses) no longer makes the next small call allocate, touch
-    /// and free a block of the large size (a malloc/free of ~800 KB that
-    /// glibc may trim or mmap: 1.5-2x the time of a 150 B dumps). After a
-    /// small result, a large one grows from the small hint as before.
-    static LAST_LENS: [Cell<(usize, usize)>; 2] = const { [Cell::new((0, 0)), Cell::new((0, 0))] };
+    /// Per mode ([bytes, str]) because a str-mode buffer holds only the
+    /// ASCII parts of non-ASCII output, so a shared history made alternating
+    /// dumps/dumps_str calls grow and then shrink the buffer.
+    static SIZES: [Cell<SizeHistory>; 2] =
+        const { [Cell::new(SizeHistory::EMPTY), Cell::new(SizeHistory::EMPTY)] };
 }
 
 const MIN_CAPACITY: usize = 128;
 /// Shrinking a much larger buffer copies instead of reallocating in place, so
 /// a small result never pins a large (possibly mmapped) block.
 const SHRINK_COPY_THRESHOLD: usize = 64 * 1024;
+/// Growth past this size (without a size estimate from recent results)
+/// reserves at least `LARGE_RESERVE`; see `Out::reserve`.
+const LARGE_GROWTH: usize = 1 << 20;
+/// Above glibc's largest dynamic mmap threshold (32 MiB on 64-bit), so the
+/// block is always mmapped: untouched pages cost no memory, and growing or
+/// shrinking it is an mremap (no copy). Other allocators treat a request
+/// this size the same way.
+const LARGE_RESERVE: usize = (32 << 20) + (64 << 10);
+
+/// Capacity for an expected output of `len` bytes: headroom below the
+/// shrink threshold in `into_object`, so a steady workload never shrinks.
+#[inline(always)]
+fn with_headroom(len: usize) -> usize {
+    (len + len / 16 + 16).max(MIN_CAPACITY)
+}
 
 impl Out {
     unsafe fn new(unicode: bool) -> Out {
-        let (last, prev) = LAST_LENS.with(|c| c[unicode as usize].get());
-        let hint = last.min(prev);
-        // Headroom stays below the shrink threshold in `into_object`, so a
-        // steady workload never shrinks (see there).
-        let cap = (hint + hint / 16 + 16).max(MIN_CAPACITY);
+        let h = SIZES.with(|c| c[unicode as usize].get());
+        let cap = with_headroom(h.last.min(h.prev));
+        let jump = with_headroom(h.peak);
         let obj = Self::alloc(cap, unicode);
         Out {
             obj,
@@ -1220,6 +1264,7 @@ impl Out {
             len: 0,
             cap,
             unicode,
+            jump: if jump > cap { jump } else { 0 },
         }
     }
 
@@ -1274,15 +1319,37 @@ impl Out {
     }
 
     /// Ensures room for `n` more bytes.
+    ///
+    /// Growth policy (a large output that has to grow is where time and
+    /// peak memory went, see docs/PERFORMANCE_REVIEW.md):
+    /// - The first growth jumps to the larger recent output size when that
+    ///   suffices, so a big result after a small one is one realloc to its
+    ///   usual size, which is then freed at that size (not shrunk).
+    /// - Otherwise the capacity doubles; once that passes `LARGE_GROWTH` it
+    ///   jumps to at least `LARGE_RESERVE`, which malloc serves with mmap.
+    ///   Doubling on the brk heap copied the buffer at every step that could
+    ///   not extend in place, and the step that crossed glibc's dynamic mmap
+    ///   threshold moved it to a fresh mapping, stranding the old block on
+    ///   the heap (a 21 MB result peaked at 1.8x its size and left 16 MB
+    ///   resident). A mapped buffer grows and shrinks by mremap, without
+    ///   copying, and only its written pages become resident.
     #[inline(never)]
     fn reserve(&mut self, n: usize) {
         if self.cap - self.len >= n {
             return;
         }
-        let mut cap = self.cap * 2;
-        while cap - self.len < n {
-            cap *= 2;
-        }
+        let need = self.len.checked_add(n).unwrap_or_else(|| Self::oom(isize::MAX as usize));
+        let jump = std::mem::replace(&mut self.jump, 0);
+        let cap = if jump >= need {
+            jump
+        } else {
+            let cap = need.max(self.cap.saturating_mul(2));
+            if cap >= LARGE_GROWTH {
+                cap.max(LARGE_RESERVE)
+            } else {
+                cap
+            }
+        };
         unsafe { self.resize(cap) };
     }
 
@@ -1304,16 +1371,19 @@ impl Out {
     /// buffer was not handed over).
     #[inline(always)]
     fn record_len(&self) {
-        LAST_LENS.with(|c| {
+        SIZES.with(|c| {
             let c = &c[self.unicode as usize];
-            c.set((self.len, c.get().0));
+            c.set(c.get().push(self.len));
         });
     }
 
     /// Shrinks to the written length and hands the object over.
     unsafe fn into_object(&mut self) -> *mut ffi::PyObject {
         self.record_len();
-        if self.cap > SHRINK_COPY_THRESHOLD && self.len < self.cap / 4 {
+        if self.cap > SHRINK_COPY_THRESHOLD
+            && self.len < self.cap / 4
+            && self.len <= SHRINK_COPY_THRESHOLD
+        {
             let small = Self::alloc(self.len, self.unicode);
             ptr::copy_nonoverlapping(self.data, Self::data_of(small, self.unicode), self.len);
             ffi::Py_DECREF(self.obj);
@@ -1330,8 +1400,12 @@ impl Out {
         // freed before). Freeing blocks of the requested size keeps them on
         // the heap.
         if slack > 4096 && slack > self.len / 8 {
-            self.resize(self.len);
-        } else if slack != 0 {
+            // Shrink to what the next call of this size will request (not
+            // to the exact length), for the same reason: a grown buffer
+            // then leaves a freed block the next request fits in.
+            self.resize(with_headroom(self.len));
+        }
+        if self.cap != self.len {
             // Small slack: just shorten the object in place. A bytes/str
             // object does not record its allocation size, so a shorter length
             // (plus the NUL terminator CPython expects) is fully valid and
