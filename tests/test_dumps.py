@@ -131,6 +131,72 @@ class TestStrings:
             rjson.dumps({"\ud800": 1})
 
 
+class TestDirectUtf8Encoding:
+    """dumps (bytes) encodes non-ASCII strings of >= 256 characters directly
+    from their UCS2/UCS4 data (Latin-1 via a temporary bytes object) instead
+    of through CPython's cached UTF-8 copy, which would stay attached to the
+    string. Shorter strings still use the cache. Output must be identical."""
+
+    UNITS = [
+        "é", "ÿ", "Ж", "\u07ff", "\u0800", "日", "\uac00", "\uffff", "\ue000",
+        "😀", "\U0010ffff", "a", " ", '"', "\\", "\n", "\x00", "\x1f", "\x7f",
+    ]
+
+    @staticmethod
+    def expected(obj):
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
+
+    @pytest.mark.parametrize("n", [255, 256, 257, 300, 1000, 5000])
+    def test_lengths_around_threshold(self, n):
+        for base in ("日本語のテキスト ", "héllo wörld 😀 ", "Café déjà vu ", "Быстрый JSON ", "한국어 텍스트 "):
+            s = (base * (n // len(base) + 1))[:n]
+            for obj in (s, [s, {"k": s}], {s: s}):
+                assert rjson.dumps(obj) == self.expected(obj)
+
+    def test_every_unit_at_every_offset(self):
+        # Each character kind (incl. escapes) at every offset of the 8-unit
+        # ASCII blocks, in strings long enough for the direct encoder.
+        for u in self.UNITS:
+            for filler in ("a", "日", "😀"):
+                for off in range(0, 20):
+                    s = filler * off + u + "x" * 300 + u + "é"
+                    assert rjson.dumps(s) == self.expected(s), (u, filler, off)
+
+    def test_random_strings(self):
+        import random
+
+        rng = random.Random(21)
+        pool = self.UNITS + ["b", "c", "ü", "中", "𝄞"]
+        for _ in range(500):
+            s = "".join(rng.choice(pool) for _ in range(rng.randrange(256, 1200)))
+            assert rjson.dumps(s) == self.expected(s)
+
+    @pytest.mark.parametrize("n", [10, 300])
+    @pytest.mark.parametrize("filler", ["日", "😀", "é"])
+    def test_lone_surrogate_still_raises(self, n, filler):
+        s = filler * n + "\ud800" + filler
+        with pytest.raises(UnicodeEncodeError):
+            rjson.dumps(s)
+        with pytest.raises(UnicodeEncodeError):
+            rjson.dumps({"k": [s]})
+        assert rjson.dumps_str(s)  # str output passes surrogates through
+
+    def test_long_strings_get_no_utf8_cache(self):
+        # sys.getsizeof counts CPython's attached UTF-8 copy, if any.
+        for s in ("日本語テキスト " * 60, "héllo 😀 " * 60, "Café déjà vu " * 40):
+            before = sys.getsizeof(s)
+            rjson.dumps([s, {"k": s}])
+            assert sys.getsizeof(s) == before
+
+    def test_str_subclass_and_dumps_str(self):
+        class S(str):
+            pass
+
+        s = S("日本語 😀 é" * 60)
+        assert rjson.dumps(s) == self.expected(str(s))
+        assert rjson.dumps_str([s]) == json.dumps([str(s)], ensure_ascii=False, separators=(",", ":"))
+
+
 class TestNumbers:
     def test_int_boundaries(self):
         vals = [0, 1, -1, 9, 10, 99, 100, 999, 1000, 9999, 10000, 123456, 2**30 - 1, 2**30, -(2**30),

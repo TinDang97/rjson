@@ -1798,11 +1798,65 @@ impl Serializer {
         if self.str_mode {
             return self.write_str_segment(p, obj, len);
         }
-        let (src, n) = match utf8_of(obj) {
-            Ok(v) => v,
-            Err(e) => return self.fail(e),
+        // bytes output. A UTF-8 copy CPython already cached is the fastest
+        // source. Otherwise encode the native UCS1/2/4 data directly:
+        // `PyUnicode_AsUTF8AndSize` would attach a UTF-8 copy to the string
+        // for the rest of its life (+98% memory on non-ASCII text that
+        // outlives the call).
+        if crate::compat::PyUnicode_IS_COMPACT(obj) != 0 {
+            let c = obj as *mut ffi::PyCompactUnicodeObject;
+            if !(*c).utf8.is_null() {
+                return self.write_utf8(p, (*c).utf8 as *const u8, (*c).utf8_length as usize, 0, 0);
+            }
+        }
+        if len < DIRECT_UTF8_MIN_CHARS {
+            // Short strings (keys, names, labels) are cheap to cache and
+            // often serialized again: let CPython attach the UTF-8 copy.
+            let (src, n) = match utf8_of(obj) {
+                Ok(v) => v,
+                Err(e) => return self.fail(e),
+            };
+            return self.write_utf8(p, src, n, 0, 0);
+        }
+        let kind = crate::compat::PyUnicode_KIND(obj);
+        if kind == 1 {
+            // Latin-1: CPython's UTF-8 encoder is faster than per-character
+            // encoding here (accented letters every few characters defeat
+            // the 8-unit ASCII blocks). Encode into a temporary bytes object,
+            // which is not attached to the string, and escape-copy it.
+            let b = ffi::PyUnicode_AsUTF8String(obj);
+            if b.is_null() {
+                return self.fail(SerError::PyErrSet);
+            }
+            let q = self.write_utf8(p, ffi::PyBytes_AsString(b) as *const u8, ffi::PyBytes_Size(b) as usize, 0, 0);
+            ffi::Py_DECREF(b);
+            return q;
+        }
+        // Worst case 6 output bytes per character (an escape; UTF-8 needs at
+        // most 4), two quotes, and 8 bytes for the blind escape-table store.
+        let q = self.reserve(p, len * 6 + 2 + 8);
+        let data = crate::compat::PyUnicode_DATA(obj);
+        *q = b'"';
+        let end = if kind == 2 {
+            encode_utf8_escaped(q.add(1), data as *const u16, len)
+        } else {
+            encode_utf8_escaped(q.add(1), data as *const u32, len)
         };
-        self.write_utf8(p, src, n, 0, 0)
+        match end {
+            Some(e) => {
+                *e = b'"';
+                e.add(1)
+            }
+            // A lone surrogate: let CPython's encoder raise the same
+            // UnicodeEncodeError as before (nothing past `q` is kept).
+            None => {
+                let (src, n) = match utf8_of(obj) {
+                    Ok(v) => v,
+                    Err(e) => return self.fail(e),
+                };
+                self.write_utf8(q, src, n, 0, 0)
+            }
+        }
     }
 
     /// `str` output: record the non-ASCII string instead of encoding it.
@@ -2206,6 +2260,131 @@ unsafe fn write_utf8_unchecked(p: Cur, src: *const u8, len: usize, sep: u8, ns: 
     dst = escape_body(dst.add(1), src, len);
     *dst = b'"';
     dst.add(1)
+}
+
+/// Non-ASCII strings of at least this many characters are encoded directly
+/// by `dumps` (bytes) instead of through CPython's cached UTF-8 copy.
+const DIRECT_UTF8_MIN_CHARS: usize = 256;
+
+/// Code unit of a str's native data (UCS2/UCS4; UCS1 goes through CPython's
+/// encoder, see `write_str_slow`).
+trait StrUnit: Copy {
+    fn get(self) -> u32;
+    /// Packs 8 units starting at `p` into 8 bytes such that the result is
+    /// "all bytes < 0x80 and none needs escaping" only if all 8 units are
+    /// ASCII needing no escape (then the bytes are exactly those units).
+    unsafe fn pack8(p: *const Self) -> u64;
+}
+impl StrUnit for u16 {
+    #[inline(always)]
+    fn get(self) -> u32 {
+        self as u32
+    }
+    #[inline(always)]
+    unsafe fn pack8(p: *const u16) -> u64 {
+        #[cfg(target_arch = "x86_64")]
+        {
+            use std::arch::x86_64::*;
+            // packus treats lanes as signed: 0x100..=0x7FFF saturate to 0xFF
+            // (high bit set) and 0x8000..=0xFFFF to 0x00, which the caller's
+            // escape check rejects. Either way no non-ASCII unit can pass as
+            // an ASCII byte that needs no escaping.
+            let v = _mm_loadu_si128(p as *const __m128i);
+            _mm_cvtsi128_si64(_mm_packus_epi16(v, v)) as u64
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let mut w = 0u64;
+            for k in 0..8 {
+                w |= ((*p.add(k)).min(0xFF) as u64) << (8 * k);
+            }
+            w
+        }
+    }
+}
+impl StrUnit for u32 {
+    #[inline(always)]
+    fn get(self) -> u32 {
+        self
+    }
+    #[inline(always)]
+    unsafe fn pack8(p: *const u32) -> u64 {
+        #[cfg(target_arch = "x86_64")]
+        {
+            use std::arch::x86_64::*;
+            // Code points are <= 0x10FFFF, so the signed saturation of
+            // packs_epi32 keeps them positive; packus then saturates > 0xFF.
+            let a = _mm_loadu_si128(p as *const __m128i);
+            let b = _mm_loadu_si128(p.add(4) as *const __m128i);
+            let w = _mm_packs_epi32(a, b);
+            _mm_cvtsi128_si64(_mm_packus_epi16(w, w)) as u64
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let mut w = 0u64;
+            for k in 0..8 {
+                w |= ((*p.add(k)).min(0xFF) as u64) << (8 * k);
+            }
+            w
+        }
+    }
+}
+
+/// Encodes `len` units of native str data as escaped UTF-8 at `dst` (the
+/// body of a JSON string, without quotes) and returns the end, or None at a
+/// lone surrogate (not encodable; the caller reports it).
+///
+/// SAFETY: `len * 6 + 8` bytes of room at `dst` (worst case: every unit an
+/// escape; `write_escape` stores 8 bytes blindly), `src..src+len` readable.
+#[inline(always)]
+unsafe fn encode_utf8_escaped<T: StrUnit>(mut dst: *mut u8, src: *const T, len: usize) -> Option<*mut u8> {
+    let mut i = 0;
+    while i < len {
+        let c = (*src.add(i)).get();
+        if c < 0x80 {
+            // Runs of 8 ASCII units that need no escaping: one 8-byte store.
+            // Only tried at an ASCII unit: text of non-ASCII runs (CJK) paid
+            // a failed pack and check per character (2x slower).
+            if i + 8 <= len {
+                let w = T::pack8(src.add(i));
+                if w & 0x8080_8080_8080_8080 == 0 && !swar_needs_escape(w) {
+                    ptr::write_unaligned(dst as *mut u64, w);
+                    dst = dst.add(8);
+                    i += 8;
+                    continue;
+                }
+            }
+            i += 1;
+            if *NEEDS_ESCAPE.get_unchecked(c as usize) != 0 {
+                write_escape(c as u8, &mut dst);
+            } else {
+                *dst = c as u8;
+                dst = dst.add(1);
+            }
+        } else if c < 0x800 {
+            i += 1;
+            *dst = 0xC0 | (c >> 6) as u8;
+            *dst.add(1) = 0x80 | (c & 0x3F) as u8;
+            dst = dst.add(2);
+        } else if c < 0x10000 {
+            i += 1;
+            if c & 0xF800 == 0xD800 {
+                return None;
+            }
+            *dst = 0xE0 | (c >> 12) as u8;
+            *dst.add(1) = 0x80 | ((c >> 6) & 0x3F) as u8;
+            *dst.add(2) = 0x80 | (c & 0x3F) as u8;
+            dst = dst.add(3);
+        } else {
+            i += 1;
+            *dst = 0xF0 | (c >> 18) as u8;
+            *dst.add(1) = 0x80 | ((c >> 12) & 0x3F) as u8;
+            *dst.add(2) = 0x80 | ((c >> 6) & 0x3F) as u8;
+            *dst.add(3) = 0x80 | (c & 0x3F) as u8;
+            dst = dst.add(4);
+        }
+    }
+    Some(dst)
 }
 
 /// UTF-8 view of a (non-ASCII) string, using CPython's cached copy when present.
