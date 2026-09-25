@@ -1683,12 +1683,13 @@ unsafe fn memoryview_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyResult<
         } else {
             // SAFETY: `owned` has capacity for `len` bytes; on success
             // PyBuffer_ToContiguous has written exactly `view.len` bytes.
-            // `&mut view`: pyo3-ffi declares `src` as `*mut` before 3.11 and
-            // `*const` from 3.11 on; CPython only reads it.
+            // A raw `*mut` (which also coerces to `*const`): pyo3-ffi declares
+            // `src` as `*mut` before 3.11 and `*const` from 3.11 on; CPython
+            // only reads it.
             let len_ssize = view.len;
             let rc = ffi::PyBuffer_ToContiguous(
                 owned.as_mut_ptr() as *mut std::os::raw::c_void,
-                &mut view,
+                ptr::addr_of_mut!(view),
                 len_ssize,
                 b'C' as std::os::raw::c_char,
             );
