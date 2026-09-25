@@ -200,6 +200,13 @@ builds (3.13t/3.14t) and subinterpreters are not supported yet.
 It is what you send over the network or write to a file, and it avoids a copy. Use
 `dumps_str` when you need a `str`.
 
+**Should I compress, or switch to msgpack / Arrow to go faster?**
+Compress in the transport (HTTP middleware, Kafka `compression.type`), and only payloads
+of a few KB and up: compression costs as much CPU as serialization. Binary formats aren't
+faster when the result is Python dicts, because creating objects dominates. Arrow and
+Polars win when data stays columnar. Numbers:
+[Transfer size](docs/PRODUCTION_READINESS.md#transfer-size-compression-and-binary-formats).
+
 **Why is `dumps_str` sometimes slower than `dumps`?**
 A `str` containing emoji must store every character in 4 bytes, and CJK text in 2, while
 UTF-8 `bytes` stay compact.
