@@ -14,6 +14,8 @@ import pytest
 import rjson
 import json
 import math
+import re
+import sys
 
 
 class TestBasicTypes:
@@ -865,9 +867,10 @@ class TestModuleSurface:
         assert (pkg.parent / "py.typed").is_file()
 
 
-# Documents whose error position (pos/lineno/colno) matches json.loads exactly.
-SAME_POSITION_AS_JSON = [
-    # trailing commas: reported at the comma (was: at the closing bracket)
+# Trailing commas are reported at the comma, like orjson and json on
+# CPython >= 3.13 (json < 3.13 has no trailing-comma error and reports
+# "Expecting value" at the bracket instead). rjson used to report the bracket.
+TRAILING_COMMA_DOCS = [
     "[1,]",
     '{"a":1,}',
     "[ 1 , ]",
@@ -879,7 +882,11 @@ SAME_POSITION_AS_JSON = [
     '{"é":"😀" , }',
     "[[1,],2]",
     "\n\n [1,\n  2,]",
-    # other delimiter / structure errors
+]
+
+# Documents whose error position (pos/lineno/colno) matches json.loads
+# exactly on every supported CPython version.
+SAME_POSITION_AS_JSON = [
     "[1 2]",
     '{"a" 1}',
     '{"a":}',
@@ -921,9 +928,26 @@ class TestDecodeErrorMessages:
         assert (e.pos, e.lineno, e.colno) == (expected.pos, expected.lineno, expected.colno)
         assert e.doc == doc
 
+    @pytest.mark.parametrize("doc", TRAILING_COMMA_DOCS, ids=repr)
+    @pytest.mark.parametrize(
+        "conv", [str, str.encode, lambda s: memoryview(s.encode())], ids=["str", "bytes", "memoryview"]
+    )
+    def test_trailing_comma_reported_at_the_comma(self, doc, conv):
+        # Regression: the position pointed at the closing bracket.
+        comma = re.search(r",\s*[\]}]", doc).start()  # char index of the offending comma
+        at_comma = json.JSONDecodeError("x", doc, comma)
+        with pytest.raises(json.JSONDecodeError) as ei:
+            rjson.loads(conv(doc))
+        e = ei.value
+        assert e.msg == "trailing comma is not allowed"
+        assert (e.pos, e.lineno, e.colno) == (comma, at_comma.lineno, at_comma.colno)
+        if sys.version_info >= (3, 13):
+            expected = _json_error(doc)
+            assert "trailing comma" in expected.msg
+            assert (e.pos, e.lineno, e.colno) == (expected.pos, expected.lineno, expected.colno)
+
     @pytest.mark.parametrize("doc,col", [("[1,]", 3), ('{"a":1,}', 7), ("[1, 2, 3,]", 9)])
     def test_trailing_comma_column(self, doc, col):
-        # Regression: the column pointed at the closing bracket (one past json's).
         with pytest.raises(json.JSONDecodeError) as ei:
             rjson.loads(doc)
         assert ei.value.colno == col
