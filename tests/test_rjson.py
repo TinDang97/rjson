@@ -1003,6 +1003,58 @@ class TestMemoryviewInPlace:
             rjson.loads(memoryview(big[:-3] + b'"\xff"]}'))
 
 
+class TestStrInputNoUtf8Cache:
+    """loads(str) with non-ASCII input encodes it into a temporary bytes
+    object instead of attaching CPython's UTF-8 copy to the caller's string;
+    ASCII strings and strings with a cached copy are read in place."""
+
+    DOCS = [
+        '{"name": "Café déjà vu", "n": 1}',
+        '["日本語のテキスト", {"키": "값"}, "Быстрый"]',
+        '{"emoji": "😀 ok 🎉", "mix": "a\\u00e9 é"}',
+        json.dumps({"items": [{"id": i, "t": "日本語 " * 20} for i in range(200)]}, ensure_ascii=False),
+    ]
+
+    def test_results_and_no_cache(self):
+        for doc in self.DOCS:
+            assert rjson.loads(doc) == json.loads(doc)
+        # Inputs of >= 4096 characters: no UTF-8 copy attached. (Shorter
+        # ones use CPython's cached copy, which is faster for small bodies.)
+        doc = self.DOCS[-1]
+        assert len(doc) >= 4096
+        before = sys.getsizeof(doc)
+        assert rjson.loads(doc) == json.loads(doc)
+        assert sys.getsizeof(doc) == before
+
+    def test_str_subclass(self):
+        class S(str):
+            pass
+
+        for doc in self.DOCS:
+            assert rjson.loads(S(doc)) == json.loads(doc)
+
+    def test_cached_copy_is_used(self):
+        for doc in self.DOCS:
+            doc = "".join(list(doc))  # a fresh object
+            doc.encode("utf-8")  # does not cache
+            rjson.dumps(doc) if len(doc) < 256 else None  # short: caches
+            assert rjson.loads(doc) == json.loads(doc)
+
+    def test_surrogates_still_rejected(self):
+        # Short (cached path) and long (temporary-buffer path) inputs.
+        for doc in ('["\ud800"]', '{"a": "x\udfff"}', '["' + "é" * 5000 + '\ud800"]'):
+            with pytest.raises(rjson.JSONDecodeError, match="surrogates not allowed"):
+                rjson.loads(doc)
+
+    def test_errors_in_non_ascii_str(self):
+        doc = '{"a": "é", "b": [1, 2,]}'
+        with pytest.raises(rjson.JSONDecodeError) as got:
+            rjson.loads(doc)
+        with pytest.raises(rjson.JSONDecodeError) as want:
+            rjson.loads(doc.encode())
+        assert (got.value.msg, got.value.pos) == (want.value.msg, want.value.pos)
+
+
 class TestInputTypeErrors:
     @pytest.mark.parametrize("bad", [None, 1, 1.5, ["[]"], {"a": 1}, object()])
     def test_rejected_with_type_name(self, bad):

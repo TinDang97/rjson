@@ -1797,6 +1797,9 @@ pub(crate) struct Input {
     /// held: `Input` lives inside `loads`). While it is held a `bytearray`
     /// cannot be resized, so `ptr` stays valid.
     held: Option<Box<ffi::Py_buffer>>,
+    /// A temporary `bytes` holding the input (UTF-8 of a non-ASCII `str`),
+    /// released on drop; null if none.
+    temp: *mut ffi::PyObject,
 }
 
 impl Drop for Input {
@@ -1806,18 +1809,16 @@ impl Drop for Input {
             // `loads` still holds the GIL when its `Input` is dropped.
             unsafe { ffi::PyBuffer_Release(&mut **view) };
         }
+        if !self.temp.is_null() {
+            // SAFETY: a strong reference owned by this Input; GIL held (as above).
+            unsafe { ffi::Py_DECREF(self.temp) };
+        }
     }
 }
 
 pub(crate) unsafe fn get_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyResult<Input> {
     if ffi::PyUnicode_Check(obj) != 0 {
-        let mut size: ffi::Py_ssize_t = 0;
-        let p = ffi::PyUnicode_AsUTF8AndSize(obj, &mut size);
-        if p.is_null() {
-            ffi::PyErr_Clear();
-            return Err(raise_decode_error(py, "str is not valid UTF-8: surrogates not allowed", b"", 0));
-        }
-        return Ok(Input { ptr: p as *const u8, len: size as usize, utf8_valid: true, owned: None, held: None });
+        return str_input(py, obj);
     }
     if ffi::PyBytes_Check(obj) != 0 {
         return Ok(Input {
@@ -1826,6 +1827,7 @@ pub(crate) unsafe fn get_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyRes
             utf8_valid: false,
             owned: None,
             held: None,
+            temp: ptr::null_mut(),
         });
     }
     if ffi::PyByteArray_Check(obj) != 0 {
@@ -1835,12 +1837,77 @@ pub(crate) unsafe fn get_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyRes
             utf8_valid: false,
             owned: None,
             held: None,
+            temp: ptr::null_mut(),
         });
     }
     if ffi::PyMemoryView_Check(obj) != 0 {
         return memoryview_input(py, obj);
     }
     Err(input_type_error(py, obj))
+}
+
+/// UTF-8 bytes of a `str` input. ASCII strings (their data is the UTF-8),
+/// strings with a cached UTF-8 copy and short strings are read through
+/// `PyUnicode_AsUTF8AndSize`. Longer non-ASCII strings are encoded into a
+/// temporary `bytes` object (NUL-terminated, released after the parse):
+/// `PyUnicode_AsUTF8AndSize` would attach the UTF-8 copy to the caller's
+/// string for the rest of its life (+132% memory on non-ASCII input that
+/// outlives the call).
+unsafe fn str_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyResult<Input> {
+    #[cfg(not(Py_3_12))]
+    {
+        // Legacy (not ready) strings: the ASCII flag is only valid once ready.
+        #[allow(deprecated)]
+        if ffi::PyUnicode_READY(obj) != 0 {
+            return Err(PyErr::fetch(py));
+        }
+    }
+    let in_place = crate::compat::PyUnicode_IS_ASCII(obj) != 0
+        || compact_utf8_cached(obj)
+        // Small inputs (request bodies): CPython's cached copy is faster than
+        // a temporary bytes object (~12% at 300 B) and costs little memory.
+        || (ffi::PyUnicode_GET_LENGTH(obj) as usize) < STR_TEMP_MIN_CHARS;
+    let cached = if in_place {
+        let mut size: ffi::Py_ssize_t = 0;
+        let p = ffi::PyUnicode_AsUTF8AndSize(obj, &mut size);
+        if !p.is_null() {
+            return Ok(Input {
+                ptr: p as *const u8,
+                len: size as usize,
+                utf8_valid: true,
+                owned: None,
+                held: None,
+                temp: ptr::null_mut(),
+            });
+        }
+        true
+    } else {
+        false
+    };
+    let b = if cached { ptr::null_mut() } else { ffi::PyUnicode_AsUTF8String(obj) };
+    if b.is_null() {
+        // Lone surrogates (not encodable as UTF-8): same error as before.
+        ffi::PyErr_Clear();
+        return Err(raise_decode_error(py, "str is not valid UTF-8: surrogates not allowed", b"", 0));
+    }
+    Ok(Input {
+        ptr: ffi::PyBytes_AsString(b) as *const u8,
+        len: ffi::PyBytes_Size(b) as usize,
+        utf8_valid: true,
+        owned: None,
+        held: None,
+        temp: b,
+    })
+}
+
+/// Non-ASCII `str` inputs of at least this many characters are encoded into
+/// a temporary buffer instead of getting CPython's cached UTF-8 copy.
+const STR_TEMP_MIN_CHARS: usize = 4096;
+
+/// A compact non-ASCII str whose UTF-8 form CPython already cached.
+#[inline(always)]
+unsafe fn compact_utf8_cached(obj: *mut ffi::PyObject) -> bool {
+    crate::compat::PyUnicode_IS_COMPACT(obj) != 0 && !(*(obj as *mut ffi::PyCompactUnicodeObject)).utf8.is_null()
 }
 
 /// Copies a memoryview's bytes (in C order, like `mv.tobytes()`) and appends
@@ -1889,7 +1956,7 @@ unsafe fn memoryview_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyResult<
     }
     owned.push(0);
     ffi::PyBuffer_Release(&mut view);
-    Ok(Input { ptr: owned.as_ptr(), len, utf8_valid: false, owned: Some(owned), held: None })
+    Ok(Input { ptr: owned.as_ptr(), len, utf8_valid: false, owned: Some(owned), held: None, temp: ptr::null_mut() })
 }
 
 /// Below this size the copy is cheaper than looking up `memoryview.obj`.
@@ -1937,7 +2004,7 @@ unsafe fn memoryview_in_place(mv: *mut ffi::PyObject, view: &ffi::Py_buffer) -> 
         return None;
     }
     debug_assert_eq!(*end, 0);
-    Some(Input { ptr: buf, len, utf8_valid: false, owned: None, held: None })
+    Some(Input { ptr: buf, len, utf8_valid: false, owned: None, held: None, temp: ptr::null_mut() })
 }
 
 #[cold]
