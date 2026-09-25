@@ -51,9 +51,11 @@ class RJSONResponse(JSONResponse):
     use orjson's shortest form (``1e-7``, ``0.00001``) instead of Python's ``repr``
     (``1e-07``, ``1e-05``). Values are identical; body hashes/ETags/snapshots are not.
 
-    rjson has no ``default=`` hook, so values it cannot encode (datetime, UUID, Decimal,
-    Enum, Pydantic models, dataclasses, sets, non-str dict keys) take a fallback: the
-    content is converted with :attr:`fallback_encoder` and serialized again. The fallback
+    Values rjson cannot encode (datetime, UUID, Decimal, Enum, Pydantic models,
+    dataclasses, sets, non-str dict keys) take a fallback: the whole content is converted
+    with :attr:`fallback_encoder` and serialized again. (rjson's ``default=`` hook is not
+    used here: it sees single values, while ``jsonable_encoder`` also rewrites containers,
+    e.g. non-str keys, and must give the same response FastAPI would.) The fallback
     runs only after the fast path fails, so native data pays nothing for it.
 
     Choosing the fallback (set it on a subclass):

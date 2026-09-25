@@ -16,15 +16,16 @@ bool and None (API responses built from dicts, log records, events, cache blobs)
 faster than orjson on nearly every production shape we measured, uses less memory on large
 documents, and produced **0 mismatches** against orjson and `json` across all workloads.
 
-**Not yet a drop-in for orjson users who rely on its options.** There is no `default=`
-hook, no native datetime/UUID/dataclass, and no non-str dict keys. You can work around
-these today (see [`examples/`](../examples/)), and each is tracked as an issue.
+**Not yet a drop-in for orjson users who rely on its options.** `dumps(obj, default=f)`
+works as in orjson and `json`, but there is no native datetime/UUID/dataclass (each goes
+through `default`) and no non-str dict keys. You can work around these today (see
+[`examples/`](../examples/)), and each is tracked as an issue.
 
 | question | answer |
 |---|---|
 | Faster than `json`? | Yes: 4–20× on `dumps`, 1.3–5× on `loads`. |
 | Faster than orjson? | Yes on most shapes: geomean `dumps` 0.76×, `loads` 0.87×, round trip 0.83× (rjson ÷ orjson time). CJK text (0.59–0.91×) and full-precision float arrays (0.89–0.95×) now load faster than orjson; see [Performance](#performance). |
-| Correct? | 0 mismatches. 583 tests, fuzzing against `json`, and output byte-identical to orjson. |
+| Correct? | 0 mismatches. 856 tests, fuzzing against `json`, and output byte-identical to orjson. |
 | Memory? | Better on large `loads`: peak RSS 30–37% below orjson. Retained small results cost ~400 B instead of ~8 KB each. |
 | Safe for async services? | Yes, but each call blocks the event loop, and `to_thread` doesn't help. See [ASYNC.md](ASYNC.md). |
 | Compress / go binary? | Compress at the transport, and only payloads of a few KB and up. Use Arrow/Polars only for columnar data. See [Transfer size](#transfer-size-compression-and-binary-formats). |
@@ -325,8 +326,7 @@ The full migration guide with code is in the [README](../README.md#migrating-fro
 
 | blocker | impact | issue |
 |---|---|---|
-| no `default=` hook | high: every unsupported value forces a Python pre-pass | [#4](https://github.com/TinDang97/rjson/issues/4) |
-| no native datetime / UUID / dataclass / Enum | high for orjson users; `jsonable_encoder` costs ~100× `dumps` | [#5](https://github.com/TinDang97/rjson/issues/5) |
+| no native datetime / UUID / dataclass / Enum | medium: `default=` covers them at one Python call per value; orjson needs none | [#5](https://github.com/TinDang97/rjson/issues/5) |
 | no non-str dict keys option | medium | [#6](https://github.com/TinDang97/rjson/issues/6) |
 | `loads` stricter than `json` (BOM, NaN, lone surrogates) | medium: new 4xx after migration | [#7](https://github.com/TinDang97/rjson/issues/7) |
 | not on PyPI | high: needs a Rust toolchain to install | publish `pyrjson` |
@@ -338,9 +338,9 @@ The full migration guide with code is in the [README](../README.md#migrating-fro
 1. **Adopt now** for services whose payloads are JSON-native: internal APIs, logging, event
    pipelines, cache codecs. Use the patterns in [`examples/`](../examples/), pin the
    version, and keep a fallback path for unsupported types.
-2. **Wait for #4 and #5** if you are an orjson user who relies on `default=` or native
-   datetime/dataclass output.
-3. **Before 1.0:** publish `pyrjson` wheels, ship #4–#7, and add free-threading support.
+2. **Wait for #5** if you are an orjson user who relies on native datetime/dataclass
+   output and cannot afford a `default` call per value; `default=` itself works.
+3. **Before 1.0:** publish `pyrjson` wheels, ship #5–#7, and add free-threading support.
 
 ## Reproducing
 
@@ -349,5 +349,5 @@ benches/fetch_corpus.sh
 python benches/production_benchmark.py --quick                 # ~30 s smoke run
 python benches/production_benchmark.py --output-json prod.json # full run, ~6 min
 python benches/production_benchmark.py --big-only              # large-file time + RSS
-python -m pytest tests -q                                      # 583 tests
+python -m pytest tests -q                                      # 856 tests
 ```

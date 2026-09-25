@@ -4,7 +4,7 @@
 
 **rjson** is a JSON library for Python written in Rust directly against the CPython C API (PyO3 is used only for module setup and the entry-point trampoline). Goal: beat orjson on every metric while staying correct on every supported CPython version.
 
-- API: `loads(str | bytes | bytearray | memoryview)`, `dumps(obj) -> bytes` (like orjson), `dumps_str(obj) -> str`, `dumps_bytes` = alias of `dumps`; `JSONDecodeError` (= json's), `JSONEncodeError(TypeError, ValueError)`, `__version__`; stub `rjson.pyi` (maturin installs it as `rjson/__init__.pyi` + `py.typed`)
+- API: `loads(str | bytes | bytearray | memoryview)`, `dumps(obj, *, default=None) -> bytes` (like orjson), `dumps_str(obj, *, default=None) -> str`, `dumps_bytes` = alias of `dumps`; `JSONDecodeError` (= json's), `JSONEncodeError(TypeError, ValueError)`, `__version__`; stub `rjson.pyi` (maturin installs it as `rjson/__init__.pyi` + `py.typed`)
 - Packaging: PyPI distribution `pyrjson` (the name `rjson` is taken); import name `rjson`. MIT license.
 - Supported: CPython 3.10-3.14 (`requires-python >=3.10`), GIL builds only
 - Status: experimental; APIs may change before 1.0
@@ -15,7 +15,7 @@
 ```
 src/
   lib.rs      # module definition only
-  entry.rs    # raw METH_O entry points (loads, dumps, dumps_str, dumps_bytes alias) + registration
+  entry.rs    # raw entry points (loads METH_O; dumps, dumps_str, dumps_bytes alias FASTCALL|KEYWORDS) + registration
   parser.rs   # loads: single-pass parser building PyObjects directly
   lemire.rs   # Eisel-Lemire float conversion (vendored from fast-float, MIT/Apache)
   ser.rs      # dumps (bytes) / dumps_str (str): direct serializer writing into the result object
@@ -59,14 +59,15 @@ docs/ASYNC.md                 # asyncio/threads guidance, free-threading/subinte
 - Escaping: AVX-512VL / AVX2 (runtime detected) / SSE2 kernels; every write reserves its worst case first. 256-bit loads/stores go through `load256`/`store256` (inline asm), because x86-64-v2 tuning makes LLVM split them. Test the fallbacks with `RUSTFLAGS="-C target-cpu=x86-64-v2 --cfg rjson_no_avx512 --cfg rjson_no_avx2"`.
 - Output buffer headroom (1/16) must stay below the shrink threshold (1/8): shrinking every call makes glibc mmap and page-fault every large result.
 - Capacity: initial = min of the last two output sizes per thread and mode (`SizeHistory`); first growth jumps to the peak of the last 64 calls; growth past 1 MiB reserves ≥ 32 MiB + 64 KiB (always mmapped, shrunk back in `into_object`). Keep a result from ever holding the reservation.
-- Recursion limit 254 (also catches circular references).
+- Recursion limit 254 (also catches circular references); each `default` call counts as a level, so a non-converging `default` ends there.
+- `default=` runs Python code mid-serialization, which may mutate or free what we iterate. With `default` set: every list/tuple/dict is held by a strong ref while serialized (`guarded`), dicts use `PyDict_Next` plus a size check (CPython's "changed size during iteration" RuntimeError), never the direct entry walk; `call_default` increfs its argument; `err_obj` is a strong ref. Without `default` no Python code runs, so the fast paths stay unguarded; keep it that way (tests run under `PYTHONMALLOC=debug`).
 - Non-ASCII strings in bytes output: cached UTF-8 copy if present; < 256 chars via `PyUnicode_AsUTF8AndSize` (attaches the copy: fast repeats); longer UCS2/UCS4 via `encode_utf8_escaped` (direct, ASCII 8-blocks only at ASCII units), longer Latin-1 via a temporary `PyUnicode_AsUTF8String`. No copy attached to long strings.
 - Every serializer-detected failure raises `rjson.JSONEncodeError` (`ser::to_pyerr`, cold); Python-raised errors (`SerError::PyErrSet`) propagate unchanged.
 
 ### Entry points (`entry.rs`)
-- `METH_O` functions through PyO3's `impl_::trampoline` (`get_trampoline_function!(binaryfunc, ..)`; doc-hidden PyO3 API, keeps panics caught and GIL bookkeeping correct; re-check on every PyO3 upgrade). ~8 ns/call cheaper than `#[pyfunction]`.
+- Raw builtins through PyO3's `impl_::trampoline` (`get_trampoline_function!(binaryfunc | fastcall_cfunction_with_keywords, ..)`; doc-hidden PyO3 API, keeps panics caught and GIL bookkeeping correct; re-check on every PyO3 upgrade). ~8 ns/call cheaper than `#[pyfunction]`. `loads` is `METH_O`; `dumps`/`dumps_str` are `METH_FASTCALL | METH_KEYWORDS` whose one-positional, no-kwnames call is a single compare (`dumps_args`), the rest in cold `dumps_args_slow`.
 - `ALL` in entry.rs must list every public name (maturin's generated `__init__.py` star-imports from `rjson.rjson`); keep it in sync with `rjson.pyi`. The functions' `__module__` is the package `rjson`.
-- Keyword options in future: use `METH_FASTCALL | METH_KEYWORDS` with hand-parsed kwnames, not PyO3 `FunctionDescription`.
+- New keyword options go into `dumps_args_slow`'s hand-parsed kwnames, not PyO3 `FunctionDescription`.
 
 ## Hard Rules (learned from bugs found in review)
 

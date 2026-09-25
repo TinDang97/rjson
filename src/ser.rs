@@ -59,9 +59,9 @@ const ESCAPE_CHUNK: usize = 64 * 1024;
 #[derive(Clone, Copy)]
 pub enum SerError {
     NonFinite,
-    /// `err_obj` is the offending value (borrowed).
+    /// `err_obj` is the offending value (a strong reference).
     Unsupported,
-    /// `err_obj` is the offending key (borrowed).
+    /// `err_obj` is the offending key (a strong reference).
     KeyNotStr,
     Recursion,
     /// A Python exception is already set (e.g. lone surrogate, int too large to
@@ -1469,8 +1469,16 @@ pub struct Serializer {
     max_kind: u32,
     seg_chars: usize,
     err: SerError,
+    /// Strong reference (set by `fail_obj`): with `default=`, the offending
+    /// object may live in a temporary `default` result that is released
+    /// before the error message is built.
     err_obj: *mut ffi::PyObject,
     err_float: f64,
+    /// `default=` callable (borrowed from the call's arguments), or null.
+    /// When set, unsupported objects are replaced by `default(obj)`, and
+    /// containers are serialized in a mode that tolerates `default`
+    /// mutating them (see `guarded`).
+    default: *mut ffi::PyObject,
 }
 
 impl Drop for Serializer {
@@ -1478,11 +1486,14 @@ impl Drop for Serializer {
         for s in self.segs.drain(..) {
             unsafe { ffi::Py_DECREF(s.obj) };
         }
+        if !self.err_obj.is_null() {
+            unsafe { ffi::Py_DECREF(self.err_obj) };
+        }
     }
 }
 
 impl Serializer {
-    unsafe fn new(str_mode: bool) -> Self {
+    unsafe fn new(str_mode: bool, default: *mut ffi::PyObject) -> Self {
         Serializer {
             buf: Out::new(str_mode),
             depth: 0,
@@ -1492,6 +1503,7 @@ impl Serializer {
             seg_chars: 0,
             err: SerError::PyErrSet,
             err_obj: ptr::null_mut(),
+            default,
             err_float: 0.0,
         }
     }
@@ -1509,6 +1521,8 @@ impl Serializer {
     #[cold]
     #[inline(never)]
     fn fail_obj(&mut self, e: SerError, obj: *mut ffi::PyObject) -> Cur {
+        // A serializer stops at its first error, so this is set at most once.
+        unsafe { ffi::Py_INCREF(obj) };
         self.err_obj = obj;
         self.fail(e)
     }
@@ -1888,6 +1902,14 @@ impl Serializer {
 
     #[inline(never)]
     unsafe fn ser_list(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        if !self.default.is_null() {
+            return self.guarded(p, obj, Self::ser_list_inner);
+        }
+        self.ser_list_inner(p, obj)
+    }
+
+    #[inline(always)]
+    unsafe fn ser_list_inner(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
         if self.depth >= RECURSION_LIMIT {
             return self.fail(SerError::Recursion);
         }
@@ -1983,6 +2005,14 @@ impl Serializer {
 
     #[inline(never)]
     unsafe fn ser_tuple(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        if !self.default.is_null() {
+            return self.guarded(p, obj, Self::ser_tuple_inner);
+        }
+        self.ser_tuple_inner(p, obj)
+    }
+
+    #[inline(always)]
+    unsafe fn ser_tuple_inner(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
         if self.depth >= RECURSION_LIMIT {
             return self.fail(SerError::Recursion);
         }
@@ -2001,6 +2031,66 @@ impl Serializer {
 
     #[inline(never)]
     unsafe fn ser_dict(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        if !self.default.is_null() {
+            return self.guarded(p, obj, Self::ser_dict_checked);
+        }
+        self.ser_dict_inner(p, obj)
+    }
+
+    /// `default=` mode: `container` is kept alive by a strong reference while
+    /// it is serialized. `default` runs arbitrary code, which could drop the
+    /// last other reference to a list or dict we are in the middle of
+    /// (e.g. clear the list that holds it).
+    #[cold]
+    #[inline(never)]
+    unsafe fn guarded(
+        &mut self,
+        p: Cur,
+        container: *mut ffi::PyObject,
+        f: unsafe fn(&mut Self, Cur, *mut ffi::PyObject) -> CurResult,
+    ) -> CurResult {
+        ffi::Py_INCREF(container);
+        let r = f(self, p, container);
+        ffi::Py_DECREF(container);
+        r
+    }
+
+    /// `default=` mode dicts: `PyDict_Next` (re-validates its position
+    /// against the current table on every call) instead of the direct entry
+    /// walk, which keeps a pointer into the table that `default` could free
+    /// by resizing the dict; and CPython's "dictionary changed size during
+    /// iteration" error if `default` adds or removes items.
+    unsafe fn ser_dict_checked(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        if self.depth >= RECURSION_LIMIT {
+            return self.fail(SerError::Recursion);
+        }
+        let size = ffi::PyDict_Size(obj);
+        if size == 0 {
+            return self.put2(p, b"{}");
+        }
+        self.depth += 1;
+        let mut p = self.put(p, b'{');
+        let mut ns = 0;
+        let mut pos: ffi::Py_ssize_t = 0;
+        let mut key: *mut ffi::PyObject = ptr::null_mut();
+        let mut value: *mut ffi::PyObject = ptr::null_mut();
+        while ffi::PyDict_Next(obj, &mut pos, &mut key, &mut value) != 0 {
+            p = tri!(self.dict_item(p, key, value, ns));
+            if ffi::PyDict_Size(obj) != size {
+                ffi::PyErr_SetString(
+                    ffi::PyExc_RuntimeError,
+                    c"dictionary changed size during iteration".as_ptr(),
+                );
+                return self.fail(SerError::PyErrSet);
+            }
+            ns = 1;
+        }
+        self.depth -= 1;
+        self.put(p, b'}')
+    }
+
+    #[inline(always)]
+    unsafe fn ser_dict_inner(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
         if self.depth >= RECURSION_LIMIT {
             return self.fail(SerError::Recursion);
         }
@@ -2111,9 +2201,38 @@ impl Serializer {
             self.ser_tuple(p, obj)
         } else if ffi::PyFloat_Check(obj) != 0 {
             self.write_float(p, ffi::PyFloat_AS_DOUBLE(obj), 0, 0)
+        } else if !self.default.is_null() {
+            self.call_default(p, obj)
         } else {
             self.fail_obj(SerError::Unsupported, obj)
         }
+    }
+
+    /// Serializes `default(obj)` in place of `obj` (the separator is already
+    /// written). The result may itself be unsupported, in which case
+    /// `default` is called on it again; each call counts as a nesting level,
+    /// so a `default` that never converges (e.g. `lambda o: o`) raises the
+    /// nesting-depth error instead of recursing forever. Exceptions raised by
+    /// `default` propagate unchanged, as in `json.dumps`.
+    #[cold]
+    #[inline(never)]
+    unsafe fn call_default(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        if self.depth >= RECURSION_LIMIT {
+            return self.fail(SerError::Recursion);
+        }
+        // The call's caller must own its argument: `obj` is borrowed from a
+        // container that `default` itself could modify.
+        ffi::Py_INCREF(obj);
+        let res = ffi::PyObject_CallOneArg(self.default, obj);
+        ffi::Py_DECREF(obj);
+        if res.is_null() {
+            return self.fail(SerError::PyErrSet);
+        }
+        self.depth += 1;
+        let q = self.ser(p, res, 0, 0);
+        self.depth -= 1;
+        ffi::Py_DECREF(res);
+        q
     }
 
     // ----- results -----
@@ -2486,7 +2605,8 @@ fn to_pyerr(py: Python<'_>, ser: &Serializer, e: SerError) -> PyErr {
 }
 
 /// Serializes `obj` (borrowed) and returns a new reference to a `str`
-/// (`as_str`) or `bytes`. Entry point for raw METH_O wrappers.
+/// (`as_str`) or `bytes`. Entry point for the raw `dumps`/`dumps_str` wrappers;
+/// `default` is the `default=` callable (borrowed), or null.
 ///
 /// # Safety
 /// `obj` must be a valid object pointer and the GIL must be held.
@@ -2494,8 +2614,9 @@ pub unsafe fn dumps_raw(
     py: Python<'_>,
     obj: *mut ffi::PyObject,
     as_str: bool,
+    default: *mut ffi::PyObject,
 ) -> PyResult<*mut ffi::PyObject> {
-    let mut ser = Serializer::new(as_str);
+    let mut ser = Serializer::new(as_str, default);
     let start = ser.start();
     let end = ser.ser(start, obj, 0, 0);
     if end.is_null() {

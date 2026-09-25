@@ -80,19 +80,24 @@ aarch64), macOS and Windows.
 ## Usage
 
 ```python
+from datetime import datetime
+from uuid import uuid4
+
 import rjson
 
 data = rjson.loads('{"name": "rjson", "tags": ["fast", "safe"], "stars": 1e3}')
 payload = rjson.dumps(data)        # b'{"name":"rjson","tags":["fast","safe"],"stars":1000.0}'
 text = rjson.dumps_str(data)       # the same JSON as a str
+
+rjson.dumps({"at": datetime.now(), "id": uuid4()}, default=str)  # convert what rjson can't
 ```
 
 | name | kind | notes |
 |---|---|---|
 | `loads(data)` | function → object | `data`: `str`, `bytes`, `bytearray` or `memoryview` (any layout) |
-| `dumps(obj)` | function → `bytes` | compact UTF-8 JSON, like `orjson.dumps` |
-| `dumps_str(obj)` | function → `str` | like `json.dumps(obj, ensure_ascii=False, separators=(",", ":"))` |
-| `dumps_bytes(obj)` | function → `bytes` | alias of `dumps`, kept for compatibility |
+| `dumps(obj, *, default=None)` | function → `bytes` | compact UTF-8 JSON, like `orjson.dumps` |
+| `dumps_str(obj, *, default=None)` | function → `str` | like `json.dumps(obj, ensure_ascii=False, separators=(",", ":"))` |
+| `dumps_bytes(obj, *, default=None)` | function → `bytes` | alias of `dumps`, kept for compatibility |
 | `JSONDecodeError` | exception | `json.JSONDecodeError` itself (a `ValueError`) |
 | `JSONEncodeError` | exception | subclass of **both** `TypeError` and `ValueError`, like `orjson.JSONEncodeError` |
 | `__version__` | `str` | package version |
@@ -101,6 +106,11 @@ The wheel ships type stubs (`py.typed`), so mypy and pyright check calls to rjso
 
 - **Types:** `dict` (str keys), `list`, `tuple`, `str`, `int` (any size), `float`, `bool`,
   `None`, and their subclasses (`IntEnum`, `str` enums, `OrderedDict`, `namedtuple`, …).
+- **`default=`:** called with each value rjson cannot serialize; its return value is
+  serialized in its place (and passed to `default` again if still unsupported), as in
+  `json.dumps` and orjson. Exceptions it raises propagate unchanged. It is not called for
+  NaN/Infinity or non-str keys, which still raise. Supported values never reach it, so
+  native data runs at full speed.
 - **Errors:** `loads` raises `JSONDecodeError` with `pos`/`lineno`/`colno` matching `json`.
   `dumps`/`dumps_str` raise `JSONEncodeError` for unsupported types, non-str keys,
   NaN/Infinity, and nesting deeper than 254 (which also catches circular references), so
@@ -121,13 +131,13 @@ Most code migrates with a find-and-replace:
 | `json.dumps(obj).encode()` | `rjson.dumps(obj)` |
 | `except json.JSONDecodeError` / `orjson.JSONDecodeError` | `except rjson.JSONDecodeError` |
 | `except TypeError` / `orjson.JSONEncodeError` around `dumps` | `except rjson.JSONEncodeError` (`TypeError` keeps working) |
+| `json.dumps(obj, default=f)` / `orjson.dumps(obj, default=f)` | `rjson.dumps(obj, default=f)` |
 
 What does **not** carry over yet, and how to handle it:
 
 | feature | status | workaround |
 |---|---|---|
-| `default=` hook | [#4](https://github.com/TinDang97/rjson/issues/4) | call `rjson.dumps`; on `JSONEncodeError`, convert in Python and retry (native data pays nothing) |
-| datetime, UUID, dataclass, plain `Enum` | [#5](https://github.com/TinDang97/rjson/issues/5) | same fallback; see [`examples/codec.py`](examples/codec.py) |
+| datetime, UUID, dataclass, plain `Enum` | [#5](https://github.com/TinDang97/rjson/issues/5) | `default=` (e.g. `default=str`, or a converter like `_encode_default` in [`examples/json_logging.py`](examples/json_logging.py)) |
 | non-str dict keys | [#6](https://github.com/TinDang97/rjson/issues/6) | convert keys first (`json` coerces them, orjson needs `OPT_NON_STR_KEYS`) |
 | NaN / Infinity | by design | `dumps` raises (`json` writes `NaN`, orjson `null`) |
 | lenient `loads` (BOM, `NaN`, lone `"\ud800"`) | [#7](https://github.com/TinDang97/rjson/issues/7) | rejected, like orjson; `json` accepts them |
@@ -184,7 +194,7 @@ bodies, NDJSON logs, 100 MB files, cache blobs) rjson is faster on most shapes (
 
 **Is it safe?**
 It checks the exact type of every value, reserves the worst-case output size before
-writing, and version-gates every CPython internal it uses, with self-tests at import. 583
+writing, and version-gates every CPython internal it uses, with self-tests at import. 856
 tests, fuzzing against `json`, and 0 mismatches against orjson on all benchmark workloads.
 It is still 0.x: pin the version.
 
@@ -276,7 +286,7 @@ maturin develop --release && python -m pytest tests -q
 
 ## Roadmap
 
-- `default=` hook and native datetime/UUID/dataclass/Enum ([#4](https://github.com/TinDang97/rjson/issues/4), [#5](https://github.com/TinDang97/rjson/issues/5))
+- Native datetime/UUID/dataclass/Enum ([#5](https://github.com/TinDang97/rjson/issues/5))
 - Options: non-str keys ([#6](https://github.com/TinDang97/rjson/issues/6)), lenient `loads` ([#7](https://github.com/TinDang97/rjson/issues/7)), `indent`, `sort_keys`
 - Streaming decoder/encoder for async I/O; free-threading and subinterpreter support ([docs/ASYNC.md](docs/ASYNC.md#roadmap))
 - Performance: NEON kernels for aarch64

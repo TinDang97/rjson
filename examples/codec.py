@@ -1,7 +1,8 @@
 """A bytes codec for caches and message queues (Redis, Kafka, SQS, ...), built on rjson.
 
-rjson has no ``default=`` / ``object_hook`` options, so this module adds a small,
-explicit type-hook layer on top of it:
+rjson has no ``object_hook`` option, and its ``default=`` hook never sees tuples or dict
+keys (tuples encode natively as lists), so this module adds a small, explicit type-hook
+layer on top of it that round-trips both:
 
 * ``encode(obj) -> bytes`` / ``decode(data) -> obj`` with ``bytes``, ``bytearray`` or
   ``memoryview`` input (zero-copy from socket buffers).

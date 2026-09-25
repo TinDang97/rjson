@@ -19,6 +19,7 @@ import subprocess
 import sys
 import uuid
 import warnings
+from collections.abc import Mapping
 from pathlib import Path
 from types import ModuleType
 
@@ -469,6 +470,46 @@ class TestJSONFormatter:
         assert line["bad"] == "<unprintable Unreprable>"
         assert "<max depth exceeded>" in json.dumps(line["cyclic"])
         assert line["order"]["color"] == "green"
+
+    def test_default_hook_matches_python_fallback(self, json_logger, monkeypatch):
+        extras = {
+            "when": dt.datetime(2024, 1, 2, 3, 4, 5),
+            "day": dt.date(2024, 1, 2),
+            "id": uuid.UUID(int=1),
+            "amount": decimal.Decimal("1.50"),
+            "took": dt.timedelta(seconds=1.5),
+            "color": Color.RED,
+            "tags": frozenset({"a"}),
+            "obj": object(),
+            "bad": Unreprable(),
+            "order": Order(
+                uuid.UUID(int=2), decimal.Decimal("3"), Color.GREEN, dt.datetime(2024, 1, 1)
+            ),
+        }
+        expected = json.loads(rjson.dumps_str(logging_mod._jsonable(extras, 0)))
+        # No NaN and only str keys: the default= hook handles everything in one call.
+        monkeypatch.setattr(logging_mod, "_jsonable", None)
+        logger, lines = json_logger
+        logger.info("x", extra=extras)
+        (line,) = lines()
+        assert {k: line[k] for k in extras} == expected
+
+    def test_default_hook_never_raises(self):
+        class BadMapping(Mapping):
+            def __getitem__(self, key):
+                raise KeyError(key)
+
+            def __iter__(self):
+                raise RuntimeError("broken")
+
+            def __len__(self):
+                return 1
+
+            def __repr__(self):
+                return "<BadMapping>"
+
+        assert logging_mod._encode_default(BadMapping()) == "<BadMapping>"
+        assert logging_mod._encode_default(Unreprable()) == "<unprintable Unreprable>"
 
     def test_colliding_extra_is_renamed(self, json_logger):
         logger, lines = json_logger

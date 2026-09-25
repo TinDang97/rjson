@@ -146,7 +146,7 @@ Tried and reverted, because each measured slower: SWAR digit formatting for all 
 
 ### Build and entry points (`src/entry.rs`, `Cargo.toml`, `scripts/`)
 
-- **Raw `METH_O` entry points** replace `#[pyfunction]`, saving about 8 ns per call. They keep PyO3's trampoline so panics are caught and PyO3's GIL bookkeeping stays correct.
+- **Raw entry points** (`METH_O` for `loads`; `METH_FASTCALL|METH_KEYWORDS` with a one-compare fast path for `dumps`/`dumps_str`, since `default=`) replace `#[pyfunction]`, saving about 8 ns per call. They keep PyO3's trampoline so panics are caught and PyO3's GIL bookkeeping stays correct.
 - **No debug info in release builds**, which shrinks the `.so` about 10×.
 - **All ~3.6k lines of the old `src/` replaced** (including dead or slower code: `lib_backup.rs`, `extreme.rs`, `simd_parser.rs`/`loads_simd`, `bulk.rs`, `type_cache.rs`, the old escaper) by ~3.7k lines in five files. The serde, simd-json, ahash, smallvec and memchr dependencies went with it.
 - **`scripts/build_pgo.sh`** does instrument → train (`scripts/pgo_train.py`) → merge → rebuild, one profile per interpreter. The first round's "3.11 PGO" numbers (since replaced in §1 by plain release builds) came from an earlier version of the script that had two flaws: it trained on the benchmark itself (corpora and the benchmark's synthetic cases), and it passed the PGO flags through `RUSTFLAGS`, which silently replaced `.cargo/config.toml`'s `target-cpu=x86-64-v2`, so those wheels were baseline x86-64. Both are fixed: flags go through `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` (merged with the config), and training uses seeded synthetic documents of other shapes that read no corpus file.
@@ -199,7 +199,7 @@ Numbers: [docs/PRODUCTION_READINESS.md](PRODUCTION_READINESS.md#performance-fixe
 - **CI.** `.github/workflows/ci.yml`: clippy, then build + pytest on 3.10–3.14 (ubuntu x86_64), a no-AVX-512 variant, ubuntu-24.04-arm (3.10, 3.13), macos-14 and Windows (3.13). `cargo fmt --check` is not enforced yet (`entry.rs` and `parser.rs` are not rustfmt-clean) and clippy warnings are not fatal (one in `ser.rs`; five more dead-code/unused warnings only on aarch64).
 - **Performance regression gate.** `.github/workflows/perf.yml` (PRs labelled `perf`, or manual): builds base and head in one job, runs `corpus_benchmark.py --output-json` for both, interleaved ×5 on 3.11 and 3.13, and `benches/perf_gate.py` fails if any geomean is more than 5% worse. Corpora come from `benches/fetch_corpus.sh` (sha256-pinned). On this dev host, two runs of the same build differ by 1–3% in geomean, so 5% with 5 rounds is about the floor. Still to add: per-call time on tiny documents, `.so` size, import time and peak memory.
 - **Fuzzing.** Both review rounds ran differential fuzzers against stdlib `json` (≈150k `dumps` cases, plus `loads` value/error/float fuzzing), but the scripts live outside the repo. Next: check them in under `tests/fuzz/` and run a random-structure fuzzer under ASan in CI.
-- **Feature parity.** orjson also offers indent, sorted keys, `default=`, and serialization of datetime, UUID, dataclasses and numpy. Add them behind `METH_FASTCALL|METH_KEYWORDS` with hand-parsed keyword names, resolving those types lazily so import time stays low.
+- **Feature parity.** `default=` is done (entry is `METH_FASTCALL|METH_KEYWORDS`; per-call cost unchanged, containers +~8 instructions for the mode check). orjson also offers indent, sorted keys, and serialization of datetime, UUID, dataclasses and numpy. Add them as further hand-parsed keyword names, resolving those types lazily so import time stays low.
 
 ## 5. Decisions (resolved)
 
@@ -215,7 +215,7 @@ Numbers: [docs/PRODUCTION_READINESS.md](PRODUCTION_READINESS.md#performance-fixe
 uv venv .venv -p 3.11 && . .venv/bin/activate
 uv pip install maturin orjson pytest
 maturin develop --release
-python -m pytest tests -q                      # 583 tests
+python -m pytest tests -q                      # 856 tests
 benches/fetch_corpus.sh                        # corpora -> benches/data/ (sha256-pinned)
 python benches/corpus_benchmark.py [--json] [--output-json results.json]
 python benches/make_charts.py results.json     # README charts -> docs/img/

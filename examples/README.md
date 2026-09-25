@@ -14,12 +14,14 @@ Copy the file you need into your project; nothing here is installed with rjson.
 
 ## Things to know before migrating
 
-rjson's API is `loads`, `dumps` (bytes), `dumps_str` (str). It has no keyword options:
+rjson's API is `loads`, `dumps` (bytes), `dumps_str` (str). The only keyword option is
+`default=`:
 
-- **No `default=`, `option=`, `indent`, `sort_keys`, `ensure_ascii`.** datetime, UUID,
-  Decimal, dataclasses and plain `Enum` raise. Every example uses the same workaround: call
-  rjson first, and only when it raises, convert the data in Python and call it again.
-  Data that is already JSON-native pays nothing.
+- **No `option=`, `indent`, `sort_keys`, `ensure_ascii`.** datetime, UUID, Decimal,
+  dataclasses and plain `Enum` raise unless `default=` converts them (`json_logging.py`
+  does). `default` is not called for NaN or non-str keys, so the examples keep a second
+  tier: call rjson first, and only when it raises, convert the data in Python and call it
+  again. Data that is already JSON-native pays nothing.
 - **`dumps` raises `rjson.JSONEncodeError`**, a subclass of both `TypeError` and
   `ValueError` (like `orjson.JSONEncodeError`), for an unsupported type, a non-str key,
   NaN/Infinity or too-deep nesting, so `except TypeError` handlers written for
@@ -51,5 +53,6 @@ rjson's API is `loads`, `dumps` (bytes), `dumps_str` (str). It has no keyword op
   (Pydantic `dump_json`, 47 µs) is already as fast as `dump_python` + rjson (45 µs), so
   leave those alone.
 - Logging: 2.4 µs per record with `JSONFormatter` against 5.2 µs for the same payload
-  through `json.dumps(default=str)`. When an extra needs the fallback, both take about
-  5 µs. A `default=` hook in rjson would remove that gap.
+  through `json.dumps(default=str)`. A record with datetime and UUID extras takes 3.4–4 µs
+  through the formatter's `default=` hook, against 7.6 µs with the old convert-and-retry
+  fallback, which now only runs for NaN and non-str keys.

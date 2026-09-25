@@ -2,8 +2,9 @@
 
 * :class:`JSONFormatter` turns each ``logging.LogRecord`` into one JSON object per line
   (timestamp, level, logger, message, exception, ``extra=`` fields). It never raises:
-  values rjson cannot encode (datetime, UUID, NaN, arbitrary objects, non-str keys) are
-  converted to strings on a fallback path that only runs when the fast path fails.
+  values rjson cannot encode (datetime, UUID, Decimal, Enum, dataclasses, arbitrary
+  objects) are converted by a ``default=`` hook inside the same ``dumps_str`` call; NaN
+  and non-str keys, which ``default=`` does not cover, take a slower Python fallback.
 * :func:`write_ndjson` / :func:`read_ndjson` stream newline-delimited JSON to and from a
   file object, skipping blank lines and reporting bad lines with their line number.
 
@@ -125,8 +126,8 @@ def _message(record: logging.LogRecord) -> str:
 
 def _to_json_line(payload: dict[str, Any]) -> str:
     try:
-        text = rjson.dumps_str(payload)
-    except (TypeError, ValueError):  # unsupported type, NaN, non-str key, too deep
+        text = rjson.dumps_str(payload, default=_encode_default)
+    except (TypeError, ValueError):  # NaN, non-str key, too deep
         try:
             text = rjson.dumps_str(_jsonable(payload, 0))
         except (TypeError, ValueError) as exc:  # not expected; logging must not raise
@@ -137,6 +138,31 @@ def _to_json_line(payload: dict[str, Any]) -> str:
     if not text.isascii():  # O(1) in CPython: ASCII-only lines skip the scan
         text = _SURROGATES.sub("\ufffd", text)
     return text
+
+
+def _encode_default(value: Any) -> Any:
+    """``default=`` hook: one JSON-compatible replacement for a value rjson cannot encode.
+
+    Converts like :func:`_jsonable` and never raises (logging must not). rjson calls it
+    again on anything it returns that is still unsupported (a dataclass field, an Enum's
+    value).
+    """
+    try:
+        if isinstance(value, enum.Enum):
+            return value.value
+        if isinstance(value, (dt.datetime, dt.date, dt.time)):
+            return value.isoformat()
+        if isinstance(value, (uuid.UUID, decimal.Decimal, dt.timedelta)):
+            return str(value)
+        if isinstance(value, Mapping):
+            return dict(value)
+        if isinstance(value, (set, frozenset)):
+            return list(value)
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            return {f.name: getattr(value, f.name, None) for f in dataclasses.fields(value)}
+    except Exception:  # e.g. a broken Mapping; logging must not raise
+        return _safe_repr(value)
+    return _safe_repr(value)
 
 
 def _jsonable(value: Any, depth: int) -> Any:
