@@ -103,15 +103,19 @@ status column reflects this branch.
 | mixed-magnitude float arrays `loads` | 1.12–1.32× slower | **fixed**: 0.89–0.95× ([#9](https://github.com/TinDang97/rjson/issues/9)); arrays of mostly `0.0` ~1.05× (allocation-bound) |
 | cold-cache tiny `dumps` | parity on 3.13, 1.29× on 3.11 | at the noise floor; PGO release wheels should cover it |
 
-Memory side effects shared with orjson (the stdlib `json` has none of them):
+Memory side effects shared with orjson (the stdlib `json` has none of them), and what this
+branch changed ([#10](https://github.com/TinDang97/rjson/issues/10)):
 
-- `dumps` to bytes makes CPython attach a UTF-8 copy to each non-ASCII source `str` (+98%
-  memory for those strings, for their lifetime). `dumps_str` does not.
-- `loads(str)` on non-ASCII text attaches a UTF-8 copy to the input string. Pass `bytes`
-  when you can.
-- `loads(memoryview)` copies the input (peak 621 MB vs 528 MB from `bytes` on 97 MB).
+| side effect | before | now |
+|---|---|---|
+| `dumps` to bytes attaches a UTF-8 copy to each non-ASCII source `str` (+98% memory for its lifetime) | every non-ASCII string | only strings under 256 characters (keys, names, labels: cheap, and the copy makes repeated `dumps` fast); longer text is encoded directly, and fresh long text is faster than orjson (CJK 0.73–0.81×) |
+| `loads(str)` attaches a UTF-8 copy to non-ASCII input (+132%) | every non-ASCII input | only inputs under 4,096 characters; larger ones use a temporary buffer (0.8 MB input: 0.81 MB kept → 0) |
+| `loads(memoryview)` copies the input | always (peak 621 vs 528 MB on 97 MB) | not for views of a whole `bytes`/`bytearray` ≥ 4 KiB: peak equals `bytes` input |
 
-All three are tracked in [#10](https://github.com/TinDang97/rjson/issues/10).
+The trade-off: serializing the *same* long non-ASCII strings repeatedly now re-encodes them
+on every call (8–30× slower for those strings than reusing the attached copy); parsing the
+same large `str` object repeatedly re-encodes it too. Fresh data, the common case, is
+unaffected or faster. `dumps_str` never attached a copy.
 
 ### Performance fixes
 

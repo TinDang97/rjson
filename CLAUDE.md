@@ -46,7 +46,8 @@ docs/ASYNC.md                 # asyncio/threads guidance, free-threading/subinte
 - Numbers: 8-digits-at-a-time ints (big ints exact via PyLong_FromString), floats correctly rounded (exact fast path → Eisel-Lemire → fast_float). The fast path takes up to 19 fraction digits / 19 significant digits (`digits19`, lookahead 48 bytes), so full-precision doubles stay on it; keep its checks branch-free where data mixes shapes (0.0 among other values).
 - Own UTF-8 decoder writing into the final str; bytes input validated once with simdutf8. UCS2 results go through `decode_ucs2` (SSSE3, cfg-gated): 8/16-byte ASCII widening, 5×3-byte blocks via one u64 pattern pre-check + masked compare + shuffles, otherwise two chars per trip. Vector paths only for whole blocks with a constant advance (a data-dependent advance serialized the loop); wide stores only when that many units are left (`nchars`).
 - Cyclic GC paused during parsing on CPython 3.10/3.11 only (`pause_gc`/`resume_gc`).
-- Errors: `json.JSONDecodeError` (exported as `rjson.JSONDecodeError`); `.msg` is the bare reason; positions match json (trailing comma at the comma); depth limit 1024; trailing content rejected. memoryview input: any layout, copied in C order.
+- Errors: `json.JSONDecodeError` (exported as `rjson.JSONDecodeError`); `.msg` is the bare reason; positions match json (trailing comma at the comma); depth limit 1024; trailing content rejected.
+- Input: the parser needs a readable NUL after the document. memoryview: parsed in place when C-contiguous, >= 4 KiB and ending exactly where its `bytes`/`bytearray` ends (found via `memoryview.obj`; export held in `Input::held`), else copied in C order (any layout). Non-ASCII `str` >= 4096 chars without a cached UTF-8 copy: temporary `bytes` via `PyUnicode_AsUTF8String` (`Input::temp`), so no copy stays attached to the caller's string.
 
 ### dumps (`ser.rs`)
 - Exact `ob_type` pointer dispatch on raw borrowed pointers; subclasses handled on a slower path.
@@ -59,6 +60,7 @@ docs/ASYNC.md                 # asyncio/threads guidance, free-threading/subinte
 - Output buffer headroom (1/16) must stay below the shrink threshold (1/8): shrinking every call makes glibc mmap and page-fault every large result.
 - Capacity: initial = min of the last two output sizes per thread and mode (`SizeHistory`); first growth jumps to the peak of the last 64 calls; growth past 1 MiB reserves ≥ 32 MiB + 64 KiB (always mmapped, shrunk back in `into_object`). Keep a result from ever holding the reservation.
 - Recursion limit 254 (also catches circular references).
+- Non-ASCII strings in bytes output: cached UTF-8 copy if present; < 256 chars via `PyUnicode_AsUTF8AndSize` (attaches the copy: fast repeats); longer UCS2/UCS4 via `encode_utf8_escaped` (direct, ASCII 8-blocks only at ASCII units), longer Latin-1 via a temporary `PyUnicode_AsUTF8String`. No copy attached to long strings.
 - Every serializer-detected failure raises `rjson.JSONEncodeError` (`ser::to_pyerr`, cold); Python-raised errors (`SerError::PyErrSet`) propagate unchanged.
 
 ### Entry points (`entry.rs`)
