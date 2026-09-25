@@ -125,6 +125,15 @@ type PResult<T> = Result<T, Fail>;
 
 static JSON_DECODE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 
+/// `json.JSONDecodeError`, which `loads` raises and the module exports as
+/// `rjson.JSONDecodeError` (the same object, so either name catches it).
+pub(crate) fn decode_error_type(py: Python<'_>) -> PyResult<&Py<PyType>> {
+    JSON_DECODE_ERROR.get_or_try_init(py, || -> PyResult<Py<PyType>> {
+        let m = py.import("json")?;
+        Ok(m.getattr("JSONDecodeError")?.cast_into::<PyType>()?.unbind())
+    })
+}
+
 #[cold]
 #[inline(never)]
 fn raise_decode_error(py: Python<'_>, msg: &str, doc: &[u8], pos: usize) -> PyErr {
@@ -134,10 +143,7 @@ fn raise_decode_error(py: Python<'_>, msg: &str, doc: &[u8], pos: usize) -> PyEr
     let pos = pos.min(doc.len());
     let char_pos = doc[..pos].iter().filter(|&&b| (b & 0xC0) != 0x80).count();
     let full = format!("JSON parsing error: {msg}");
-    let ty = JSON_DECODE_ERROR.get_or_try_init(py, || -> PyResult<Py<PyType>> {
-        let m = py.import("json")?;
-        Ok(m.getattr("JSONDecodeError")?.cast_into::<PyType>()?.unbind())
-    });
+    let ty = decode_error_type(py);
     match ty {
         Ok(ty) => PyErr::from_type(ty.bind(py).clone(), (full, doc_str.into_owned(), char_pos)),
         Err(_) => pyo3::exceptions::PyValueError::new_err(full),

@@ -51,7 +51,7 @@ unsafe fn dumps_str_body(py: Python<'_>, _m: *mut ffi::PyObject, arg: *mut ffi::
     crate::ser::dumps_raw(py, arg, true)
 }
 
-/// `loads(obj: str | bytes | bytearray | memoryview) -> Any`
+/// `loads(data: str | bytes | bytearray | memoryview) -> Any`
 unsafe extern "C" fn loads(module: *mut ffi::PyObject, arg: *mut ffi::PyObject) -> *mut ffi::PyObject {
     pyo3::impl_::trampoline::get_trampoline_function!(binaryfunc, loads_body)(module, arg)
 }
@@ -82,7 +82,7 @@ static METHODS: MethodDefs = MethodDefs([
         ml_name: c"loads".as_ptr(),
         ml_meth: ffi::PyMethodDefPointer { PyCFunction: loads },
         ml_flags: ffi::METH_O,
-        ml_doc: c"loads(obj, /)\n--\n\nDeserialize JSON (str, bytes, bytearray or memoryview) to Python objects.".as_ptr(),
+        ml_doc: c"loads(data, /)\n--\n\nDeserialize JSON (str, bytes, bytearray or memoryview) to Python objects.".as_ptr(),
     },
     ffi::PyMethodDef {
         ml_name: c"dumps".as_ptr(),
@@ -104,9 +104,31 @@ static METHODS: MethodDefs = MethodDefs([
     },
 ]);
 
+/// Public names (`from rjson import *`). The wheel installs this extension
+/// as `rjson/rjson.*.so` behind a maturin-generated `rjson/__init__.py`
+/// that does `from .rjson import *` and copies `__all__`, so a name missing
+/// here (notably the underscore-prefixed `__version__`) would not be
+/// reachable as `rjson.<name>`. Keep in sync with `rjson.pyi`.
+const ALL: [&str; 7] = [
+    "JSONDecodeError",
+    "JSONEncodeError",
+    "__version__",
+    "dumps",
+    "dumps_bytes",
+    "dumps_str",
+    "loads",
+];
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
-    let modname = m.name()?;
+    // `__module__` of the functions, which CPython also uses in argument
+    // errors ("rjson.dumps() takes no keyword arguments"): the public package
+    // `rjson`, not this extension's import name `rjson.rjson`.
+    let full_name = m.name()?;
+    let modname = match full_name.to_str()?.rsplit_once('.') {
+        Some((parent, _)) => pyo3::types::PyString::new(py, parent),
+        None => full_name,
+    };
     for def in METHODS.0.iter() {
         // CPython never writes through the def pointer.
         let def = def as *const ffi::PyMethodDef as *mut ffi::PyMethodDef;
@@ -118,5 +140,10 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         }
     }
     m.add("JSONEncodeError", crate::ser::encode_error_type(py)?.bind(py))?;
+    // The very same class as json.JSONDecodeError (what loads raises). Also
+    // warms the lookup `loads` would otherwise do on its first error.
+    m.add("JSONDecodeError", crate::parser::decode_error_type(py)?.bind(py))?;
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add("__all__", pyo3::types::PyList::new(py, ALL)?)?;
     Ok(())
 }

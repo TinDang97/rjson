@@ -760,5 +760,110 @@ class TestInputTypeErrors:
         assert rjson.loads(memoryview(a)) == [1]
 
 
+REPO_ROOT = __import__("pathlib").Path(__file__).resolve().parent.parent
+PUBLIC_NAMES = {
+    "JSONDecodeError",
+    "JSONEncodeError",
+    "__version__",
+    "dumps",
+    "dumps_bytes",
+    "dumps_str",
+    "loads",
+}
+
+
+class TestModuleSurface:
+    """Drop-in names shared with json/orjson, version, and the stub."""
+
+    def test_json_decode_error_is_the_stdlib_class(self):
+        assert rjson.JSONDecodeError is json.JSONDecodeError
+        with pytest.raises(rjson.JSONDecodeError):
+            rjson.loads("[")
+
+    def test_json_encode_error_is_exported(self):
+        assert issubclass(rjson.JSONEncodeError, TypeError)
+        assert issubclass(rjson.JSONEncodeError, ValueError)
+        with pytest.raises(rjson.JSONEncodeError):
+            rjson.dumps(object())
+
+    def test_version_matches_pyproject(self):
+        import re
+
+        text = (REPO_ROOT / "pyproject.toml").read_text()
+        m = re.search(r'(?m)^version\s*=\s*"([^"]+)"', text)
+        assert m is not None
+        assert rjson.__version__ == m.group(1)
+        assert isinstance(rjson.__version__, str)
+
+    def test_version_matches_installed_metadata(self):
+        from importlib import metadata
+
+        try:
+            installed = metadata.version("pyrjson")
+        except metadata.PackageNotFoundError:
+            pytest.skip("pyrjson distribution metadata not installed")
+        assert rjson.__version__ == installed
+
+    def test_all_and_star_import(self):
+        assert set(rjson.__all__) == PUBLIC_NAMES
+        assert all(hasattr(rjson, n) for n in rjson.__all__)
+        ns = {}
+        exec("from rjson import *", ns)
+        assert PUBLIC_NAMES <= set(ns)
+        assert ns["JSONDecodeError"] is json.JSONDecodeError
+
+    @pytest.mark.parametrize("name", ["loads", "dumps", "dumps_str", "dumps_bytes"])
+    def test_functions_report_public_module(self, name):
+        f = getattr(rjson, name)
+        assert f.__module__ == "rjson"
+        with pytest.raises(TypeError) as ei:
+            f("1", extra=1)
+        msg = str(ei.value)
+        assert "rjson.rjson" not in msg
+        assert msg.startswith("rjson.")
+
+    @pytest.mark.parametrize("name", ["loads", "dumps", "dumps_str", "dumps_bytes"])
+    def test_functions_pickle_by_reference(self, name):
+        import pickle
+
+        f = getattr(rjson, name)
+        assert pickle.loads(pickle.dumps(f)) is f
+
+    def test_error_messages_do_not_expose_internal_module(self):
+        for call in (lambda: rjson.loads(None), lambda: rjson.dumps(object())):
+            with pytest.raises(TypeError) as ei:
+                call()
+            assert "rjson.rjson" not in str(ei.value)
+        assert "rjson.rjson" not in repr(rjson.JSONEncodeError)
+
+    def test_stub_matches_runtime(self):
+        import ast
+
+        stub = REPO_ROOT / "rjson.pyi"
+        tree = ast.parse(stub.read_text())
+        defined = set()
+        stub_all = None
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                defined.add(node.name)
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                defined.add(node.target.id)
+            elif isinstance(node, ast.Assign) and node.targets[0].id == "__all__":
+                stub_all = ast.literal_eval(node.value)
+            elif isinstance(node, ast.ImportFrom):
+                defined.update(a.asname or a.name for a in node.names)
+        assert stub_all is not None and set(stub_all) == PUBLIC_NAMES
+        assert PUBLIC_NAMES <= defined
+
+    def test_stub_and_marker_installed_with_package(self):
+        import pathlib
+
+        pkg = pathlib.Path(rjson.__file__)
+        if pkg.name != "__init__.py":
+            pytest.skip("rjson not installed as a package")
+        assert (pkg.parent / "__init__.pyi").is_file()
+        assert (pkg.parent / "py.typed").is_file()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
