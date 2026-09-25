@@ -927,6 +927,82 @@ class TestMemoryviewLayouts:
         buf.extend(b"  ")  # would raise BufferError if an export leaked
 
 
+class TestMemoryviewInPlace:
+    """Large C-contiguous memoryviews that end where their bytes/bytearray
+    ends are parsed in place (no copy); the parser relies on the NUL byte
+    after the data, so every other view must still be copied."""
+
+    @staticmethod
+    def big_doc(n=3000):
+        return json.dumps({"items": [{"id": i, "name": f"n{i}é"} for i in range(n)]}).encode()
+
+    @pytest.mark.parametrize("pad", [0, 1, 4095, 4096, 4097, 100000])
+    def test_whole_bytes_and_bytearray(self, pad):
+        doc = b"[" + b" " * pad + b"1]"
+        for base in (doc, bytearray(doc)):
+            assert rjson.loads(memoryview(base)) == [1]
+        big = self.big_doc()
+        assert rjson.loads(memoryview(big)) == json.loads(big)
+        assert rjson.loads(memoryview(bytearray(big))) == json.loads(big)
+
+    @pytest.mark.parametrize("size", [4095, 4096, 5000, 70000])
+    def test_slice_followed_by_digits_is_not_overread(self, size):
+        # The view ends before the object does; the bytes after it ("999")
+        # must not be parsed as part of the number or the document.
+        body = b"[1" + b" " * (size - 3) + b"]"
+        for base in (body + b"999", bytearray(body + b"999")):
+            mv = memoryview(base)[: len(body)]
+            assert rjson.loads(mv) == [1]
+        num = b" " * size + b"12"
+        for base in (num + b"34", bytearray(num + b"34")):
+            assert rjson.loads(memoryview(base)[: len(num)]) == 12
+
+    def test_suffix_view_ends_at_object_end(self):
+        big = self.big_doc()
+        base = b"garbage" + big
+        assert rjson.loads(memoryview(base)[7:]) == json.loads(big)
+        ba = bytearray(base)
+        assert rjson.loads(memoryview(ba)[7:]) == json.loads(big)
+
+    def test_export_released_bytearray_resizable_after(self):
+        big = bytearray(self.big_doc())
+        mv = memoryview(big)
+        assert rjson.loads(mv) == json.loads(bytes(big))
+        mv.release()
+        big.extend(b" ")  # BufferError if loads leaked its export
+        bad = bytearray(b"[" + b"1," * 5000 + b"]")
+        mv = memoryview(bad)
+        with pytest.raises(rjson.JSONDecodeError):
+            rjson.loads(mv)
+        mv.release()
+        bad.extend(b" ")
+
+    def test_errors_match_bytes_input(self):
+        doc = b'{"a": [' + b"1, " * 3000 + b'2,]}'
+        with pytest.raises(rjson.JSONDecodeError) as want:
+            rjson.loads(doc)
+        for base in (doc, bytearray(doc)):
+            with pytest.raises(rjson.JSONDecodeError) as got:
+                rjson.loads(memoryview(base))
+            assert (got.value.msg, got.value.pos, got.value.lineno, got.value.colno) == (
+                want.value.msg, want.value.pos, want.value.lineno, want.value.colno)
+
+    def test_other_exporters_and_subclasses(self):
+        import array
+
+        big = self.big_doc()
+
+        class B(bytes):
+            pass
+
+        assert rjson.loads(memoryview(B(big))) == json.loads(big)
+        arr = array.array("B", big)
+        assert rjson.loads(memoryview(arr)) == json.loads(big)
+        # Invalid UTF-8 near the end, in place.
+        with pytest.raises(rjson.JSONDecodeError):
+            rjson.loads(memoryview(big[:-3] + b'"\xff"]}'))
+
+
 class TestInputTypeErrors:
     @pytest.mark.parametrize("bad", [None, 1, 1.5, ["[]"], {"a": 1}, object()])
     def test_rejected_with_type_name(self, bad):

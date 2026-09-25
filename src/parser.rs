@@ -4,7 +4,8 @@
 //!
 //! * Input is borrowed: `str` via `PyUnicode_AsUTF8AndSize` (zero-copy for
 //!   compact ASCII strings, cached UTF-8 otherwise), `bytes`/`bytearray`
-//!   directly; `memoryview` is copied. All of these are followed by a NUL
+//!   directly; `memoryview` is parsed in place when it ends where its
+//!   `bytes`/`bytearray` ends, else copied. All of these are followed by a NUL
 //!   byte, so `peek()` needs no bounds check (see `parse`). Bytes input is
 //!   validated once up front with `simdutf8`.
 //! * Recursive descent with one value stack (`Vec<*mut PyObject>`, pooled
@@ -1783,14 +1784,29 @@ unsafe fn decode_into<T: CodeUnit>(bytes: &[u8], mut out: *mut T) {
 
 /// Borrowed view of the input document plus whatever keeps it alive.
 /// `ptr[len]` is always a readable NUL byte (required by `parse`): `str`
-/// (UTF-8 cache), `bytes` and `bytearray` buffers guarantee one; other
-/// buffers are copied into `owned` with one appended.
+/// (UTF-8 cache), `bytes` and `bytearray` buffers guarantee one; a
+/// memoryview that ends where its `bytes`/`bytearray` ends is parsed in
+/// place (`held`); other buffers are copied into `owned` with one appended.
 pub(crate) struct Input {
     pub(crate) ptr: *const u8,
     pub(crate) len: usize,
     pub(crate) utf8_valid: bool,
     #[allow(dead_code)] // only keeps the copy alive
     owned: Option<Vec<u8>>,
+    /// A buffer export held for the parse (released on drop, with the GIL
+    /// held: `Input` lives inside `loads`). While it is held a `bytearray`
+    /// cannot be resized, so `ptr` stays valid.
+    held: Option<Box<ffi::Py_buffer>>,
+}
+
+impl Drop for Input {
+    fn drop(&mut self) {
+        if let Some(view) = self.held.as_mut() {
+            // SAFETY: obtained by PyObject_GetBuffer and not released yet;
+            // `loads` still holds the GIL when its `Input` is dropped.
+            unsafe { ffi::PyBuffer_Release(&mut **view) };
+        }
+    }
 }
 
 pub(crate) unsafe fn get_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyResult<Input> {
@@ -1801,7 +1817,7 @@ pub(crate) unsafe fn get_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyRes
             ffi::PyErr_Clear();
             return Err(raise_decode_error(py, "str is not valid UTF-8: surrogates not allowed", b"", 0));
         }
-        return Ok(Input { ptr: p as *const u8, len: size as usize, utf8_valid: true, owned: None });
+        return Ok(Input { ptr: p as *const u8, len: size as usize, utf8_valid: true, owned: None, held: None });
     }
     if ffi::PyBytes_Check(obj) != 0 {
         return Ok(Input {
@@ -1809,6 +1825,7 @@ pub(crate) unsafe fn get_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyRes
             len: ffi::PyBytes_Size(obj) as usize,
             utf8_valid: false,
             owned: None,
+            held: None,
         });
     }
     if ffi::PyByteArray_Check(obj) != 0 {
@@ -1817,6 +1834,7 @@ pub(crate) unsafe fn get_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyRes
             len: ffi::PyByteArray_Size(obj) as usize,
             utf8_valid: false,
             owned: None,
+            held: None,
         });
     }
     if ffi::PyMemoryView_Check(obj) != 0 {
@@ -1840,6 +1858,11 @@ unsafe fn memoryview_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyResult<
     }
     // `view.len` is the total byte size (product(shape) * itemsize) for any layout.
     let len = view.len as usize;
+    if len >= MEMORYVIEW_IN_PLACE_MIN && ffi::PyBuffer_IsContiguous(&view, b'C' as std::os::raw::c_char) != 0 {
+        if let Some(input) = memoryview_in_place(obj, &view) {
+            return Ok(input.with_view(view));
+        }
+    }
     let mut owned: Vec<u8> = Vec::with_capacity(len + 1);
     if len > 0 {
         if ffi::PyBuffer_IsContiguous(&view, b'C' as std::os::raw::c_char) != 0 {
@@ -1866,7 +1889,55 @@ unsafe fn memoryview_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyResult<
     }
     owned.push(0);
     ffi::PyBuffer_Release(&mut view);
-    Ok(Input { ptr: owned.as_ptr(), len, utf8_valid: false, owned: Some(owned) })
+    Ok(Input { ptr: owned.as_ptr(), len, utf8_valid: false, owned: Some(owned), held: None })
+}
+
+/// Below this size the copy is cheaper than looking up `memoryview.obj`.
+const MEMORYVIEW_IN_PLACE_MIN: usize = 4096;
+
+impl Input {
+    fn with_view(mut self, view: ffi::Py_buffer) -> Input {
+        self.held = Some(Box::new(view));
+        self
+    }
+}
+
+/// Zero-copy input for a C-contiguous memoryview whose bytes end exactly
+/// where the data of the `bytes`/`bytearray` it views ends: that object's
+/// data is followed by a NUL byte (CPython keeps both NUL-terminated), which
+/// `parse` needs. A view that ends earlier (`mv[:n]` of a larger buffer) is
+/// followed by arbitrary bytes and must be copied. The underlying object is
+/// read through the public `memoryview.obj` attribute (the struct layout is
+/// not part of the stable API). Returns None to fall back to the copy.
+#[cold]
+unsafe fn memoryview_in_place(mv: *mut ffi::PyObject, view: &ffi::Py_buffer) -> Option<Input> {
+    let base = ffi::PyObject_GetAttrString(mv, c"obj".as_ptr());
+    if base.is_null() {
+        ffi::PyErr_Clear();
+        return None;
+    }
+    let (data, size) = if ffi::PyBytes_Check(base) != 0 {
+        (ffi::PyBytes_AsString(base) as *const u8, ffi::PyBytes_Size(base))
+    } else if ffi::PyByteArray_Check(base) != 0 {
+        (ffi::PyByteArray_AsString(base) as *const u8, ffi::PyByteArray_Size(base))
+    } else {
+        (ptr::null(), 0)
+    };
+    // `view` holds an export of `mv`, which keeps `base` alive and (for a
+    // bytearray) unresizable, so dropping this reference is safe.
+    ffi::Py_DECREF(base);
+    if data.is_null() || size < 0 {
+        ffi::PyErr_Clear();
+        return None;
+    }
+    let buf = view.buf as *const u8;
+    let len = view.len as usize;
+    let end = data.add(size as usize);
+    if buf < data || buf.add(len) != end {
+        return None;
+    }
+    debug_assert_eq!(*end, 0);
+    Some(Input { ptr: buf, len, utf8_valid: false, owned: None, held: None })
 }
 
 #[cold]
