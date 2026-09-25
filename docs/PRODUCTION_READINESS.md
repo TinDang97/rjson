@@ -23,7 +23,7 @@ these today (see [`examples/`](../examples/)), and each is tracked as an issue.
 | question | answer |
 |---|---|
 | Faster than `json`? | Yes: 4–20× on `dumps`, 1.3–5× on `loads`. |
-| Faster than orjson? | Yes on most shapes: geomean `dumps` 0.76×, `loads` 0.87×, round trip 0.83× (rjson ÷ orjson time). CJK text now loads faster than orjson (0.59–0.91×); mixed float arrays remain slower, see [Performance](#performance). |
+| Faster than orjson? | Yes on most shapes: geomean `dumps` 0.76×, `loads` 0.87×, round trip 0.83× (rjson ÷ orjson time). CJK text (0.59–0.91×) and full-precision float arrays (0.89–0.95×) now load faster than orjson; see [Performance](#performance). |
 | Correct? | 0 mismatches. 583 tests, fuzzing against `json`, and output byte-identical to orjson. |
 | Memory? | Better on large `loads`: peak RSS 30–37% below orjson. Retained small results cost ~400 B instead of ~8 KB each. |
 | Safe for async services? | Yes, but each call blocks the event loop, and `to_thread` doesn't help. See [ASYNC.md](ASYNC.md). |
@@ -100,7 +100,7 @@ status column reflects this branch.
 | small `dumps` right after a large one | 1.7–2.0× slower | **fixed**: ~1.0–1.3× (see [Performance fixes](#performance-fixes)) |
 | large `dumps` peak memory | 1.8× the output size, 16 MB kept, 1.27× slower | **fixed**: at orjson's peak, 0.5 MB kept, 0.75× |
 | CJK / UCS-2 text `loads` | 1.3× slower (1.6× on 3.11) | **fixed**: 0.74× on the benchmark's CJK case; Chinese 0.59×, Korean 0.91×, Cyrillic 0.59× ([#8](https://github.com/TinDang97/rjson/issues/8)) |
-| mixed-magnitude float arrays `loads` | 1.12–1.32× slower | open: [#9](https://github.com/TinDang97/rjson/issues/9) |
+| mixed-magnitude float arrays `loads` | 1.12–1.32× slower | **fixed**: 0.89–0.95× ([#9](https://github.com/TinDang97/rjson/issues/9)); arrays of mostly `0.0` ~1.05× (allocation-bound) |
 | cold-cache tiny `dumps` | parity on 3.13, 1.29× on 3.11 | at the noise floor; PGO release wheels should cover it |
 
 Memory side effects shared with orjson (the stdlib `json` has none of them):
@@ -164,6 +164,24 @@ e.g. emoji) measured slower after this change (0.71 → 0.80 plain, 0.77 → ~1.
 that path is unchanged and executes the same instructions (callgrind). On 3.11 it got
 faster (0.77 → 0.71). This looks like code placement (JCC-erratum-class effects) and is
 tracked separately.
+
+**4. Full-precision floats stay on the fast path** ([#9](https://github.com/TinDang97/rjson/issues/9)).
+The number fast path read at most 15 fraction digits, but `repr()` of a typical double has
+16–17 significant digits (`1.5180924662418203`, `0.008601898621952831`). Those numbers fell
+through to the general parser, which reads one digit at a time. The fast path now reads up
+to 19 fraction digits (19 significant digits, so the mantissa stays exact), with the same
+correctly rounded conversion.
+
+| floats (`loads`, rjson ÷ orjson) | 3.13 before → after | 3.11 before → after |
+|---|---|---|
+| mixed-magnitude doubles (the issue's case) | 1.10–1.16 → **0.95** | 1.14 → **0.95** |
+| `random()` values in [0, 1) | 1.09–1.11 → **0.89** | 1.07–1.08 → **0.89** |
+| canada, 6-decimal matrix, 4+3-digit values | unchanged (0.6–0.95) | unchanged |
+| mostly `0.0` | ~1.05 (unchanged) | ~1.06 (unchanged) |
+
+Arrays dominated by `0.0` cost the same per element as `1.5`: the time is the float object
+allocation, which both libraries pay. A shared `0.0` object made them 0.89× but made
+realistic mixed data 15% slower (and changes object identity), so it was not adopted.
 
 *Caveat:* the 32 MiB reservation is address space, not RAM, but `tracemalloc` reports it
 as the peak, and on Windows it counts against the commit charge while the call runs.

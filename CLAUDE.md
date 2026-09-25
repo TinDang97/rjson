@@ -43,7 +43,7 @@ docs/ASYNC.md                 # asyncio/threads guidance, free-threading/subinte
 ### loads (`parser.rs`)
 - Hand-written recursive-descent parser over `&[u8]`; one reusable value stack (pooled across calls); lists created at exact size.
 - Dict-key cache (2048 entries, keys ≤ 64 bytes): reuses PyUnicode objects with precomputed hash; byte-compares on hit.
-- Numbers: 8-digits-at-a-time ints (big ints exact via PyLong_FromString), floats correctly rounded (exact fast path → Eisel-Lemire → fast_float).
+- Numbers: 8-digits-at-a-time ints (big ints exact via PyLong_FromString), floats correctly rounded (exact fast path → Eisel-Lemire → fast_float). The fast path takes up to 19 fraction digits / 19 significant digits (`digits19`, lookahead 48 bytes), so full-precision doubles stay on it; keep its checks branch-free where data mixes shapes (0.0 among other values).
 - Own UTF-8 decoder writing into the final str; bytes input validated once with simdutf8. UCS2 results go through `decode_ucs2` (SSSE3, cfg-gated): 8/16-byte ASCII widening, 5×3-byte blocks via one u64 pattern pre-check + masked compare + shuffles, otherwise two chars per trip. Vector paths only for whole blocks with a constant advance (a data-dependent advance serialized the loop); wide stores only when that many units are left (`nchars`).
 - Cyclic GC paused during parsing on CPython 3.10/3.11 only (`pause_gc`/`resume_gc`).
 - Errors: `json.JSONDecodeError` (exported as `rjson.JSONDecodeError`); `.msg` is the bare reason; positions match json (trailing comma at the comma); depth limit 1024; trailing content rejected. memoryview input: any layout, copied in C order.
