@@ -4,10 +4,11 @@
 
 **rjson** is a JSON library for Python written in Rust directly against the CPython C API (PyO3 is used only for module setup and the entry-point trampoline). Goal: beat orjson on every metric while staying correct on every supported CPython version.
 
-- API: `loads(str | bytes | bytearray | memoryview)`, `dumps(obj) -> bytes` (like orjson), `dumps_str(obj) -> str`, `dumps_bytes` = alias of `dumps`
+- API: `loads(str | bytes | bytearray | memoryview)`, `dumps(obj) -> bytes` (like orjson), `dumps_str(obj) -> str`, `dumps_bytes` = alias of `dumps`; `JSONDecodeError` (= json's), `JSONEncodeError(TypeError, ValueError)`, `__version__`; stub `rjson.pyi` (maturin installs it as `rjson/__init__.pyi` + `py.typed`)
+- Packaging: PyPI distribution `pyrjson` (the name `rjson` is taken); import name `rjson`. MIT license.
 - Supported: CPython 3.10-3.14 (`requires-python >=3.10`), GIL builds only
 - Status: experimental; APIs may change before 1.0
-- Current numbers, remaining gaps and roadmap: **`docs/PERFORMANCE_REVIEW.md`** (keep it updated when performance changes)
+- Current numbers, remaining gaps and roadmap: **`docs/PERFORMANCE_REVIEW.md`** (keep it updated when performance changes); production workloads, migration and adoption blockers: `docs/PRODUCTION_READINESS.md`; async/threading: `docs/ASYNC.md`
 
 ## Repository Structure
 
@@ -21,14 +22,19 @@ src/
   compat.rs   # version-portable str accessors (3.14: own bitfield reader + import self-test)
               # and extern decls of private-but-exported C-API symbols
 build.rs      # pyo3_build_config::use_pyo3_cfgs() -> Py_3_10/Py_3_12... cfgs
-tests/        # test_rjson.py (general + regressions), test_dumps.py (serializer)
+rjson.pyi     # type stub (installed as rjson/__init__.pyi + py.typed)
+examples/     # FastAPI, JSON logging/NDJSON, Redis/Kafka codec (tested by tests/test_examples.py)
+tests/        # test_rjson.py (general + regressions), test_dumps.py (serializer), test_examples.py
 benches/corpus_benchmark.py   # reference benchmark vs orjson (ratio, same process; --output-json)
+benches/production_benchmark.py, prod_workloads.py   # production-shaped workloads (web/logs/big files/codec), time + RSS
 benches/fetch_corpus.sh       # download the corpora (sha256-pinned) into benches/data/
 benches/perf_gate.py          # compare base/head benchmark runs, fail on >5% geomean regression
 benches/make_charts.py        # README charts (docs/img/*.svg) + table from a --json --output-json run
 scripts/build_pgo.sh, scripts/pgo_train.py   # PGO wheel build; training is synthetic, disjoint from the benchmark
 .github/workflows/            # ci.yml (clippy + tests), wheels.yml (PGO wheels), perf.yml (perf gate, label `perf`)
 docs/PERFORMANCE_REVIEW.md    # review findings, results, ranked roadmap
+docs/PRODUCTION_READINESS.md  # production workloads report, migration, adoption blockers
+docs/ASYNC.md                 # asyncio/threads guidance, free-threading/subinterpreter roadmap
 .cargo/config.toml            # x86-64-v2 target (never target-cpu=native)
 ```
 
@@ -40,7 +46,7 @@ docs/PERFORMANCE_REVIEW.md    # review findings, results, ranked roadmap
 - Numbers: 8-digits-at-a-time ints (big ints exact via PyLong_FromString), floats correctly rounded (exact fast path → Eisel-Lemire → fast_float).
 - Own UTF-8 decoder writing into the final str; bytes input validated once with simdutf8.
 - Cyclic GC paused during parsing on CPython 3.10/3.11 only (`pause_gc`/`resume_gc`).
-- Errors: `json.JSONDecodeError` with position; depth limit 1024; trailing content rejected.
+- Errors: `json.JSONDecodeError` (exported as `rjson.JSONDecodeError`); `.msg` is the bare reason; positions match json (trailing comma at the comma); depth limit 1024; trailing content rejected. memoryview input: any layout, copied in C order.
 
 ### dumps (`ser.rs`)
 - Exact `ob_type` pointer dispatch on raw borrowed pointers; subclasses handled on a slower path.
@@ -52,9 +58,11 @@ docs/PERFORMANCE_REVIEW.md    # review findings, results, ranked roadmap
 - Escaping: AVX-512VL / AVX2 (runtime detected) / SSE2 kernels; every write reserves its worst case first. 256-bit loads/stores go through `load256`/`store256` (inline asm), because x86-64-v2 tuning makes LLVM split them. Test the fallbacks with `RUSTFLAGS="-C target-cpu=x86-64-v2 --cfg rjson_no_avx512 --cfg rjson_no_avx2"`.
 - Output buffer headroom (1/16) must stay below the shrink threshold (1/8): shrinking every call makes glibc mmap and page-fault every large result.
 - Recursion limit 254 (also catches circular references).
+- Every serializer-detected failure raises `rjson.JSONEncodeError` (`ser::to_pyerr`, cold); Python-raised errors (`SerError::PyErrSet`) propagate unchanged.
 
 ### Entry points (`entry.rs`)
 - `METH_O` functions through PyO3's `impl_::trampoline` (`get_trampoline_function!(binaryfunc, ..)`; doc-hidden PyO3 API, keeps panics caught and GIL bookkeeping correct; re-check on every PyO3 upgrade). ~8 ns/call cheaper than `#[pyfunction]`.
+- `ALL` in entry.rs must list every public name (maturin's generated `__init__.py` star-imports from `rjson.rjson`); keep it in sync with `rjson.pyi`. The functions' `__module__` is the package `rjson`.
 - Keyword options in future: use `METH_FASTCALL | METH_KEYWORDS` with hand-parsed kwnames, not PyO3 `FunctionDescription`.
 
 ## Hard Rules (learned from bugs found in review)

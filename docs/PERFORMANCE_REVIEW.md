@@ -95,7 +95,7 @@ Every one of these has a regression test in `tests/`.
 | critical | Heap buffer overflow in the SIMD escaper. It reserved `len + 64` bytes, but escaping can write up to `6 * len`. | `simd_escape.rs` |
 | critical | Homogeneous-list fast paths checked only the first 16 elements. `[1]*16+[True]` became `…,1]`, `[1.0]*16+[7]` became `7.0`, and later elements could be read as the wrong object type. | `bulk.rs` |
 | critical | Dict keys that are str subclasses were serialized as garbage. | `lib.rs` key path |
-| critical | No recursion limit: a circular or deeply nested structure segfaulted. Now a `ValueError` at depth 254, as in orjson. | `dumps`, `dumps_bytes`, `loads_simd` |
+| critical | No recursion limit: a circular or deeply nested structure segfaulted. Now `rjson.JSONEncodeError` (a `TypeError` and `ValueError`) at depth 254, as in orjson. | `dumps`, `dumps_bytes`, `loads_simd` |
 | critical | `.cargo/config.toml` forced `target-cpu=native` plus AVX2. Wheels contained AVX-512 instructions and would crash with SIGILL on most CPUs. | build config |
 | high | `dumps_bytes` leaked its whole buffer on every call (a `mem::forget` after the bytes had already been copied). It also wrote `-2**63` as `-` and segfaulted on huge ints. | `extreme.rs` |
 | high | A lone surrogate left a Python exception set, which surfaced as `SystemError`. | `lib.rs` |
