@@ -1510,10 +1510,159 @@ unsafe fn new_utf8_str(bytes: &[u8]) -> *mut ffi::PyObject {
     let data = crate::compat::PyUnicode_DATA(s);
     match crate::compat::PyUnicode_KIND(s) {
         1 => decode_into(bytes, data as *mut u8),
-        2 => decode_into(bytes, data as *mut u16),
+        2 => decode_ucs2(bytes, data as *mut u16, nchars),
         _ => decode_into(bytes, data as *mut u32),
     }
     s
+}
+
+/// `decode_into` for UCS2 results (CJK, and most other non-Latin-1 text),
+/// with SIMD fast paths for the two runs that dominate such text: ASCII
+/// (spaces, digits, markup) and 3-byte sequences (U+0800..U+FFFF, which
+/// covers CJK, kana and hangul). Each step looks at the next 16 input bytes
+/// at a character boundary:
+/// * leading ASCII bytes: all 16 bytes are widened and stored, and the
+///   cursor advances by the number of leading ASCII bytes;
+/// * leading 3-byte sequences (up to 5 in 15 bytes): validated as lead
+///   `1110xxxx` + two `10xxxxxx` per character with one masked compare,
+///   assembled into UTF-16 with shuffles, 8 units stored, the cursor
+///   advancing by the number of leading complete sequences;
+/// * anything else (2-byte sequences): one character, scalar.
+///
+/// Stores may write past the characters they account for (up to 16 units
+/// for ASCII, 8 for 3-byte runs); they are only taken when that many units
+/// are left in the `nchars`-unit result, and later steps overwrite the
+/// extra units. The input is valid UTF-8 (validated before), so the scalar
+/// step never reads past `bytes`.
+#[inline(always)]
+unsafe fn decode_ucs2(bytes: &[u8], out: *mut u16, nchars: usize) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
+    {
+        decode_ucs2_ssse3(bytes, out, nchars)
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "ssse3")))]
+    {
+        let _ = nchars;
+        decode_into(bytes, out)
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
+#[inline(always)]
+unsafe fn decode_ucs2_ssse3(bytes: &[u8], mut out: *mut u16, nchars: usize) {
+    use std::arch::x86_64::*;
+    let n = bytes.len();
+    let p = bytes.as_ptr();
+    let out_end = out.add(nchars);
+    let mut i = 0;
+    // Byte pattern of five 3-byte sequences in bytes 0..15; byte 15 is
+    // masked out (always matches).
+    let mask3 = _mm_setr_epi8(
+        0xF0u8 as i8, 0xC0u8 as i8, 0xC0u8 as i8, 0xF0u8 as i8, 0xC0u8 as i8, 0xC0u8 as i8, 0xF0u8 as i8,
+        0xC0u8 as i8, 0xC0u8 as i8, 0xF0u8 as i8, 0xC0u8 as i8, 0xC0u8 as i8, 0xF0u8 as i8, 0xC0u8 as i8,
+        0xC0u8 as i8, 0,
+    );
+    let want3 = _mm_setr_epi8(
+        0xE0u8 as i8, 0x80u8 as i8, 0x80u8 as i8, 0xE0u8 as i8, 0x80u8 as i8, 0x80u8 as i8, 0xE0u8 as i8,
+        0x80u8 as i8, 0x80u8 as i8, 0xE0u8 as i8, 0x80u8 as i8, 0x80u8 as i8, 0xE0u8 as i8, 0x80u8 as i8,
+        0x80u8 as i8, 0,
+    );
+    // u16 lane k = byte 3k+1 (low) | byte 3k (high); lanes 5..7 unused.
+    let lead_mid = _mm_setr_epi8(1, 0, 4, 3, 7, 6, 10, 9, 13, 12, -1, -1, -1, -1, -1, -1);
+    // u16 lane k = byte 3k+2.
+    let last = _mm_setr_epi8(2, -1, 5, -1, 8, -1, 11, -1, 14, -1, -1, -1, -1, -1, -1, -1);
+    let zero = _mm_setzero_si128();
+    // Only whole blocks take the vector path: the cursor then advances by a
+    // constant, so the next load doesn't wait for this block's compare (a
+    // data-dependent advance made mixed text 1.4-1.6x slower). Partial runs
+    // go through the scalar step, which branch prediction runs ahead on.
+    // A block is only loaded when scalar checks say it is whole (two ASCII
+    // words; the byte pattern of bytes 8..15 after two 3-byte leads), so
+    // text that alternates short runs (hangul words, Cyrillic with ASCII)
+    // pays a scalar compare per step, not a vector load and compare.
+    // Measured alternatives that lost: checking the leads at bytes 3/6/9/12
+    // separately, backing off after a failed attempt, a once-per-run flag,
+    // and moving the block conversion out of line.
+    while i + 16 <= n {
+        let b0 = *p.add(i);
+        if b0 < 0x80 {
+            // ASCII: 8 bytes at a time (as in `decode_into`), 16 when the
+            // next 8 are ASCII too and 16 units are left. These 8 bytes are
+            // 8 characters, so 8 units are always left (i + 16 <= n).
+            let w = ptr::read_unaligned(p.add(i) as *const u64);
+            if w & 0x8080_8080_8080_8080 == 0 {
+                let w2 = ptr::read_unaligned(p.add(i + 8) as *const u64);
+                if w2 & 0x8080_8080_8080_8080 == 0 && out.add(16) <= out_end {
+                    let v = _mm_loadu_si128(p.add(i) as *const __m128i);
+                    _mm_storeu_si128(out as *mut __m128i, _mm_unpacklo_epi8(v, zero));
+                    _mm_storeu_si128(out.add(8) as *mut __m128i, _mm_unpackhi_epi8(v, zero));
+                    out = out.add(16);
+                    i += 16;
+                } else {
+                    let v = _mm_loadl_epi64(p.add(i) as *const __m128i);
+                    _mm_storeu_si128(out as *mut __m128i, _mm_unpacklo_epi8(v, zero));
+                    out = out.add(8);
+                    i += 8;
+                }
+                continue;
+            }
+            *out = b0 as u16;
+            out = out.add(1);
+            i += 1;
+            continue;
+        }
+        if b0 >= 0xE0 {
+            let b3 = *p.add(i + 3);
+            if b3 < 0xE0 {
+                // A lone 3-byte character (a 4-byte one can't occur in UCS2).
+                *out = ((b0 as u16 & 0x0F) << 12) | ((*p.add(i + 1) as u16 & 0x3F) << 6) | (*p.add(i + 2) as u16 & 0x3F);
+                out = out.add(1);
+                i += 3;
+                continue;
+            }
+            // At least two 3-byte characters. Bytes 8..15 in one scalar
+            // load: a whole block has leads at 9 and 12 and continuations at
+            // 8, 10, 11, 13, 14; this rejects nearly every block that the
+            // vector compare would (hangul words, CJK mixed with spaces).
+            let w = ptr::read_unaligned(p.add(i + 8) as *const u64);
+            if w & 0x00C0_C0F0_C0C0_F0C0 == 0x0080_80E0_8080_E080 && out.add(8) <= out_end {
+                let v = _mm_loadu_si128(p.add(i) as *const __m128i);
+                if _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_and_si128(v, mask3), want3)) == 0xFFFF {
+                    let a = _mm_shuffle_epi8(v, lead_mid); // b0 << 8 | b1
+                    let b = _mm_shuffle_epi8(v, last); // b2
+                    let hi = _mm_slli_epi16(_mm_and_si128(a, _mm_set1_epi16(0x0F00)), 4);
+                    let mid = _mm_slli_epi16(_mm_and_si128(a, _mm_set1_epi16(0x003F)), 6);
+                    let lo = _mm_and_si128(b, _mm_set1_epi16(0x003F));
+                    _mm_storeu_si128(out as *mut __m128i, _mm_or_si128(_mm_or_si128(hi, mid), lo));
+                    out = out.add(5);
+                    i += 15;
+                    continue;
+                }
+            }
+            // Two characters per iteration: short runs (2-4 hangul
+            // syllables per word) take half the loop trips. Both are complete
+            // (the input is valid UTF-8 and i + 6 <= i + 16 <= n) and fit in
+            // the result.
+            *out = ((b0 as u16 & 0x0F) << 12) | ((*p.add(i + 1) as u16 & 0x3F) << 6) | (*p.add(i + 2) as u16 & 0x3F);
+            *out.add(1) = ((b3 as u16 & 0x0F) << 12) | ((*p.add(i + 4) as u16 & 0x3F) << 6) | (*p.add(i + 5) as u16 & 0x3F);
+            out = out.add(2);
+            i += 6;
+            continue;
+        }
+        // 2-byte sequences (Cyrillic, Greek, Hebrew, Arabic, ...): two per
+        // iteration when the next character is one too (0xC0..0xDF lead).
+        *out = ((b0 as u16 & 0x1F) << 6) | (*p.add(i + 1) as u16 & 0x3F);
+        let b2 = *p.add(i + 2);
+        if b2 & 0xE0 == 0xC0 {
+            *out.add(1) = ((b2 as u16 & 0x1F) << 6) | (*p.add(i + 3) as u16 & 0x3F);
+            out = out.add(2);
+            i += 4;
+        } else {
+            out = out.add(1);
+            i += 2;
+        }
+    }
+    decode_into(bytes.get_unchecked(i..), out);
 }
 
 #[inline(always)]

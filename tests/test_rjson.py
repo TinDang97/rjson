@@ -333,6 +333,97 @@ class TestStringLayout:
             assert rjson.loads(rjson.dumps_str([s, {s: s}])) == [s, {s: s}]
 
 
+def _check_loads(s):
+    """loads of a JSON string containing s, from str and bytes, and as a dict key."""
+    doc = json.dumps([s, {s: s}], ensure_ascii=False)
+    expected = [s, {s: s}]
+    assert rjson.loads(doc) == expected
+    assert rjson.loads(doc.encode()) == expected
+    assert rjson.loads(doc.encode()) == json.loads(doc)
+
+
+class TestUCS2Decoder:
+    """UTF-8 -> UCS2 decoding (SIMD paths for 16-byte ASCII blocks and runs of
+    five 3-byte sequences, two scalar characters per step otherwise). The
+    vector stores write past the characters they account for, so lengths,
+    offsets and run boundaries around the 16/15-byte blocks are exercised
+    exhaustively."""
+
+    # One character of each UTF-8 length that keeps the result UCS2
+    # (a 3-byte character forces UCS2; 2-byte ones alone would too above U+00FF).
+    ONE = ["a", " ", "\u00e9", "\u0416", "\u07ff", "\u0800", "\u65e5", "\uac00", "\uffee", "\ud7ff", "\ue000"]
+
+    @pytest.mark.parametrize("n", range(0, 40))
+    def test_runs_of_three_byte_chars(self, n):
+        for ch in ("\u65e5", "\u0800", "\uffff", "\uac00"):
+            _check_loads(ch * n)
+            _check_loads("a" + ch * n)
+            _check_loads(ch * n + "a")
+            _check_loads("\u0416" + ch * n)  # 2-byte char before the run
+
+    @pytest.mark.parametrize("prefix", range(0, 33))
+    def test_each_char_kind_at_each_offset(self, prefix):
+        # Place every character kind at every offset of two 16-byte blocks,
+        # in a UCS2 string long enough to take the vector paths.
+        for ch in self.ONE:
+            s = "x" * prefix + ch + "\u65e5" * 12 + "y" * 20 + "\u65e5"
+            _check_loads(s)
+            s = "\u65e5" * prefix + ch + "\u65e5" * 7
+            _check_loads(s)
+
+    @pytest.mark.parametrize("n", range(0, 48))
+    def test_ascii_runs_in_ucs2_strings(self, n):
+        # ASCII runs of every length between CJK characters: 8- and 16-byte
+        # widening, and a string that ends right after the run.
+        _check_loads("\u65e5" + "a" * n)
+        _check_loads("\u65e5" + "a" * n + "\u672c" * 6)
+        _check_loads("a" * n + "\u65e5")
+
+    @pytest.mark.parametrize("n", range(0, 40))
+    def test_two_byte_runs(self, n):
+        _check_loads("\u0416" * n + "\u65e5")  # Cyrillic run, then CJK (UCS2)
+        _check_loads("\u65e5" + "\u0416" * n)
+        _check_loads("\u65e5" + ("\u0416a" * n))
+
+    def test_mixed_texts(self):
+        texts = [
+            "\u6211\u4eec\u5728\u5317\u4eac\u5927\u5b66\u5b66\u4e60\u4e2d\u6587\uff0c\u8fd9\u662f\u4e00\u4e2a\u53e5\u5b50\u3002",
+            "\u65e5\u672c\u8a9e\u306e\u30c6\u30ad\u30b9\u30c8 ",
+            "\ud55c\uad6d\uc5b4 \ud14d\uc2a4\ud2b8 \ucc98\ub9ac\ub294 \ube60\ub985\ub2c8\ub2e4. ",
+            "\u0411\u044b\u0441\u0442\u0440\u044b\u0439 \u0440\u0430\u0437\u0431\u043e\u0440 JSON \u0432 Python. ",
+            "User \u7530\u4e2d posted: \u4eca\u65e5\u306f\u3044\u3044\u5929\u6c17\u3067\u3059\u306d! (score 42) ",
+        ]
+        for t in texts:
+            for reps in (1, 2, 3, 7, 20):
+                _check_loads(t * reps)
+                _check_loads(t * reps + "tail")
+
+    def test_escapes_between_runs(self):
+        # Escaped strings are unescaped into a scratch buffer, then decoded.
+        s = "\u65e5\u672c\u8a9e\n\u30c6\u30ad\u30b9\u30c8\t\u65e5\u672c\u8a9e\u306e\u30c6\u30ad\u30b9\u30c8\"q\" \\ " * 5
+        _check_loads(s)
+
+    @pytest.mark.parametrize("pos", range(0, 20))
+    def test_invalid_utf8_near_blocks(self, pos):
+        # Invalid bytes inside what would be a vector block are rejected with
+        # the same error as before (validation runs before decoding).
+        good = "\u65e5".encode() * 8
+        for bad in (b"\xe6\x97", b"\xff", b"\xed\xa0\x80", b"\xc0\xaf"):
+            raw = good[:pos] + bad + good[pos:]
+            doc = b'["' + raw + b'"]'
+            with pytest.raises(rjson.JSONDecodeError, match="UTF-8"):
+                rjson.loads(doc)
+
+    def test_random_ucs2_strings(self):
+        import random
+
+        rng = random.Random(8)
+        pool = self.ONE + ["\u3042", "\u4e00", "\u9fff", "\u00ff", "\u0100"]
+        for _ in range(3000):
+            s = "".join(rng.choice(pool) for _ in range(rng.randrange(0, 60)))
+            _check_loads(s)
+
+
 class TestRoundTrip:
     """Test round-trip consistency (dumps -> loads == original)."""
 
