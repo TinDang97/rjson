@@ -23,7 +23,7 @@ these today (see [`examples/`](../examples/)), and each is tracked as an issue.
 | question | answer |
 |---|---|
 | Faster than `json`? | Yes: 4–20× on `dumps`, 1.3–5× on `loads`. |
-| Faster than orjson? | Yes on most shapes: geomean `dumps` 0.76×, `loads` 0.87×, round trip 0.83× (rjson ÷ orjson time). Two `loads` shapes remain slower (CJK text, mixed float arrays), see [Performance](#performance). |
+| Faster than orjson? | Yes on most shapes: geomean `dumps` 0.76×, `loads` 0.87×, round trip 0.83× (rjson ÷ orjson time). CJK text now loads faster than orjson (0.59–0.91×); mixed float arrays remain slower, see [Performance](#performance). |
 | Correct? | 0 mismatches. 583 tests, fuzzing against `json`, and output byte-identical to orjson. |
 | Memory? | Better on large `loads`: peak RSS 30–37% below orjson. Retained small results cost ~400 B instead of ~8 KB each. |
 | Safe for async services? | Yes, but each call blocks the event loop, and `to_thread` doesn't help. See [ASYNC.md](ASYNC.md). |
@@ -99,7 +99,7 @@ status column reflects this branch.
 |---|---|---|
 | small `dumps` right after a large one | 1.7–2.0× slower | **fixed**: ~1.0–1.3× (see [Performance fixes](#performance-fixes)) |
 | large `dumps` peak memory | 1.8× the output size, 16 MB kept, 1.27× slower | **fixed**: at orjson's peak, 0.5 MB kept, 0.75× |
-| CJK / UCS-2 text `loads` | 1.3× slower (1.6× on 3.11) | open: [#8](https://github.com/TinDang97/rjson/issues/8) |
+| CJK / UCS-2 text `loads` | 1.3× slower (1.6× on 3.11) | **fixed**: 0.74× on the benchmark's CJK case; Chinese 0.59×, Korean 0.91×, Cyrillic 0.59× ([#8](https://github.com/TinDang97/rjson/issues/8)) |
 | mixed-magnitude float arrays `loads` | 1.12–1.32× slower | open: [#9](https://github.com/TinDang97/rjson/issues/9) |
 | cold-cache tiny `dumps` | parity on 3.13, 1.29× on 3.11 | at the noise floor; PGO release wheels should cover it |
 
@@ -144,6 +144,26 @@ response right after a big page allocated a buffer of the big page's size (~830 
 In the last row the small call gets 0.6 µs slower (2.1 → 2.7 µs) while the big call gets
 15–30 µs faster. The reference benchmark's geomeans were unchanged (−1.3% `dumps`, −0.2%
 `dumps_str`, −2.5% `loads`; lower is better).
+
+**3. UTF-8 → UCS-2 decoding with SIMD fast paths** ([#8](https://github.com/TinDang97/rjson/issues/8)).
+Strings whose widest character is in U+0100–U+FFFF (CJK, kana, hangul, Cyrillic) were
+decoded one character per loop iteration. Now 16- and 8-byte ASCII runs are widened at once,
+runs of five 3-byte characters are converted with shuffles, and other 2- and 3-byte
+characters are decoded two per iteration.
+
+| text (`loads`, rjson ÷ orjson) | 3.13 before → after | 3.11 before → after |
+|---|---|---|
+| benchmark `cjk_strings` (Japanese) | 1.09 → **0.74** | 1.63 (issue) → **0.81–0.83** (micro) |
+| Chinese | 1.08 → **0.59** | 1.06 → **0.61** |
+| Korean | 1.00 → **0.91** | 1.08 → **0.90** |
+| Cyrillic | 0.73 → **0.59** | 0.74 → **0.57** |
+| mixed ASCII + CJK | 0.77 → **0.55** | 0.86 → **0.55** |
+
+*Caveat:* on CPython 3.13 on the benchmark Xeon, text containing an astral character (UCS-4,
+e.g. emoji) measured slower after this change (0.71 → 0.80 plain, 0.77 → ~1.0 PGO) although
+that path is unchanged and executes the same instructions (callgrind). On 3.11 it got
+faster (0.77 → 0.71). This looks like code placement (JCC-erratum-class effects) and is
+tracked separately.
 
 *Caveat:* the 32 MiB reservation is address space, not RAM, but `tracemalloc` reports it
 as the peak, and on Windows it counts against the commit charge while the call runs.

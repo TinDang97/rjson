@@ -179,7 +179,7 @@ Tried and reverted, because each measured slower: SWAR digit formatting for all 
 |---|---|---|
 | 9 | small `dumps` after a big one 1.7–2.0× (capacity hint = last size) | **fixed**: hint = min of last two sizes |
 | 10 | big `dumps` peaked at 1.8× output, 16 MB stranded (doubling on the brk heap) | **fixed**: jump to recent peak, ≥ 32 MiB mmapped reservation past 1 MiB, shrink back (`Out::reserve`, `into_object`) |
-| 11 | CJK/UCS-2 `loads` 1.3× (1.6× on 3.11) | open, [#8](https://github.com/TinDang97/rjson/issues/8): SIMD UTF-8 → UCS2 transcoder |
+| 11 | CJK/UCS-2 `loads` 1.3× (1.6× on 3.11) | **fixed** ([#8](https://github.com/TinDang97/rjson/issues/8)): `decode_ucs2` SIMD/pairwise decoder; 0.55–0.91× on CJK/hangul/Cyrillic. Open: UCS-4 text shifted 0.71 → 0.80 on 3.13 with identical instruction counts (placement) |
 | 12 | mixed-magnitude float arrays `loads` 1.12–1.32× | open, [#9](https://github.com/TinDang97/rjson/issues/9) |
 | 13 | UTF-8 cache attached by `dumps`, copies in `loads(str)` / `loads(memoryview)` | open, [#10](https://github.com/TinDang97/rjson/issues/10) |
 

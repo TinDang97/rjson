@@ -279,7 +279,7 @@ maturin develop --release && python -m pytest tests -q
 - `default=` hook and native datetime/UUID/dataclass/Enum ([#4](https://github.com/TinDang97/rjson/issues/4), [#5](https://github.com/TinDang97/rjson/issues/5))
 - Options: non-str keys ([#6](https://github.com/TinDang97/rjson/issues/6)), lenient `loads` ([#7](https://github.com/TinDang97/rjson/issues/7)), `indent`, `sort_keys`
 - Streaming decoder/encoder for async I/O; free-threading and subinterpreter support ([docs/ASYNC.md](docs/ASYNC.md#roadmap))
-- Performance: CJK text `loads` ([#8](https://github.com/TinDang97/rjson/issues/8)), mixed float arrays ([#9](https://github.com/TinDang97/rjson/issues/9)), fewer string copies ([#10](https://github.com/TinDang97/rjson/issues/10)), NEON kernels for aarch64
+- Performance: mixed float arrays ([#9](https://github.com/TinDang97/rjson/issues/9)), fewer string copies ([#10](https://github.com/TinDang97/rjson/issues/10)), NEON kernels for aarch64
 - First PyPI release as `pyrjson`
 
 ## License
