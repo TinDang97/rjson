@@ -28,4 +28,16 @@ fn main() {
     if (11..=13).contains(&minor) && !free_threaded && !matches!(cfg.target_abi().kind(), pyo3_build_config::PythonAbiKind::Stable(_)) {
         println!("cargo:rustc-cfg=rjson_dict_direct");
     }
+
+    // Windows: pyo3-ffi links libpython through `raw-dylib`, which only
+    // imports the symbols pyo3-ffi itself declares. The private-but-exported
+    // functions we declare (`_PyDict_NewPresized`, `_PyDict_FromItems`, see
+    // CLAUDE.md) would stay unresolved (LNK2019), so also link the
+    // interpreter's full import library, `<base_prefix>\libs\python3XY.lib`.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        if let (Some(dir), Some(name)) = (cfg.lib_dir(), cfg.lib_name()) {
+            println!("cargo:rustc-link-search=native={dir}");
+            println!("cargo:rustc-link-lib=dylib={name}");
+        }
+    }
 }

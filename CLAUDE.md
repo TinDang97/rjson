@@ -66,7 +66,7 @@ docs/PERFORMANCE_REVIEW.md    # review findings, results, ranked roadmap
 - **Check every C-API NULL return** and propagate the Python error; never return success with an exception set.
 - **Never set `target-cpu=native`** or global `+avx2`: use `#[target_feature]` + runtime detection.
 - **Never pass extra flags via `RUSTFLAGS`**: it silently replaces `.cargo/config.toml`'s rustflags (x86-64-v2). Use `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`, which cargo merges (the old PGO script built x86-64 v1 wheels this way).
-- **Private CPython symbols/layouts are version-gated and listed here**: `_PyBytes_Resize`, `_PyDict_NewPresized` (compat.rs), `_PyDict_FromItems` (parser.rs, 3.13 only), dict keys layout (ser.rs, `rjson_dict_direct`, 3.11-3.13), str state bitfield (compat.rs, 3.14). Re-verify each against the new version's headers before widening a gate.
+- **Private CPython symbols/layouts are version-gated and listed here**: `_PyBytes_Resize`, `_PyDict_NewPresized` (compat.rs), `_PyDict_FromItems` (parser.rs, 3.13 only), dict keys layout (ser.rs, `rjson_dict_direct`, 3.11-3.13), str state bitfield (compat.rs, 3.14). Re-verify each against the new version's headers before widening a gate. They must be `PyAPI_FUNC` (exported on Windows); build.rs links the full `python3XY.lib` there because pyo3-ffi's `raw-dylib` imports only its own declarations.
 - Keep the module GIL-only (no free-threading declaration) until borrowed list/dict iteration is audited.
 - `panic = "abort"` is set: a panic kills the interpreter, so do not `unwrap` on Python-derived data.
 

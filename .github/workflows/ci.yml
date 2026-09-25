@@ -61,6 +61,10 @@ jobs:
             python: "3.13"
           - os: macos-14
             python: "3.13"
+          # Windows links private C-API symbols via the full import library
+          # (build.rs); 3.10 covers _PyDict_NewPresized, 3.13 _PyDict_FromItems.
+          - os: windows-2022
+            python: "3.10"
           - os: windows-2022
             python: "3.13"
     defaults:
