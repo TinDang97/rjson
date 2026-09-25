@@ -23,8 +23,8 @@ these today (see [`examples/`](../examples/)), and each is tracked as an issue.
 | question | answer |
 |---|---|
 | Faster than `json`? | Yes: 4–20× on `dumps`, 1.3–5× on `loads`. |
-| Faster than orjson? | Yes on most shapes: geomean `dumps` 0.76×, `loads` 0.87×, round trip 0.83× (rjson ÷ orjson time). The exceptions are listed under [Performance](#performance). |
-| Correct? | 0 mismatches. 565 tests, fuzzing against `json`, and output byte-identical to orjson. |
+| Faster than orjson? | Yes on most shapes: geomean `dumps` 0.76×, `loads` 0.87×, round trip 0.83× (rjson ÷ orjson time). Two `loads` shapes remain slower (CJK text, mixed float arrays), see [Performance](#performance). |
+| Correct? | 0 mismatches. 583 tests, fuzzing against `json`, and output byte-identical to orjson. |
 | Memory? | Better on large `loads`: peak RSS 30–37% below orjson. Retained small results cost ~400 B instead of ~8 KB each. |
 | Safe for async services? | Yes, but each call blocks the event loop, and `to_thread` doesn't help. See [ASYNC.md](ASYNC.md). |
 | Compress / go binary? | Compress at the transport, and only payloads of a few KB and up. Use Arrow/Polars only for columnar data. See [Transfer size](#transfer-size-compression-and-binary-formats). |
@@ -71,6 +71,7 @@ Large files run each operation in a fresh subprocess, reporting time and peak RS
 |---|---|---|---|
 | 97 MB records | `loads` (bytes) | 1.00 | **528 / 762 MB** |
 | 97 MB records | `dumps` | 0.84 | 94 / 94 MB |
+| 21 MB, 100k distinct keys | `dumps` | 0.75 (was 1.27) | 20.3 / 19.8 MB (was 35.8) |
 | 99 MB floats | `loads` | 0.84 | **230 / 362 MB** |
 | 42 MB ints | `loads` / `dumps` | 0.81 / 0.77 | 226 / 304 MB |
 | 21 MB, 100k distinct keys | `loads` | 0.85 | 151 / 182 MB |
@@ -96,10 +97,10 @@ status column reflects this branch.
 
 | pattern | before | status |
 |---|---|---|
-| small `dumps` right after a large one | 1.7–2.0× slower | see [Performance fixes](#performance-fixes) |
-| large `dumps` peak memory | up to 1.8× the output size, old buffer kept | see [Performance fixes](#performance-fixes) |
-| CJK / UCS-2 text `loads` | 1.3× slower (1.6× on 3.11) | see [Performance fixes](#performance-fixes) |
-| mixed-magnitude float arrays `loads` | 1.12–1.32× slower | see [Performance fixes](#performance-fixes) |
+| small `dumps` right after a large one | 1.7–2.0× slower | **fixed**: ~1.0–1.3× (see [Performance fixes](#performance-fixes)) |
+| large `dumps` peak memory | 1.8× the output size, 16 MB kept, 1.27× slower | **fixed**: at orjson's peak, 0.5 MB kept, 0.75× |
+| CJK / UCS-2 text `loads` | 1.3× slower (1.6× on 3.11) | open: [#8](https://github.com/TinDang97/rjson/issues/8) |
+| mixed-magnitude float arrays `loads` | 1.12–1.32× slower | open: [#9](https://github.com/TinDang97/rjson/issues/9) |
 | cold-cache tiny `dumps` | parity on 3.13, 1.29× on 3.11 | at the noise floor; PGO release wheels should cover it |
 
 Memory side effects shared with orjson (the stdlib `json` has none of them):
@@ -110,9 +111,42 @@ Memory side effects shared with orjson (the stdlib `json` has none of them):
   when you can.
 - `loads(memoryview)` copies the input (peak 621 MB vs 528 MB from `bytes` on 97 MB).
 
+All three are tracked in [#10](https://github.com/TinDang97/rjson/issues/10).
+
 ### Performance fixes
 
-*Filled in from the performance pass on this branch.*
+Measured on CPython 3.13 (3.11 in brackets), same process as orjson, plain release builds.
+
+**1. Output buffer sized from the smaller of the last two results.** Before, a small
+response right after a big page allocated a buffer of the big page's size (~830 KB for a
+150 B result), then copied the result out of it.
+
+| case | before | after |
+|---|---|---|
+| 150 B `dumps` after a big page | 9.0–9.6 µs (10.9 µs) | 4.0–4.5 µs (4.0 µs) |
+| `percall/small_after_big` vs orjson | 1.97× | 1.08–1.27× (noisy: ±40% IQR) |
+
+**2. Large outputs grow without stranding the old buffer.**
+
+- The first growth jumps to the largest recent output size.
+- Beyond 1 MiB the buffer reserves 32 MiB of address space, which is always mmapped
+  (untouched pages cost no RAM) and grows or shrinks without copying.
+- The finished result is shrunk back, so the reservation is never kept.
+
+| case | before | after |
+|---|---|---|
+| 21 MB output (100k distinct keys): peak RSS | 35.8 MB | **20.3 MB** (orjson 19.8) [20.3] |
+| same: memory kept after the result is freed | 16.0 MB | **0.5 MB** [0.5] |
+| same: first call vs orjson | 1.27× | **0.75×** [0.79×] |
+| web `mixed_sizes` / `alternating_sizes` `dumps` | 0.86× / 0.87× | 0.69× / 0.71× |
+| 700 KB then 150 B `dumps`, per pair | 810–822 µs | 778–807 µs (orjson 916–974 µs) |
+
+In the last row the small call gets 0.6 µs slower (2.1 → 2.7 µs) while the big call gets
+15–30 µs faster. The reference benchmark's geomeans were unchanged (−1.3% `dumps`, −0.2%
+`dumps_str`, −2.5% `loads`; lower is better).
+
+*Caveat:* the 32 MiB reservation is address space, not RAM, but `tracemalloc` reports it
+as the peak, and on Windows it counts against the commit charge while the call runs.
 
 ## Transfer size: compression and binary formats
 
@@ -273,5 +307,5 @@ benches/fetch_corpus.sh
 python benches/production_benchmark.py --quick                 # ~30 s smoke run
 python benches/production_benchmark.py --output-json prod.json # full run, ~6 min
 python benches/production_benchmark.py --big-only              # large-file time + RSS
-python -m pytest tests -q                                      # 565 tests
+python -m pytest tests -q                                      # 583 tests
 ```

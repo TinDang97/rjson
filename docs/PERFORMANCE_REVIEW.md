@@ -173,6 +173,18 @@ Tried and reverted, because each measured slower: SWAR digit formatting for all 
 | 7 | Release wheels without PGO | **Done** (`.github/workflows/wheels.yml`): PGO wheels per interpreter for manylinux2014/musllinux x86_64+aarch64, macOS arm64/x86_64, Windows, trained on a workload disjoint from the benchmark. | −0–4% (re-measured, §3) | build-only |
 | 8 | Non-x86 | The scalar/SWAR fallbacks now pass the full suite on aarch64 (3.9, 3.12 under qemu; CI runs native arm64 Linux and macOS). NEON kernels would replace the scalar loops at the four `#[cfg(target_arch = "x86_64")]` SSE2 sites in `parser.rs` (`skip_ws_slow`, `scan_special`, the escaped-string copy loop, `utf8_count_and_max`) and the SWAR `escape_long` / scalar `kind_needs_escape` in `ser.rs`; each maps to `vceqq_u8` + a narrowing-shift movemask. Needs native arm64 hardware to measure. | parity on Apple Silicon / Graviton | medium |
 
+### Found by the production benchmark (`benches/production_benchmark.py`)
+
+| # | gap | status |
+|---|---|---|
+| 9 | small `dumps` after a big one 1.7–2.0× (capacity hint = last size) | **fixed**: hint = min of last two sizes |
+| 10 | big `dumps` peaked at 1.8× output, 16 MB stranded (doubling on the brk heap) | **fixed**: jump to recent peak, ≥ 32 MiB mmapped reservation past 1 MiB, shrink back (`Out::reserve`, `into_object`) |
+| 11 | CJK/UCS-2 `loads` 1.3× (1.6× on 3.11) | open, [#8](https://github.com/TinDang97/rjson/issues/8): SIMD UTF-8 → UCS2 transcoder |
+| 12 | mixed-magnitude float arrays `loads` 1.12–1.32× | open, [#9](https://github.com/TinDang97/rjson/issues/9) |
+| 13 | UTF-8 cache attached by `dumps`, copies in `loads(str)` / `loads(memoryview)` | open, [#10](https://github.com/TinDang97/rjson/issues/10) |
+
+Numbers: [docs/PRODUCTION_READINESS.md](PRODUCTION_READINESS.md#performance-fixes).
+
 ### Threading and I/O (researched, mostly not applicable)
 
 - **io_uring: rejected.** `loads`/`dumps` do no I/O. Even reading a file from the page cache is 1–4% of parse time: canada.json takes 0.2 ms to read and 14 ms for orjson to parse. It only matters for a bulk-ingestion CLI.
@@ -203,7 +215,7 @@ Tried and reverted, because each measured slower: SWAR digit formatting for all 
 uv venv .venv -p 3.11 && . .venv/bin/activate
 uv pip install maturin orjson pytest
 maturin develop --release
-python -m pytest tests -q                      # 250 tests
+python -m pytest tests -q                      # 583 tests
 benches/fetch_corpus.sh                        # corpora -> benches/data/ (sha256-pinned)
 python benches/corpus_benchmark.py [--json] [--output-json results.json]
 python benches/make_charts.py results.json     # README charts -> docs/img/

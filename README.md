@@ -184,7 +184,7 @@ bodies, NDJSON logs, 100 MB files, cache blobs) rjson is faster on most shapes (
 
 **Is it safe?**
 It checks the exact type of every value, reserves the worst-case output size before
-writing, and version-gates every CPython internal it uses, with self-tests at import. 565
+writing, and version-gates every CPython internal it uses, with self-tests at import. 583
 tests, fuzzing against `json`, and 0 mismatches against orjson on all benchmark workloads.
 It is still 0.x: pin the version.
 
@@ -279,7 +279,7 @@ maturin develop --release && python -m pytest tests -q
 - `default=` hook and native datetime/UUID/dataclass/Enum ([#4](https://github.com/TinDang97/rjson/issues/4), [#5](https://github.com/TinDang97/rjson/issues/5))
 - Options: non-str keys ([#6](https://github.com/TinDang97/rjson/issues/6)), lenient `loads` ([#7](https://github.com/TinDang97/rjson/issues/7)), `indent`, `sort_keys`
 - Streaming decoder/encoder for async I/O; free-threading and subinterpreter support ([docs/ASYNC.md](docs/ASYNC.md#roadmap))
-- NEON kernels for aarch64
+- Performance: CJK text `loads` ([#8](https://github.com/TinDang97/rjson/issues/8)), mixed float arrays ([#9](https://github.com/TinDang97/rjson/issues/9)), fewer string copies ([#10](https://github.com/TinDang97/rjson/issues/10)), NEON kernels for aarch64
 - First PyPI release as `pyrjson`
 
 ## License
