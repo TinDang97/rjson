@@ -18,6 +18,7 @@ import logging
 import subprocess
 import sys
 import uuid
+import warnings
 from pathlib import Path
 from types import ModuleType
 
@@ -464,3 +465,198 @@ class TestNDJSON:
         first = json.loads(out.splitlines()[0])
         assert first["message"] == "user ada logged in" and first["ratio"] == "nan"
         assert "raise mode: line 6" in out
+
+
+# ---------------------------------------------------------------------------------------
+# examples/fastapi_app.py (skipped without fastapi + httpx)
+# ---------------------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def api():
+    """Return ``(example_module, TestClient)``; skip if fastapi or httpx is missing."""
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    with warnings.catch_warnings():  # newer Starlette warns about httpx vs httpx2
+        warnings.simplefilter("ignore")
+        from fastapi.testclient import TestClient
+    mod = load_example("fastapi_app")
+    return mod, TestClient(mod.app, raise_server_exceptions=False)
+
+
+JSON_HEADERS = {"content-type": "application/json"}
+NATIVE_CONTENT = {"s": "é\n\"\\\x00\u2028😀", "i": [0, -1, 2**63, 2**100],
+                  "f": [0.5, 1e16, -0.0, 1e-4], "b": [True, False, None],
+                  "nested": {"k": [{"x": []}, {}]}}
+
+
+class TestFastAPIResponse:
+    def test_render_matches_starlette(self, api):
+        from starlette.responses import JSONResponse
+
+        mod, _ = api
+        assert mod.RJSONResponse(NATIVE_CONTENT).body == JSONResponse(NATIVE_CONTENT).body
+
+    def test_small_floats_differ_from_starlette_bytes_not_values(self, api):
+        from starlette.responses import JSONResponse
+
+        mod, _ = api
+        ours, theirs = mod.RJSONResponse([1e-7]).body, JSONResponse([1e-7]).body
+        assert (ours, theirs) == (b"[1e-7]", b"[1e-07]")
+        assert json.loads(ours) == json.loads(theirs)
+
+    def test_media_type_header(self, api):
+        mod, client = api
+        response = client.get("/items")
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "application/json"
+        assert mod.RJSONResponse({}).media_type == "application/json"
+        assert response.json()["count"] == 3
+
+    def test_fallback_uses_jsonable_encoder(self, api):
+        mod, _ = api
+        content = {"when": dt.datetime(2024, 1, 2, 3, 4, 5), "id": uuid.UUID(int=1),
+                   "color": Color.GREEN, "tags": {"x"}, "price": decimal.Decimal("1.10"),
+                   "model": mod.ItemIn(name="n", price=decimal.Decimal("2"))}
+        body = json.loads(mod.RJSONResponse(content).body)
+        assert body == {"when": "2024-01-02T03:04:05", "id": str(uuid.UUID(int=1)),
+                        "color": "green", "tags": ["x"], "price": 1.1,  # Decimal -> float
+                        "model": {"name": "n", "price": "2", "tags": []}}
+
+    def test_to_jsonable_fallback_keeps_decimal_precision(self, api):
+        mod, _ = api
+
+        class ExactResponse(mod.RJSONResponse):
+            fallback_encoder = staticmethod(mod.to_jsonable)
+
+        content = {"price": decimal.Decimal("0.1000000000000000000001"), 5: Color.RED,
+                   "t": (dt.date(2024, 1, 1), dt.time(1, 2)), "lvl": Level.LOW}
+        assert json.loads(ExactResponse(content).body) == {
+            "price": "0.1000000000000000000001", "5": "red",
+            "t": ["2024-01-01", "01:02:00"], "lvl": 1}
+
+    def test_to_jsonable_rejects_unknown_types(self, api):
+        mod, _ = api
+        with pytest.raises(TypeError, match="not JSON serializable"):
+            mod.to_jsonable({"x": object()})
+
+    @pytest.mark.parametrize("content", [float("nan"), {"x": [float("inf")]}])
+    def test_non_finite_floats_rejected_like_starlette(self, api, content):
+        from starlette.responses import JSONResponse
+
+        mod, _ = api
+        with pytest.raises(ValueError):
+            JSONResponse(content)
+        with pytest.raises(ValueError):
+            mod.RJSONResponse(content)
+
+    def test_lone_surrogate_raises(self, api):
+        mod, _ = api
+        with pytest.raises(UnicodeEncodeError):
+            mod.RJSONResponse({"s": "\ud800"})
+
+    def test_unencodable_response_is_a_500(self, api):
+        mod, client = api
+        mod.app.add_api_route("/_nan", lambda: mod.RJSONResponse({"x": float("nan")}))
+        assert client.get("/_nan").status_code == 500
+
+
+class TestFastAPIRequest:
+    def test_body_model_parsed_by_rjson(self, api):
+        _, client = api
+        response = client.post("/items", json={"name": "pen", "price": "1.10", "tags": ["a"]})
+        assert response.status_code == 201
+        body = response.json()
+        assert body["price"] == "1.10" and body["tags"] == ["a"]
+        uuid.UUID(body["id"])
+
+    def test_route_really_uses_rjson(self, api, monkeypatch):
+        mod, client = api
+        calls = []
+        real = rjson.loads
+        monkeypatch.setattr(mod.rjson, "loads", lambda b: calls.append(b) or real(b))
+        client.post("/items", json={"name": "pen", "price": 1})
+        client.post("/events", json={"a": 1})
+        assert len(calls) == 2
+
+    @pytest.mark.parametrize("payload", [
+        b'{"name": "pen",', b"{'name': 'pen'}", b'{"name": "pen", "price": NaN}',
+        b'\xef\xbb\xbf{"name": "pen", "price": 1}', b'{"name": "\xff", "price": 1}',
+        b'{"name": "\\ud83d", "price": 1}',
+    ], ids=["truncated", "single-quotes", "NaN", "BOM", "bad-utf8", "lone-surrogate"])
+    def test_invalid_json_is_422_json_invalid(self, api, payload):
+        _, client = api
+        response = client.post("/items", content=payload, headers=JSON_HEADERS)
+        assert response.status_code == 422
+        (error,) = response.json()["detail"]
+        assert error["type"] == "json_invalid"
+        assert error["loc"][0] == "body" and isinstance(error["loc"][1], int)
+        assert error["ctx"]["error"]
+
+    def test_validation_error_unchanged(self, api):
+        _, client = api
+        response = client.post("/items", json={"name": "pen"})
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["type"] == "missing"
+
+    def test_request_json_is_cached(self, api):
+        import asyncio
+
+        mod, _ = api
+        body = b'{"a": [1, 2]}'
+        sent = []
+
+        async def receive():
+            sent.append(1)
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        async def run():
+            request = mod.RJSONRequest({"type": "http", "method": "POST", "headers": []},
+                                       receive)
+            first = await request.json()
+            assert await request.json() is first
+            return first
+
+        assert asyncio.run(run()) == {"a": [1, 2]} and sent == [1]
+
+
+class TestFastAPIJsonBodyDependency:
+    def test_accepts_json_and_plus_json(self, api):
+        _, client = api
+        for content_type in ("application/json", "application/cloudevents+json; charset=utf-8",
+                             "Application/JSON"):
+            response = client.post("/events", content=b'{"big": 12345678901234567890123}',
+                                   headers={"content-type": content_type})
+            assert response.status_code == 202, content_type
+            assert response.headers["content-type"] == "application/json"
+            body = response.json()
+            assert body["accepted"] == {"big": 12345678901234567890123}  # exact big int
+            dt.datetime.fromisoformat(body["received_at"])  # datetime took the fallback
+
+    @pytest.mark.parametrize(("payload", "position"), [
+        (b'{"type": ', 9), (b"", 0), (b"[1] x", 4), (b'{"a": "\xff"}', 7),
+    ])
+    def test_invalid_json_is_400_with_position(self, api, payload, position):
+        _, client = api
+        response = client.post("/events", content=payload, headers=JSON_HEADERS)
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail["error"] == "invalid_json"
+        assert detail["position"] == position and detail["line"] == 1
+        assert detail["message"]
+
+    @pytest.mark.parametrize("content_type", ["text/plain", "application/x-www-form-urlencoded",
+                                              "application/jsonx", ""])
+    def test_wrong_content_type_is_415(self, api, content_type):
+        _, client = api
+        response = client.post("/events", content=b"{}", headers={"content-type": content_type})
+        assert response.status_code == 415
+
+    def test_non_object_is_422(self, api):
+        _, client = api
+        assert client.post("/events", json=[1, 2]).status_code == 422
+
+    def test_demo_runs(self, api):
+        out = run_demo("fastapi_app")
+        assert "GET /items -> 200 application/json" in out
+        assert "POST /events -> 400" in out and "POST /events -> 415" in out
