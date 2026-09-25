@@ -65,9 +65,9 @@ class CodecError(ValueError):
 class EncodeError(CodecError, TypeError):
     """An object cannot be encoded.
 
-    Subclasses both ``ValueError`` (what ``rjson.dumps`` raises) and ``TypeError`` (what
-    ``json.dumps`` and ``orjson.dumps`` raise), so existing ``except`` clauses keep working
-    whichever library the caller migrated from.
+    Subclasses both ``ValueError`` and ``TypeError`` (like ``rjson.JSONEncodeError``, which
+    ``rjson.dumps`` raises), so existing ``except`` clauses keep working whichever library
+    the caller migrated from.
     """
 
 
@@ -327,7 +327,7 @@ def _hashable(key: Any) -> Any:
 def _dumps(obj: Any) -> bytes:
     try:
         return rjson.dumps(obj)
-    except (TypeError, ValueError) as exc:  # rjson raises ValueError; TypeError: future-proof.
+    except (TypeError, ValueError) as exc:  # JSONEncodeError, or UnicodeEncodeError
         raise EncodeError(str(exc)) from exc
 
 

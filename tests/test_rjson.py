@@ -260,7 +260,7 @@ class TestErrorHandling:
         class CustomClass:
             pass
 
-        with pytest.raises(ValueError, match="Unsupported Python type"):
+        with pytest.raises(ValueError, match="Type is not JSON serializable"):
             rjson.dumps_str(CustomClass())
 
     def test_dumps_dict_non_string_key_raises(self):

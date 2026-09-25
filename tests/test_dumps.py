@@ -329,10 +329,133 @@ class TestSubclasses:
 
     def test_unsupported(self):
         for f in (rjson.dumps_str, rjson.dumps):
-            with pytest.raises(ValueError, match="Unsupported Python type"):
+            with pytest.raises(ValueError, match="Type is not JSON serializable"):
                 f([1, {"a": object()}])
             with pytest.raises(ValueError, match="keys must be strings"):
                 f({1: 2})
+
+
+def _circular():
+    a = []
+    a.append(a)
+    return a
+
+
+def _nest(n):
+    x = []
+    for _ in range(n):
+        x = [x]
+    return x
+
+
+class _Custom:
+    pass
+
+
+class _DictSub(dict):
+    pass
+
+
+class _ListSub(list):
+    pass
+
+
+# (value, message fragment) for every serialization failure class.
+ENCODE_FAILURES = [
+    (_Custom(), "Type is not JSON serializable: test_dumps._Custom"),
+    (object(), "Type is not JSON serializable: object"),
+    ({1, 2}, "Type is not JSON serializable: set"),
+    (b"bytes", "Type is not JSON serializable: bytes"),
+    (1j, "Type is not JSON serializable: complex"),
+    ({1: "v"}, "keys must be strings for JSON serialization, not int"),
+    ({None: "v"}, "keys must be strings for JSON serialization, not NoneType"),
+    ({(1,): "v"}, "keys must be strings for JSON serialization, not tuple"),
+    (float("nan"), "non-finite float: nan"),
+    (float("inf"), "non-finite float: inf"),
+    (float("-inf"), "non-finite float: -inf"),
+    (_circular(), "Maximum nesting depth"),
+    (_nest(254), "Maximum nesting depth"),
+]
+ENCODERS = [rjson.dumps, rjson.dumps_str, rjson.dumps_bytes]
+
+
+class TestEncodeErrorContract:
+    """Every dumps failure raises rjson.JSONEncodeError, a subclass of both
+    TypeError (what json/orjson raise) and ValueError (what rjson raised
+    before), so either kind of existing ``except`` clause catches it."""
+
+    def test_type(self):
+        E = rjson.JSONEncodeError
+        assert issubclass(E, TypeError)
+        assert issubclass(E, ValueError)
+        assert E.__module__ == "rjson"
+        assert E.__name__ == "JSONEncodeError"
+        assert E.__doc__
+
+    @pytest.mark.parametrize("f", ENCODERS, ids=lambda f: f.__name__)
+    @pytest.mark.parametrize("value,msg", ENCODE_FAILURES, ids=lambda v: type(v).__name__)
+    def test_every_failure_class(self, f, value, msg):
+        with pytest.raises(rjson.JSONEncodeError) as ei:
+            f(value)
+        assert isinstance(ei.value, TypeError)
+        assert isinstance(ei.value, ValueError)
+        assert type(ei.value) is rjson.JSONEncodeError
+        assert msg in str(ei.value)
+
+    @pytest.mark.parametrize("f", ENCODERS, ids=lambda f: f.__name__)
+    def test_except_typeerror_and_valueerror_both_catch(self, f):
+        # The json/orjson migration case: handlers written as `except TypeError`.
+        for exc_type in (TypeError, ValueError):
+            try:
+                f({"when": object()})
+            except exc_type:
+                pass
+            else:
+                pytest.fail("no exception raised")
+
+    @pytest.mark.parametrize("f", ENCODERS, ids=lambda f: f.__name__)
+    @pytest.mark.parametrize("value,msg", ENCODE_FAILURES[:9], ids=lambda v: type(v).__name__)
+    def test_nested_and_subclass_containers_propagate_same_type(self, f, value, msg):
+        # Deep inside containers, after output was already written (incl.
+        # non-ASCII strings, which dumps_str keeps as pending segments), and
+        # below the subclass code paths.
+        for wrapped in (
+            ["é" * 50, "x" * 5000, {"k": [1, 2.5, value]}],
+            {"a": "😀", "b": [{"c": value}]},
+            _DictSub(z="é", y=_ListSub([1, value])),
+            (1, "é", [value]),
+        ):
+            with pytest.raises(rjson.JSONEncodeError) as ei:
+                f(wrapped)
+            assert msg in str(ei.value)
+
+    def test_failure_does_not_leak_pending_strings(self):
+        # dumps_str holds references to non-ASCII source strings until the
+        # result is built; a failure after them must release them.
+        s = "é" * 100 + "x"
+        before = sys.getrefcount(s)
+        for _ in range(1000):
+            with pytest.raises(rjson.JSONEncodeError):
+                rjson.dumps_str([s, s, {"k": s, "bad": object()}])
+        assert sys.getrefcount(s) == before
+        # And the serializer still works afterwards.
+        assert rjson.dumps_str([s]) == ref([s])
+
+    def test_key_error_names_subclass_key_type(self):
+        class K(int):
+            pass
+
+        with pytest.raises(rjson.JSONEncodeError, match="not test_dumps.*K"):
+            rjson.dumps(_DictSub({K(1): 2}))
+
+    @pytest.mark.parametrize("f", [rjson.dumps, rjson.dumps_bytes], ids=lambda f: f.__name__)
+    def test_lone_surrogate_stays_unicode_encode_error(self, f):
+        # Not a JSONEncodeError: the UTF-8 codec error propagates unchanged
+        # (UnicodeEncodeError is itself a ValueError subclass).
+        with pytest.raises(UnicodeEncodeError) as ei:
+            f(["ok", "\ud800"])
+        assert not isinstance(ei.value, rjson.JSONEncodeError)
+        assert isinstance(ei.value, ValueError)
 
 
 class TestRecursion:

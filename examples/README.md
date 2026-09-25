@@ -20,9 +20,10 @@ rjson's API is `loads`, `dumps` (bytes), `dumps_str` (str). It has no keyword op
   Decimal, dataclasses and plain `Enum` raise. Every example uses the same workaround: call
   rjson first, and only when it raises, convert the data in Python and call it again.
   Data that is already JSON-native pays nothing.
-- **`dumps` raises `ValueError` where `json`/`orjson` raise `TypeError`** (unsupported
-  type, non-str key). An `except TypeError` written for `json.dumps` does not catch it.
-  Catch `(TypeError, ValueError)`.
+- **`dumps` raises `rjson.JSONEncodeError`**, a subclass of both `TypeError` and
+  `ValueError` (like `orjson.JSONEncodeError`), for an unsupported type, a non-str key,
+  NaN/Infinity or too-deep nesting, so `except TypeError` handlers written for
+  `json.dumps` keep working. A lone surrogate raises `UnicodeEncodeError` (a `ValueError`).
 - **Dict keys must be `str`.** `json` turns `int`/`float`/`bool`/`None` keys into strings,
   and rjson raises instead (orjson does the same without `OPT_NON_STR_KEYS`).
 - **NaN/Infinity raise** (`json` writes `NaN`, orjson writes `null`), and `loads` rejects

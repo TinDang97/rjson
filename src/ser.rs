@@ -53,10 +53,15 @@ pub const RECURSION_LIMIT: u32 = 254;
 const ESCAPE_CHUNK: usize = 64 * 1024;
 
 /// Error kind; payloads live in `Serializer::err_*`.
+///
+/// Every kind except `PyErrSet` is raised as `rjson.JSONEncodeError` (see
+/// `to_pyerr`); `PyErrSet` propagates the Python exception as-is.
 #[derive(Clone, Copy)]
 pub enum SerError {
     NonFinite,
+    /// `err_obj` is the offending value (borrowed).
     Unsupported,
+    /// `err_obj` is the offending key (borrowed).
     KeyNotStr,
     Recursion,
     /// A Python exception is already set (e.g. lone surrogate, int too large to
@@ -1402,6 +1407,16 @@ impl Serializer {
         ptr::null_mut()
     }
 
+    /// `fail` that also records the offending object (borrowed; it stays alive
+    /// until `to_pyerr` because its container is still referenced by the caller
+    /// of `dumps`, and no Python code runs in between).
+    #[cold]
+    #[inline(never)]
+    fn fail_obj(&mut self, e: SerError, obj: *mut ffi::PyObject) -> Cur {
+        self.err_obj = obj;
+        self.fail(e)
+    }
+
     #[inline(always)]
     fn start(&mut self) -> Cur {
         unsafe { self.buf.as_mut_ptr().add(self.buf.len()) }
@@ -1886,7 +1901,7 @@ impl Serializer {
             let p = self.put_sep(p, b',', ns);
             tri!(self.write_str_slow(p, key))
         } else {
-            return self.fail(SerError::KeyNotStr);
+            return self.fail_obj(SerError::KeyNotStr, key);
         };
         self.ser(p, value, b':', 1)
     }
@@ -1947,8 +1962,7 @@ impl Serializer {
         } else if ffi::PyFloat_Check(obj) != 0 {
             self.write_float(p, ffi::PyFloat_AS_DOUBLE(obj), 0, 0)
         } else {
-            self.err_obj = obj;
-            self.fail(SerError::Unsupported)
+            self.fail_obj(SerError::Unsupported, obj)
         }
     }
 
@@ -2115,34 +2129,84 @@ unsafe fn utf8_of(obj: *mut ffi::PyObject) -> Result<(*const u8, usize), SerErro
     Ok((p as *const u8, n as usize))
 }
 
+/// `rjson.JSONEncodeError`, created once (at module init, see `encode_error_type`).
+static JSON_ENCODE_ERROR: pyo3::sync::PyOnceLock<Py<pyo3::types::PyType>> =
+    pyo3::sync::PyOnceLock::new();
+
+/// Returns `rjson.JSONEncodeError`, a subclass of both `TypeError` (what
+/// `json.dumps`/`orjson.dumps` raise for unsupported values, so `except
+/// TypeError` handlers keep working) and `ValueError` (what rjson raised
+/// before, so existing `except ValueError` handlers keep working too), like
+/// `orjson.JSONEncodeError`.
+pub fn encode_error_type(py: Python<'_>) -> PyResult<&Py<pyo3::types::PyType>> {
+    JSON_ENCODE_ERROR.get_or_try_init(py, || unsafe {
+        let bases = ffi::PyTuple_Pack(2, ffi::PyExc_TypeError, ffi::PyExc_ValueError);
+        if bases.is_null() {
+            return Err(PyErr::fetch(py));
+        }
+        let ty = ffi::PyErr_NewExceptionWithDoc(
+            c"rjson.JSONEncodeError".as_ptr(),
+            c"Raised by dumps/dumps_str/dumps_bytes when an object cannot be serialized: \
+unsupported type, non-str dict key, NaN/Infinity, or nesting too deep (circular \
+reference). Subclasses both TypeError and ValueError."
+                .as_ptr(),
+            bases,
+            ptr::null_mut(),
+        );
+        ffi::Py_DECREF(bases);
+        // A NULL return has the exception set; `from_owned_ptr_or_err` fetches it.
+        Ok(Bound::from_owned_ptr_or_err(py, ty)?
+            .cast_into::<pyo3::types::PyType>()?
+            .unbind())
+    })
+}
+
+/// `type(obj)` as `module.QualName` (just `QualName` for builtins), for messages.
+fn type_name(py: Python<'_>, obj: *mut ffi::PyObject) -> String {
+    use pyo3::types::PyTypeMethods;
+    if obj.is_null() {
+        return "unknown".to_string();
+    }
+    // SAFETY: `obj` is a live borrowed pointer (see `Serializer::fail_obj`).
+    let ty = unsafe { Bound::from_borrowed_ptr(py, obj) }.get_type();
+    match ty.fully_qualified_name() {
+        Ok(n) => n.to_string(),
+        Err(_) => ty.name().map(|n| n.to_string()).unwrap_or_else(|_| "unknown".to_string()),
+    }
+}
+
 #[cold]
 #[inline(never)]
 fn to_pyerr(py: Python<'_>, ser: &Serializer, e: SerError) -> PyErr {
-    use pyo3::exceptions::PyValueError;
-    match e {
-        SerError::NonFinite => PyValueError::new_err(format!(
-            "Cannot serialize non-finite float: {}",
-            ser.err_float
-        )),
+    let msg = match e {
+        SerError::NonFinite => format!(
+            "Cannot serialize non-finite float: {} (JSON has no NaN or Infinity)",
+            // Python's repr spelling (Rust would print `NaN`).
+            if ser.err_float.is_nan() {
+                "nan"
+            } else if ser.err_float > 0.0 {
+                "inf"
+            } else {
+                "-inf"
+            }
+        ),
         SerError::Unsupported => {
-            let name = unsafe { Bound::from_borrowed_ptr(py, ser.err_obj) }
-                .get_type()
-                .name()
-                .map(|n| n.to_string())
-                .unwrap_or_else(|_| "unknown".to_string());
-            PyValueError::new_err(format!(
-                "Unsupported Python type for JSON serialization: {}",
-                name
-            ))
+            format!("Type is not JSON serializable: {}", type_name(py, ser.err_obj))
         }
-        SerError::KeyNotStr => {
-            PyValueError::new_err("Dictionary keys must be strings for JSON serialization")
-        }
-        SerError::Recursion => PyValueError::new_err(format!(
+        SerError::KeyNotStr => format!(
+            "Dictionary keys must be strings for JSON serialization, not {}",
+            type_name(py, ser.err_obj)
+        ),
+        SerError::Recursion => format!(
             "Maximum nesting depth ({}) exceeded during JSON serialization (circular reference?)",
             RECURSION_LIMIT
-        )),
-        SerError::PyErrSet => PyErr::fetch(py),
+        ),
+        SerError::PyErrSet => return PyErr::fetch(py),
+    };
+    match encode_error_type(py) {
+        Ok(ty) => PyErr::from_type(ty.bind(py).clone(), msg),
+        // Only if creating the type failed (e.g. MemoryError): still a ValueError.
+        Err(_) => pyo3::exceptions::PyValueError::new_err(msg),
     }
 }
 

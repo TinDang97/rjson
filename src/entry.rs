@@ -117,5 +117,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
             m.add(name, f)?;
         }
     }
+    m.add("JSONEncodeError", crate::ser::encode_error_type(py)?.bind(py))?;
     Ok(())
 }
