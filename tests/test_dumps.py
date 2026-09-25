@@ -448,6 +448,17 @@ class TestEncodeErrorContract:
         with pytest.raises(rjson.JSONEncodeError, match="not test_dumps.*K"):
             rjson.dumps(_DictSub({K(1): 2}))
 
+    def test_error_pickles(self):
+        # Exceptions cross process boundaries (multiprocessing, Celery):
+        # the class must be importable as rjson.JSONEncodeError.
+        import pickle
+
+        with pytest.raises(rjson.JSONEncodeError) as ei:
+            rjson.dumps(object())
+        e = pickle.loads(pickle.dumps(ei.value))
+        assert type(e) is rjson.JSONEncodeError
+        assert e.args == ei.value.args
+
     @pytest.mark.parametrize("f", [rjson.dumps, rjson.dumps_bytes], ids=lambda f: f.__name__)
     def test_lone_surrogate_stays_unicode_encode_error(self, f):
         # Not a JSONEncodeError: the UTF-8 codec error propagates unchanged
