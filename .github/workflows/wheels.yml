@@ -1,0 +1,174 @@
+name: Wheels
+
+# PGO release wheels (scripts/build_pgo.sh: instrument -> train on
+# scripts/pgo_train.py -> rebuild), one profile per interpreter and platform.
+#
+# x86_64 wheels target x86-64-v2 via .cargo/config.toml. Never set RUSTFLAGS
+# here: it would replace those config rustflags (build_pgo.sh refuses to run
+# with RUSTFLAGS set and passes its own flags via CARGO_TARGET_<TRIPLE>_RUSTFLAGS).
+#
+# Publishing to PyPI is not wired up; wheels are uploaded as artifacts.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  MATURIN_VERSION: "1.15.0"
+
+jobs:
+  manylinux:
+    name: manylinux ${{ matrix.arch }} py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # requires-python >=3.10; PyO3 0.29 supports up to 3.14 (3.14 str access: src/compat.rs).
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        arch: [x86_64, aarch64]
+        include:
+          - arch: x86_64
+            os: ubuntu-24.04
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
+      # Build and train natively on the runner; the optimized build links
+      # through zig against glibc 2.17 so the wheel is manylinux2014.
+      - run: python -m pip install "maturin[zig]==${MATURIN_VERSION}" pytest
+      - name: PGO build
+        run: scripts/build_pgo.sh python
+        env:
+          OUT_DIR: dist
+          MATURIN_FINAL_ARGS: --zig --compatibility manylinux2014
+      - name: Test
+        run: |
+          python -m pip install --no-index --find-links dist rjson
+          python -m pytest tests -q
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-manylinux-${{ matrix.arch }}-py${{ matrix.python }}
+          path: dist/*.whl
+
+  musllinux:
+    name: musllinux ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            os: ubuntu-24.04
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      # Train inside the musllinux image so the profile comes from a musl
+      # interpreter; all CPython versions are built in one container.
+      - name: PGO build + test in quay.io/pypa/musllinux_1_2_${{ matrix.arch }}
+        run: |
+          docker run --rm -v "$PWD":/io -w /io \
+            -e MATURIN_VERSION -e CARGO_TERM_COLOR \
+            quay.io/pypa/musllinux_1_2_${{ matrix.arch }} \
+            scripts/ci_build_pgo_container.sh 3.10 3.11 3.12 3.13 3.14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-musllinux-${{ matrix.arch }}
+          path: dist/*.whl
+
+  macos:
+    name: macos ${{ matrix.arch }} py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        arch: [arm64, x86_64]
+        include:
+          - arch: arm64
+            os: macos-14
+          - arch: x86_64
+            os: macos-15-intel
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
+      - run: python -m pip install "maturin==${MATURIN_VERSION}" pytest
+      - name: PGO build
+        run: scripts/build_pgo.sh python
+        env:
+          OUT_DIR: dist
+      - name: Test
+        run: |
+          python -m pip install --no-index --find-links dist rjson
+          python -m pytest tests -q
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.arch }}-py${{ matrix.python }}
+          path: dist/*.whl
+
+  windows:
+    name: windows x86_64 py${{ matrix.python }}
+    runs-on: windows-2022
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools
+      - run: python -m pip install "maturin==${MATURIN_VERSION}" pytest
+      - name: PGO build
+        run: scripts/build_pgo.sh python
+        env:
+          OUT_DIR: dist
+      - name: Test
+        run: |
+          python -m pip install --no-index --find-links dist rjson
+          python -m pytest tests -q
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x86_64-py${{ matrix.python }}
+          path: dist/*.whl
+
+  sdist:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: python -m pip install "maturin==${MATURIN_VERSION}"
+      - run: maturin sdist -o dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz

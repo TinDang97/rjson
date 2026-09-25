@@ -5,15 +5,20 @@ build-backend = "maturin"
 [project]
 name = "rjson"
 version = "0.1.0"
-description = "Add your description here"
+description = "Fast JSON for Python, written in Rust against the CPython C API"
 readme = "README.md"
-requires-python = ">=3.7"
+# CI-tested on CPython 3.10-3.14 (x86_64, aarch64, macOS, Windows); 3.14
+# verified on 3.14.0rc2 (PyO3 0.29). PyPy/GraalPy/free-threaded: unsupported.
+requires-python = ">=3.10"
 dependencies = [
 ]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
-compatibility = "linux"
+# `compatibility = "linux"` produced plain `linux_x86_64` wheels, which PyPI
+# rejects. Leave it unset so maturin auditwheel-checks and tags the highest
+# manylinux policy the binary satisfies. Release wheels (.github/workflows/
+# wheels.yml) link against glibc 2.17 with `--zig --compatibility manylinux2014`.
 
 [dependency-groups]
 dev = [

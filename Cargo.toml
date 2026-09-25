@@ -8,19 +8,21 @@ name = "rjson"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.24.0", features = ["extension-module"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-simd-json = "0.14"   # SIMD-accelerated JSON parsing (Phase 7)
-itoa = "1.0"
-ryu = "1.0"
-memchr = "2.7"
-fast-float = "0.2"   # 4x faster float parsing than stdlib
-ahash = "0.8"        # 2x faster hashing than default HashMap
-smallvec = "1.13"    # Stack-allocated small vectors
+pyo3 = { version = "0.29", features = ["extension-module"] }
+itoap = "1.0"        # integer formatting straight into the output buffer (dumps)
+zmij = "1.0"         # shortest round-trip float formatting, same output as orjson (dumps)
+simdutf8 = "0.1"     # SIMD UTF-8 validation for bytes input to loads
+fast-float = "0.2"   # correctly rounded fallback for >19-digit floats in loads
+
+[build-dependencies]
+pyo3-build-config = "0.29"
 
 [profile.release]
-debug = true         # Debug symbols for our profiler.
+# No DWARF in shipped artifacts: identical .text (verified), but the .so drops
+# from 4.7 MB to 0.58 MB (gzip: 1.41 MB -> 0.29 MB). Use --profile profiling
+# (below) when you need symbols for perf/flamegraph.
+debug = false
+strip = "symbols"    # PyInit_rjson lives in .dynsym and survives stripping
 lto = "fat"          # Aggressive link-time optimization.
 codegen-units = 1    # Slower compilation but faster code.
 panic = "abort"      # Smaller binary, no unwinding overhead.
@@ -28,3 +30,9 @@ opt-level = 3        # Maximum optimization.
 
 [profile.release.build-override]
 opt-level = 3        # Optimize build scripts too.
+
+# `cargo build --profile profiling` / `maturin develop --profile profiling`
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="150" viewBox="0 0 880 150" role="img" aria-label="rjson speedups: loads vs orjson 1.20×; dumps vs orjson 1.40×; loads vs stdlib json 3.36×; dumps vs stdlib json 14.7×">
+<rect x="0.5" y="0.5" width="879" height="149" rx="12" fill="#1a1a19" stroke="rgba(255,255,255,0.10)"/>
+<rect x="24.0" y="30" width="3" height="16" rx="1.5" fill="#3987e5"/>
+<text x="35.0" y="43.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="13" font-weight="400" fill="#c3c2b7" text-anchor="start">loads vs orjson</text>
+<text x="24.0" y="94" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="40" font-weight="600" fill="#ffffff">1.20×<tspan dx="8" font-size="14" font-weight="400" fill="#9a988f">faster</tspan></text>
+<line x1="232.0" y1="26" x2="232.0" y2="104" stroke="#2c2c2a" stroke-width="1"/>
+<rect x="248.0" y="30" width="3" height="16" rx="1.5" fill="#3987e5"/>
+<text x="259.0" y="43.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="13" font-weight="400" fill="#c3c2b7" text-anchor="start">dumps vs orjson</text>
+<text x="248.0" y="94" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="40" font-weight="600" fill="#ffffff">1.40×<tspan dx="8" font-size="14" font-weight="400" fill="#9a988f">faster</tspan></text>
+<line x1="440.0" y1="26" x2="440.0" y2="104" stroke="#2c2c2a" stroke-width="1"/>
+<rect x="456.0" y="30" width="3" height="16" rx="1.5" fill="#3987e5"/>
+<text x="467.0" y="43.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="13" font-weight="400" fill="#c3c2b7" text-anchor="start">loads vs stdlib json</text>
+<text x="456.0" y="94" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="40" font-weight="600" fill="#ffffff">3.36×<tspan dx="8" font-size="14" font-weight="400" fill="#9a988f">faster</tspan></text>
+<line x1="648.0" y1="26" x2="648.0" y2="104" stroke="#2c2c2a" stroke-width="1"/>
+<rect x="664.0" y="30" width="3" height="16" rx="1.5" fill="#3987e5"/>
+<text x="675.0" y="43.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="13" font-weight="400" fill="#c3c2b7" text-anchor="start">dumps vs stdlib json</text>
+<text x="664.0" y="94" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="40" font-weight="600" fill="#ffffff">14.7×<tspan dx="8" font-size="14" font-weight="400" fill="#9a988f">faster</tspan></text>
+<text x="24.0" y="132.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#9a988f" text-anchor="start">Geometric mean over 10 cases (4 real-world corpora + 6 synthetic) · CPython 3.13.12 · orjson 3.12.0 · x86_64</text>
+</svg>
