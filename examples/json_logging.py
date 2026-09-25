@@ -23,7 +23,7 @@ import re
 import sys
 import time
 import uuid
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import IO, Any, Literal
 
 import rjson
@@ -34,7 +34,8 @@ log = logging.getLogger(__name__)
 
 #: Attributes every LogRecord has (``taskName`` exists on 3.12+); the rest came from ``extra=``.
 _RESERVED = frozenset(vars(logging.LogRecord("", 0, "", 0, "", (), None))) | {
-    "message", "asctime",
+    "message",
+    "asctime",
 }
 _CORE_FIELDS = ("ts", "level", "logger", "message")
 _MAX_DEPTH = 16
@@ -129,8 +130,10 @@ def _to_json_line(payload: dict[str, Any]) -> str:
         try:
             text = rjson.dumps_str(_jsonable(payload, 0))
         except (TypeError, ValueError) as exc:  # not expected; logging must not raise
-            text = rjson.dumps_str({key: _safe_repr(payload.get(key)) for key in _CORE_FIELDS}
-                                   | {"formatter_error": _safe_repr(exc)})
+            text = rjson.dumps_str(
+                {key: _safe_repr(payload.get(key)) for key in _CORE_FIELDS}
+                | {"formatter_error": _safe_repr(exc)}
+            )
     if not text.isascii():  # O(1) in CPython: ASCII-only lines skip the scan
         text = _SURROGATES.sub("\ufffd", text)
     return text
@@ -149,8 +152,10 @@ def _jsonable(value: Any, depth: int) -> Any:
     if isinstance(value, float):
         return value if value - value == 0 else repr(value)  # NaN/inf -> "nan"/"inf"
     if isinstance(value, Mapping):
-        return {k if isinstance(k, str) else _safe_str(k): _jsonable(v, depth + 1)
-                for k, v in value.items()}
+        return {
+            k if isinstance(k, str) else _safe_str(k): _jsonable(v, depth + 1)
+            for k, v in value.items()
+        }
     if isinstance(value, (list, tuple, set, frozenset)):
         return [_jsonable(v, depth + 1) for v in value]
     if isinstance(value, (dt.datetime, dt.date, dt.time)):
@@ -158,8 +163,10 @@ def _jsonable(value: Any, depth: int) -> Any:
     if isinstance(value, (uuid.UUID, decimal.Decimal, dt.timedelta)):
         return str(value)
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return {f.name: _jsonable(getattr(value, f.name, None), depth + 1)
-                for f in dataclasses.fields(value)}
+        return {
+            f.name: _jsonable(getattr(value, f.name, None), depth + 1)
+            for f in dataclasses.fields(value)
+        }
     return _safe_repr(value)
 
 
@@ -233,22 +240,25 @@ def write_ndjson(fp: IO[bytes] | IO[str], records: Iterable[Any]) -> int:
             of the failing record is.
     """
     text = isinstance(fp, io.TextIOBase)
-    dump = rjson.dumps_str if text else rjson.dumps
-    newline: str | bytes = "\n" if text else b"\n"
+    write: Callable[[Any], object] = fp.write
     count = 0
     for count, record in enumerate(records, 1):
         try:
-            line = dump(record)
-        except (TypeError, ValueError) as exc:
+            line: str | bytes
+            if text:
+                line = text_line = rjson.dumps_str(record) + "\n"
+                if not text_line.isascii():  # dumps_str passes lone surrogates through; fail
+                    text_line.encode("utf-8")  # here (UnicodeEncodeError) like rjson.dumps
+            else:
+                line = rjson.dumps(record) + b"\n"
+        except (TypeError, ValueError) as exc:  # UnicodeEncodeError is a ValueError
             raise NDJSONError(count, f"cannot serialize record: {exc}") from exc
-        if text and not line.isascii():  # dumps_str passes lone surrogates through
-            line.encode("utf-8")  # raises UnicodeEncodeError before anything is written
-        fp.write(line + newline)  # type: ignore[operator, arg-type]
+        write(line)
     return count
 
 
 def read_ndjson(
-    fp: Iterable[bytes] | Iterable[str],
+    fp: Iterable[bytes | str],
     *,
     on_error: Literal["raise", "skip"] = "raise",
 ) -> Iterator[Any]:
@@ -295,11 +305,17 @@ class _Opaque:
 def _demo() -> None:
     handler = setup_json_logging(stream=sys.stdout, static_fields={"service": "demo"})
     demo_log = logging.getLogger("demo")
-    demo_log.info("user %s logged in", "ada", extra={"user_id": uuid.UUID(int=42),
-                                                    "at": dt.datetime(2024, 1, 1),
-                                                    "ratio": float("nan"),
-                                                    "obj": _Opaque(),
-                                                    "level": "shadowed"})
+    demo_log.info(
+        "user %s logged in",
+        "ada",
+        extra={
+            "user_id": uuid.UUID(int=42),
+            "at": dt.datetime(2024, 1, 1),
+            "ratio": float("nan"),
+            "obj": _Opaque(),
+            "level": "shadowed",
+        },
+    )
     try:
         1 / 0  # noqa: B018
     except ZeroDivisionError:

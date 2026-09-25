@@ -95,8 +95,10 @@ def to_jsonable(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float)):
         return value
     if isinstance(value, dict):
-        return {k if isinstance(k, str) else str(to_jsonable(k)): to_jsonable(v)
-                for k, v in value.items()}
+        return {
+            k if isinstance(k, str) else str(to_jsonable(k)): to_jsonable(v)
+            for k, v in value.items()
+        }
     if isinstance(value, (list, tuple, set, frozenset)):
         return [to_jsonable(v) for v in value]
     if isinstance(value, (dt.datetime, dt.date, dt.time)):
@@ -157,13 +159,16 @@ async def json_body(request: Request) -> Any:
     try:
         return rjson.loads(body)
     except json.JSONDecodeError as exc:
-        raise HTTPException(400, detail={
-            "error": "invalid_json",
-            "message": exc.msg,
-            "line": exc.lineno,
-            "column": exc.colno,
-            "position": exc.pos,
-        }) from exc
+        raise HTTPException(
+            400,
+            detail={
+                "error": "invalid_json",
+                "message": exc.msg,
+                "line": exc.lineno,
+                "column": exc.colno,
+                "position": exc.pos,
+            },
+        ) from exc
 
 
 # -- the app --------------------------------------------------------------------------
@@ -199,8 +204,7 @@ async def list_items() -> RJSONResponse:
 @router.post("/items", status_code=201)
 async def create_item(item: ItemIn) -> ItemOut:
     """Body parsed by rjson (RJSONRoute); response serialized by Pydantic's dump_json."""
-    return ItemOut(**item.model_dump(), id=uuid.uuid4(),
-                   created=dt.datetime.now(dt.timezone.utc))
+    return ItemOut(**item.model_dump(), id=uuid.uuid4(), created=dt.datetime.now(dt.timezone.utc))
 
 
 @router.post("/events", response_class=RJSONResponse)
@@ -208,8 +212,9 @@ async def ingest_event(event: Annotated[Any, Depends(json_body)]) -> RJSONRespon
     """Arbitrary JSON; the response holds a datetime, so render() takes the fallback."""
     if not isinstance(event, dict):
         raise HTTPException(422, detail="event must be a JSON object")
-    return RJSONResponse({"accepted": event, "received_at": dt.datetime.now(dt.timezone.utc)},
-                         status_code=202)
+    return RJSONResponse(
+        {"accepted": event, "received_at": dt.datetime.now(dt.timezone.utc)}, status_code=202
+    )
 
 
 app = FastAPI(title="rjson example")
@@ -222,20 +227,26 @@ _JSON_HEADERS = {"content-type": "application/json"}
 def _demo() -> None:
     try:
         from fastapi.testclient import TestClient
-    except RuntimeError as exc:  # httpx missing
+    except (ImportError, RuntimeError) as exc:  # Starlette raises RuntimeError without httpx
         raise SystemExit(f"the demo needs httpx: {exc}") from exc
 
     client = TestClient(app)
-    for method, url, kwargs in [
+    calls: list[tuple[str, str, dict[str, Any]]] = [
         ("GET", "/items", {}),
         ("POST", "/items", {"json": {"name": "pen", "price": "1.10", "tags": ["x"]}}),
         ("POST", "/items", {"content": b'{"name": "pen",', "headers": _JSON_HEADERS}),
-        ("POST", "/events", {"content": b'{"type": "click", "big": 12345678901234567890}',
-                             "headers": _JSON_HEADERS}),
+        (
+            "POST",
+            "/events",
+            {
+                "content": b'{"type": "click", "big": 12345678901234567890}',
+                "headers": _JSON_HEADERS,
+            },
+        ),
         ("POST", "/events", {"content": b'{"type": ', "headers": _JSON_HEADERS}),
-        ("POST", "/events", {"content": b"type=click",
-                             "headers": {"content-type": "text/plain"}}),
-    ]:
+        ("POST", "/events", {"content": b"type=click", "headers": {"content-type": "text/plain"}}),
+    ]
+    for method, url, kwargs in calls:
         response = client.request(method, url, **kwargs)
         print(f"{method} {url} -> {response.status_code} {response.headers['content-type']}")
         print(f"    {response.text}")

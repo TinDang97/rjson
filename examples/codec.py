@@ -135,9 +135,11 @@ class Codec:
         """
         if isinstance(cls, type) and issubclass(cls, enum.Enum):
             if issubclass(cls, (int, str, float)):
-                raise TypeError(f"{cls.__qualname__} mixes in int/str/float: it is encoded "
-                                "as its value and decodes as a plain value, so it cannot "
-                                "be registered")
+                raise TypeError(
+                    f"{cls.__qualname__} mixes in int/str/float: it is encoded "
+                    "as its value and decodes as a plain value, so it cannot "
+                    "be registered"
+                )
         elif not (isinstance(cls, type) and dataclasses.is_dataclass(cls)):
             raise TypeError(f"only Enum subclasses and dataclasses can be registered, not {cls!r}")
         key = name or f"{cls.__module__}.{cls.__qualname__}"
@@ -185,8 +187,9 @@ class Codec:
             if all(type(k) is str for k in obj) and TAG not in obj:
                 return {k: self._to_json(v, depth + 1) for k, v in obj.items()}
             # Non-str keys (int, UUID, tuple, ...) or a user key that collides with TAG.
-            items = [[self._to_json(k, depth + 1), self._to_json(v, depth + 1)]
-                     for k, v in obj.items()]
+            items = [
+                [self._to_json(k, depth + 1), self._to_json(v, depth + 1)] for k, v in obj.items()
+            ]
             return {TAG: "dict", "v": items}
         if isinstance(obj, (list, tuple)):
             return [self._to_json(v, depth + 1) for v in obj]
@@ -226,8 +229,11 @@ class Codec:
             name = self._names.get(type(obj))
             if name is None:
                 raise EncodeError(f"dataclass {type(obj).__qualname__} is not registered")
-            fields = {f.name: self._to_json(getattr(obj, f.name), depth + 1)
-                      for f in dataclasses.fields(obj) if f.init}
+            fields = {
+                f.name: self._to_json(getattr(obj, f.name), depth + 1)
+                for f in dataclasses.fields(obj)
+                if f.init
+            }
             return {TAG: "dataclass", "t": name, "v": fields}
         raise EncodeError(f"cannot encode object of type {type(obj).__qualname__}")
 
@@ -244,8 +250,9 @@ class Codec:
             return doc
         # Extra keys are allowed so a later release can add headers (trace id, ...)
         # without breaking consumers that are still on this version.
-        if not (isinstance(doc, dict) and doc.keys() >= _ENVELOPE_KEYS
-                and type(doc["tagged"]) is bool):
+        if not (
+            isinstance(doc, dict) and doc.keys() >= _ENVELOPE_KEYS and type(doc["tagged"]) is bool
+        ):
             raise DecodeError("payload is not a codec envelope")
         if self.schema is not None and doc["schema"] != self.schema:
             raise DecodeError(f"schema mismatch: expected {self.schema!r}, got {doc['schema']!r}")
@@ -402,8 +409,14 @@ def _demo() -> None:
     codec.register(Status, "Status")
     codec.register(User, "User")
 
-    user = User(uuid.uuid4(), "Ada", Status.ACTIVE, decimal.Decimal("10.50"),
-                dt.datetime(2024, 5, 1, 12, 0, tzinfo=dt.timezone.utc), frozenset({"admin"}))
+    user = User(
+        uuid.uuid4(),
+        "Ada",
+        Status.ACTIVE,
+        decimal.Decimal("10.50"),
+        dt.datetime(2024, 5, 1, 12, 0, tzinfo=dt.timezone.utc),
+        frozenset({"admin"}),
+    )
 
     redis = FakeRedis()
     redis.set("user:1", codec.encode(user), ex=300)
@@ -419,8 +432,8 @@ def _demo() -> None:
     old = Codec(schema="user", version=1, type_hooks=False).encode({"hits": 3})
     print("v1 -> v2:       ", codec.decode(old))
 
-    produce = KafkaSerializer(codec)       # e.g. Producer(value_serializer=produce)
-    consume = KafkaDeserializer(codec)     # e.g. Consumer(value_deserializer=consume)
+    produce = KafkaSerializer(codec)  # e.g. Producer(value_serializer=produce)
+    consume = KafkaDeserializer(codec)  # e.g. Consumer(value_deserializer=consume)
     print("kafka:          ", consume(produce({"event": "login", "user": user.id})))
     print("tombstone:      ", produce(None), consume(None))
 

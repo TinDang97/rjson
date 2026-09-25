@@ -43,8 +43,13 @@ def load_example(name: str) -> ModuleType:
 
 def run_demo(name: str) -> str:
     """Run ``python examples/<name>.py`` and return its stdout."""
-    proc = subprocess.run([sys.executable, str(EXAMPLES / f"{name}.py")],
-                          capture_output=True, text=True, timeout=60, check=False)
+    proc = subprocess.run(
+        [sys.executable, str(EXAMPLES / f"{name}.py")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
     assert proc.returncode == 0, proc.stderr
     return proc.stdout
 
@@ -85,26 +90,32 @@ class TestCodec:
     def test_plain_data_uses_fast_path(self):
         codec = make_codec()
         payload = codec.encode({"a": [1, 2.5, None, True, "é"]})
-        assert payload == (b'{"schema":"orders","version":1,"tagged":false,'
-                           b'"data":{"a":[1,2.5,null,true,"\xc3\xa9"]}}')
+        assert payload == (
+            b'{"schema":"orders","version":1,"tagged":false,'
+            b'"data":{"a":[1,2.5,null,true,"\xc3\xa9"]}}'
+        )
         assert codec.decode(payload) == {"a": [1, 2.5, None, True, "é"]}
 
-    @pytest.mark.parametrize("value", [
-        dt.datetime(2024, 1, 2, 3, 4, 5, 678901),
-        dt.datetime(2024, 1, 2, 3, 4, 5, tzinfo=dt.timezone(dt.timedelta(hours=-5))),
-        dt.date(2024, 2, 29),
-        dt.time(23, 59, 59, 1),
-        dt.timedelta(days=-1, seconds=5, microseconds=7),
-        uuid.UUID("12345678-1234-5678-1234-567812345678"),
-        decimal.Decimal("0.1000000000000000000000000001"),
-        decimal.Decimal("-Infinity"),
-        {1, 2, 3},
-        frozenset({"a"}),
-        b"\x00\xffbinary",
-        Color.GREEN,
-        {1: "int key", (2, 3): "tuple key", None: "none key"},
-        {"$rjson": "user data that looks like a tag", "x": dt.date(2020, 1, 1)},
-    ], ids=repr)
+    @pytest.mark.parametrize(
+        "value",
+        [
+            dt.datetime(2024, 1, 2, 3, 4, 5, 678901),
+            dt.datetime(2024, 1, 2, 3, 4, 5, tzinfo=dt.timezone(dt.timedelta(hours=-5))),
+            dt.date(2024, 2, 29),
+            dt.time(23, 59, 59, 1),
+            dt.timedelta(days=-1, seconds=5, microseconds=7),
+            uuid.UUID("12345678-1234-5678-1234-567812345678"),
+            decimal.Decimal("0.1000000000000000000000000001"),
+            decimal.Decimal("-Infinity"),
+            {1, 2, 3},
+            frozenset({"a"}),
+            b"\x00\xffbinary",
+            Color.GREEN,
+            {1: "int key", (2, 3): "tuple key", None: "none key"},
+            {"$rjson": "user data that looks like a tag", "x": dt.date(2020, 1, 1)},
+        ],
+        ids=repr,
+    )
     def test_extended_types_round_trip(self, value):
         codec = make_codec()
         payload = codec.encode({"v": value})
@@ -113,8 +124,13 @@ class TestCodec:
 
     def test_dataclass_round_trip_with_nested_types(self):
         codec = make_codec()
-        order = Order(uuid.uuid4(), decimal.Decimal("9.99"), Color.RED,
-                      dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc), ["x"])
+        order = Order(
+            uuid.uuid4(),
+            decimal.Decimal("9.99"),
+            Color.RED,
+            dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc),
+            ["x"],
+        )
         restored = codec.decode(codec.encode([order, order]))
         assert restored == [order, order]
         assert type(restored[0].total) is decimal.Decimal
@@ -133,9 +149,18 @@ class TestCodec:
         payload = codec.encode({"id": uuid.UUID(int=7)})
         assert codec.decode(memoryview(payload)) == codec.decode(bytearray(payload))
 
-    @pytest.mark.parametrize("value", [
-        object(), 1j, float("nan"), float("inf"), {"k": [float("-inf")]}, Level,
-    ], ids=repr)
+    @pytest.mark.parametrize(
+        "value",
+        [
+            object(),
+            1j,
+            float("nan"),
+            float("inf"),
+            {"k": [float("-inf")]},
+            Level,
+        ],
+        ids=repr,
+    )
     def test_unsupported_values_raise_encode_error(self, value):
         with pytest.raises(codec_mod.EncodeError):
             make_codec().encode(value)
@@ -150,8 +175,9 @@ class TestCodec:
         with pytest.raises(codec_mod.EncodeError, match="not registered"):
             codec.encode(Color.RED)
         with pytest.raises(codec_mod.EncodeError, match="not registered"):
-            codec.encode(Order(uuid.UUID(int=0), decimal.Decimal(0), Color.RED,
-                               dt.datetime(2024, 1, 1)))
+            codec.encode(
+                Order(uuid.UUID(int=0), decimal.Decimal(0), Color.RED, dt.datetime(2024, 1, 1))
+            )
 
     def test_decoder_rejects_unregistered_type_names(self):
         payload = make_codec().encode(Color.RED)
@@ -182,20 +208,23 @@ class TestCodec:
         with pytest.raises(codec_mod.EncodeError):
             make_codec().encode({"s": "\ud800"})
 
-    @pytest.mark.parametrize("payload", [
-        b"",
-        b"{",
-        b'"\xff"',
-        b"[1]",
-        b'{"schema":"orders","version":1,"data":1}',
-        b'{"schema":"orders","version":1,"tagged":"yes","data":1}',
-        b'{"schema":"other","version":1,"tagged":false,"data":1}',
-        b'{"schema":"orders","version":9,"tagged":false,"data":1}',
-        b'{"schema":"orders","version":true,"tagged":false,"data":1}',
-        b'{"schema":"orders","version":1,"tagged":true,"data":{"$rjson":"uuid","v":"zz"}}',
-        b'{"schema":"orders","version":1,"tagged":true,"data":{"$rjson":"nope","v":1}}',
-        b'{"schema":"orders","version":1,"tagged":true,"data":{"$rjson":"dict","v":[[{},1]]}}',
-    ])
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            b"",
+            b"{",
+            b'"\xff"',
+            b"[1]",
+            b'{"schema":"orders","version":1,"data":1}',
+            b'{"schema":"orders","version":1,"tagged":"yes","data":1}',
+            b'{"schema":"other","version":1,"tagged":false,"data":1}',
+            b'{"schema":"orders","version":9,"tagged":false,"data":1}',
+            b'{"schema":"orders","version":true,"tagged":false,"data":1}',
+            b'{"schema":"orders","version":1,"tagged":true,"data":{"$rjson":"uuid","v":"zz"}}',
+            b'{"schema":"orders","version":1,"tagged":true,"data":{"$rjson":"nope","v":1}}',
+            b'{"schema":"orders","version":1,"tagged":true,"data":{"$rjson":"dict","v":[[{},1]]}}',
+        ],
+    )
     def test_invalid_payloads_raise_decode_error(self, payload):
         with pytest.raises(codec_mod.DecodeError):
             make_codec().decode(payload)
@@ -204,7 +233,7 @@ class TestCodec:
         with pytest.raises(codec_mod.DecodeError):
             make_codec().decode(12)  # type: ignore[arg-type]
         with pytest.raises(codec_mod.DecodeError):
-            make_codec().decode(memoryview(b'[1, 2]')[::2])  # not C-contiguous
+            make_codec().decode(memoryview(b"[1, 2]")[::2])  # not C-contiguous
 
     def test_extra_envelope_keys_are_accepted(self):
         payload = b'{"schema":"orders","version":1,"tagged":false,"data":1,"trace":"t"}'
@@ -212,10 +241,14 @@ class TestCodec:
 
     def test_version_migrations(self):
         v1 = codec_mod.Codec(schema="s", version=1).encode({"name": "a"})
-        v3 = codec_mod.Codec(schema="s", version=3, migrations={
-            1: lambda d: {**d, "v2": True},
-            2: lambda d: {**d, "v3": True},
-        })
+        v3 = codec_mod.Codec(
+            schema="s",
+            version=3,
+            migrations={
+                1: lambda d: {**d, "v2": True},
+                2: lambda d: {**d, "v3": True},
+            },
+        )
         assert v3.decode(v1) == {"name": "a", "v2": True, "v3": True}
         missing = codec_mod.Codec(schema="s", version=2)
         with pytest.raises(codec_mod.DecodeError, match="no migration"):
@@ -297,8 +330,9 @@ class TestJSONFormatter:
         assert line["user"] == "ada" and line["n"] == 3
         assert dt.datetime.fromisoformat(line["ts"].replace("Z", "+00:00")).tzinfo is not None
 
-    @pytest.mark.parametrize("created", [0.0, 1.9995, 1727250000.123456, 1727250000.999999,
-                                         1727250001.0, -1.5])
+    @pytest.mark.parametrize(
+        "created", [0.0, 1.9995, 1727250000.123456, 1727250000.999999, 1727250001.0, -1.5]
+    )
     def test_timestamp_matches_datetime(self, created):
         ref = dt.datetime.fromtimestamp(created, dt.timezone.utc)
         expected = ref.isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -330,20 +364,24 @@ class TestJSONFormatter:
         logger, lines = json_logger
         cyclic: list = []
         cyclic.append(cyclic)
-        logger.info("x", extra={
-            "when": dt.datetime(2024, 1, 2, 3, 4, 5),
-            "id": uuid.UUID(int=1),
-            "amount": decimal.Decimal("1.50"),
-            "color": Color.RED,
-            "nan": float("nan"),
-            "nested": {1: {2, 3}, "inf": [float("-inf")]},
-            "big": 2**100,
-            "obj": object(),
-            "bad": Unreprable(),
-            "cyclic": cyclic,
-            "order": Order(uuid.UUID(int=2), decimal.Decimal("3"), Color.GREEN,
-                           dt.datetime(2024, 1, 1)),
-        })
+        logger.info(
+            "x",
+            extra={
+                "when": dt.datetime(2024, 1, 2, 3, 4, 5),
+                "id": uuid.UUID(int=1),
+                "amount": decimal.Decimal("1.50"),
+                "color": Color.RED,
+                "nan": float("nan"),
+                "nested": {1: {2, 3}, "inf": [float("-inf")]},
+                "big": 2**100,
+                "obj": object(),
+                "bad": Unreprable(),
+                "cyclic": cyclic,
+                "order": Order(
+                    uuid.UUID(int=2), decimal.Decimal("3"), Color.GREEN, dt.datetime(2024, 1, 1)
+                ),
+            },
+        )
         (line,) = lines()
         assert line["when"] == "2024-01-02T03:04:05"
         assert line["id"] == str(uuid.UUID(int=1))
@@ -455,9 +493,11 @@ class TestNDJSON:
         assert buf.getvalue() == b'{"ok":1}\n'  # nothing of the bad record was written
 
     def test_lone_surrogate_in_text_mode_writes_nothing(self):
+        # dumps_str would accept it, but the line could never be written as UTF-8.
         buf = io.StringIO()
-        with pytest.raises(UnicodeEncodeError):
+        with pytest.raises(logging_mod.NDJSONError) as info:
             logging_mod.write_ndjson(buf, [{"ok": 1}, {"bad": "\ud800"}])
+        assert info.value.lineno == 2
         assert buf.getvalue() == '{"ok":1}\n'
 
     def test_demo_runs(self):
@@ -485,9 +525,13 @@ def api():
 
 
 JSON_HEADERS = {"content-type": "application/json"}
-NATIVE_CONTENT = {"s": "é\n\"\\\x00\u2028😀", "i": [0, -1, 2**63, 2**100],
-                  "f": [0.5, 1e16, -0.0, 1e-4], "b": [True, False, None],
-                  "nested": {"k": [{"x": []}, {}]}}
+NATIVE_CONTENT = {
+    "s": 'é\n"\\\x00\u2028😀',
+    "i": [0, -1, 2**63, 2**100],
+    "f": [0.5, 1e16, -0.0, 1e-4],
+    "b": [True, False, None],
+    "nested": {"k": [{"x": []}, {}]},
+}
 
 
 class TestFastAPIResponse:
@@ -515,13 +559,23 @@ class TestFastAPIResponse:
 
     def test_fallback_uses_jsonable_encoder(self, api):
         mod, _ = api
-        content = {"when": dt.datetime(2024, 1, 2, 3, 4, 5), "id": uuid.UUID(int=1),
-                   "color": Color.GREEN, "tags": {"x"}, "price": decimal.Decimal("1.10"),
-                   "model": mod.ItemIn(name="n", price=decimal.Decimal("2"))}
+        content = {
+            "when": dt.datetime(2024, 1, 2, 3, 4, 5),
+            "id": uuid.UUID(int=1),
+            "color": Color.GREEN,
+            "tags": {"x"},
+            "price": decimal.Decimal("1.10"),
+            "model": mod.ItemIn(name="n", price=decimal.Decimal("2")),
+        }
         body = json.loads(mod.RJSONResponse(content).body)
-        assert body == {"when": "2024-01-02T03:04:05", "id": str(uuid.UUID(int=1)),
-                        "color": "green", "tags": ["x"], "price": 1.1,  # Decimal -> float
-                        "model": {"name": "n", "price": "2", "tags": []}}
+        assert body == {
+            "when": "2024-01-02T03:04:05",
+            "id": str(uuid.UUID(int=1)),
+            "color": "green",
+            "tags": ["x"],
+            "price": 1.1,  # Decimal -> float
+            "model": {"name": "n", "price": "2", "tags": []},
+        }
 
     def test_to_jsonable_fallback_keeps_decimal_precision(self, api):
         mod, _ = api
@@ -529,11 +583,18 @@ class TestFastAPIResponse:
         class ExactResponse(mod.RJSONResponse):
             fallback_encoder = staticmethod(mod.to_jsonable)
 
-        content = {"price": decimal.Decimal("0.1000000000000000000001"), 5: Color.RED,
-                   "t": (dt.date(2024, 1, 1), dt.time(1, 2)), "lvl": Level.LOW}
+        content = {
+            "price": decimal.Decimal("0.1000000000000000000001"),
+            5: Color.RED,
+            "t": (dt.date(2024, 1, 1), dt.time(1, 2)),
+            "lvl": Level.LOW,
+        }
         assert json.loads(ExactResponse(content).body) == {
-            "price": "0.1000000000000000000001", "5": "red",
-            "t": ["2024-01-01", "01:02:00"], "lvl": 1}
+            "price": "0.1000000000000000000001",
+            "5": "red",
+            "t": ["2024-01-01", "01:02:00"],
+            "lvl": 1,
+        }
 
     def test_to_jsonable_rejects_unknown_types(self, api):
         mod, _ = api
@@ -579,11 +640,18 @@ class TestFastAPIRequest:
         client.post("/events", json={"a": 1})
         assert len(calls) == 2
 
-    @pytest.mark.parametrize("payload", [
-        b'{"name": "pen",', b"{'name': 'pen'}", b'{"name": "pen", "price": NaN}',
-        b'\xef\xbb\xbf{"name": "pen", "price": 1}', b'{"name": "\xff", "price": 1}',
-        b'{"name": "\\ud83d", "price": 1}',
-    ], ids=["truncated", "single-quotes", "NaN", "BOM", "bad-utf8", "lone-surrogate"])
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            b'{"name": "pen",',
+            b"{'name': 'pen'}",
+            b'{"name": "pen", "price": NaN}',
+            b'\xef\xbb\xbf{"name": "pen", "price": 1}',
+            b'{"name": "\xff", "price": 1}',
+            b'{"name": "\\ud83d", "price": 1}',
+        ],
+        ids=["truncated", "single-quotes", "NaN", "BOM", "bad-utf8", "lone-surrogate"],
+    )
     def test_invalid_json_is_422_json_invalid(self, api, payload):
         _, client = api
         response = client.post("/items", content=payload, headers=JSON_HEADERS)
@@ -611,8 +679,7 @@ class TestFastAPIRequest:
             return {"type": "http.request", "body": body, "more_body": False}
 
         async def run():
-            request = mod.RJSONRequest({"type": "http", "method": "POST", "headers": []},
-                                       receive)
+            request = mod.RJSONRequest({"type": "http", "method": "POST", "headers": []}, receive)
             first = await request.json()
             assert await request.json() is first
             return first
@@ -623,19 +690,31 @@ class TestFastAPIRequest:
 class TestFastAPIJsonBodyDependency:
     def test_accepts_json_and_plus_json(self, api):
         _, client = api
-        for content_type in ("application/json", "application/cloudevents+json; charset=utf-8",
-                             "Application/JSON"):
-            response = client.post("/events", content=b'{"big": 12345678901234567890123}',
-                                   headers={"content-type": content_type})
+        for content_type in (
+            "application/json",
+            "application/cloudevents+json; charset=utf-8",
+            "Application/JSON",
+        ):
+            response = client.post(
+                "/events",
+                content=b'{"big": 12345678901234567890123}',
+                headers={"content-type": content_type},
+            )
             assert response.status_code == 202, content_type
             assert response.headers["content-type"] == "application/json"
             body = response.json()
             assert body["accepted"] == {"big": 12345678901234567890123}  # exact big int
             dt.datetime.fromisoformat(body["received_at"])  # datetime took the fallback
 
-    @pytest.mark.parametrize(("payload", "position"), [
-        (b'{"type": ', 9), (b"", 0), (b"[1] x", 4), (b'{"a": "\xff"}', 7),
-    ])
+    @pytest.mark.parametrize(
+        ("payload", "position"),
+        [
+            (b'{"type": ', 9),
+            (b"", 0),
+            (b"[1] x", 4),
+            (b'{"a": "\xff"}', 7),
+        ],
+    )
     def test_invalid_json_is_400_with_position(self, api, payload, position):
         _, client = api
         response = client.post("/events", content=payload, headers=JSON_HEADERS)
@@ -645,8 +724,9 @@ class TestFastAPIJsonBodyDependency:
         assert detail["position"] == position and detail["line"] == 1
         assert detail["message"]
 
-    @pytest.mark.parametrize("content_type", ["text/plain", "application/x-www-form-urlencoded",
-                                              "application/jsonx", ""])
+    @pytest.mark.parametrize(
+        "content_type", ["text/plain", "application/x-www-form-urlencoded", "application/jsonx", ""]
+    )
     def test_wrong_content_type_is_415(self, api, content_type):
         _, client = api
         response = client.post("/events", content=b"{}", headers={"content-type": content_type})
