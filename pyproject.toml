@@ -3,17 +3,42 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "rjson"
+name = "pyrjson"
 version = "0.1.0"
 description = "Fast JSON for Python, written in Rust against the CPython C API"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Tin Dang", email = "tindang.ht97@gmail.com" }]
+keywords = ["json", "orjson", "fast", "rust", "serialization"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+]
 # CI-tested on CPython 3.10-3.14 (x86_64, aarch64, macOS, Windows); 3.14
 # verified on 3.14.0rc2 (PyO3 0.29). PyPy/GraalPy/free-threaded: unsupported.
 requires-python = ">=3.10"
 dependencies = [
 ]
 
+[project.urls]
+Repository = "https://github.com/TinDang97/rjson"
+Issues = "https://github.com/TinDang97/rjson/issues"
+
 [tool.maturin]
+# PyPI distribution is "pyrjson" (the name "rjson" is taken by an unrelated
+# project); the import name stays `rjson`, taken from the cdylib name in
+# Cargo.toml ([lib] name).
 features = ["pyo3/extension-module"]
 # `compatibility = "linux"` produced plain `linux_x86_64` wheels, which PyPI
 # rejects. Leave it unset so maturin auditwheel-checks and tags the highest

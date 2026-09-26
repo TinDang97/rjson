@@ -95,7 +95,7 @@ Every one of these has a regression test in `tests/`.
 | critical | Heap buffer overflow in the SIMD escaper. It reserved `len + 64` bytes, but escaping can write up to `6 * len`. | `simd_escape.rs` |
 | critical | Homogeneous-list fast paths checked only the first 16 elements. `[1]*16+[True]` became `…,1]`, `[1.0]*16+[7]` became `7.0`, and later elements could be read as the wrong object type. | `bulk.rs` |
 | critical | Dict keys that are str subclasses were serialized as garbage. | `lib.rs` key path |
-| critical | No recursion limit: a circular or deeply nested structure segfaulted. Now a `ValueError` at depth 254, as in orjson. | `dumps`, `dumps_bytes`, `loads_simd` |
+| critical | No recursion limit: a circular or deeply nested structure segfaulted. Now `rjson.JSONEncodeError` (a `TypeError` and `ValueError`) at depth 254, as in orjson. | `dumps`, `dumps_bytes`, `loads_simd` |
 | critical | `.cargo/config.toml` forced `target-cpu=native` plus AVX2. Wheels contained AVX-512 instructions and would crash with SIGILL on most CPUs. | build config |
 | high | `dumps_bytes` leaked its whole buffer on every call (a `mem::forget` after the bytes had already been copied). It also wrote `-2**63` as `-` and segfaulted on huge ints. | `extreme.rs` |
 | high | A lone surrogate left a Python exception set, which surfaced as `SystemError`. | `lib.rs` |
@@ -146,7 +146,7 @@ Tried and reverted, because each measured slower: SWAR digit formatting for all 
 
 ### Build and entry points (`src/entry.rs`, `Cargo.toml`, `scripts/`)
 
-- **Raw `METH_O` entry points** replace `#[pyfunction]`, saving about 8 ns per call. They keep PyO3's trampoline so panics are caught and PyO3's GIL bookkeeping stays correct.
+- **Raw entry points** (`METH_O` for `loads`; `METH_FASTCALL|METH_KEYWORDS` with a one-compare fast path for `dumps`/`dumps_str`, since `default=`) replace `#[pyfunction]`, saving about 8 ns per call. They keep PyO3's trampoline so panics are caught and PyO3's GIL bookkeeping stays correct.
 - **No debug info in release builds**, which shrinks the `.so` about 10×.
 - **All ~3.6k lines of the old `src/` replaced** (including dead or slower code: `lib_backup.rs`, `extreme.rs`, `simd_parser.rs`/`loads_simd`, `bulk.rs`, `type_cache.rs`, the old escaper) by ~3.7k lines in five files. The serde, simd-json, ahash, smallvec and memchr dependencies went with it.
 - **`scripts/build_pgo.sh`** does instrument → train (`scripts/pgo_train.py`) → merge → rebuild, one profile per interpreter. The first round's "3.11 PGO" numbers (since replaced in §1 by plain release builds) came from an earlier version of the script that had two flaws: it trained on the benchmark itself (corpora and the benchmark's synthetic cases), and it passed the PGO flags through `RUSTFLAGS`, which silently replaced `.cargo/config.toml`'s `target-cpu=x86-64-v2`, so those wheels were baseline x86-64. Both are fixed: flags go through `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` (merged with the config), and training uses seeded synthetic documents of other shapes that read no corpus file.
@@ -173,6 +173,18 @@ Tried and reverted, because each measured slower: SWAR digit formatting for all 
 | 7 | Release wheels without PGO | **Done** (`.github/workflows/wheels.yml`): PGO wheels per interpreter for manylinux2014/musllinux x86_64+aarch64, macOS arm64/x86_64, Windows, trained on a workload disjoint from the benchmark. | −0–4% (re-measured, §3) | build-only |
 | 8 | Non-x86 | The scalar/SWAR fallbacks now pass the full suite on aarch64 (3.9, 3.12 under qemu; CI runs native arm64 Linux and macOS). NEON kernels would replace the scalar loops at the four `#[cfg(target_arch = "x86_64")]` SSE2 sites in `parser.rs` (`skip_ws_slow`, `scan_special`, the escaped-string copy loop, `utf8_count_and_max`) and the SWAR `escape_long` / scalar `kind_needs_escape` in `ser.rs`; each maps to `vceqq_u8` + a narrowing-shift movemask. Needs native arm64 hardware to measure. | parity on Apple Silicon / Graviton | medium |
 
+### Found by the production benchmark (`benches/production_benchmark.py`)
+
+| # | gap | status |
+|---|---|---|
+| 9 | small `dumps` after a big one 1.7–2.0× (capacity hint = last size) | **fixed**: hint = min of last two sizes |
+| 10 | big `dumps` peaked at 1.8× output, 16 MB stranded (doubling on the brk heap) | **fixed**: jump to recent peak, ≥ 32 MiB mmapped reservation past 1 MiB, shrink back (`Out::reserve`, `into_object`) |
+| 11 | CJK/UCS-2 `loads` 1.3× (1.6× on 3.11) | **fixed** ([#8](https://github.com/TinDang97/rjson/issues/8)): `decode_ucs2` SIMD/pairwise decoder; 0.55–0.91× on CJK/hangul/Cyrillic. Open: UCS-4 text shifted 0.71 → 0.80 on 3.13 with identical instruction counts (placement) |
+| 12 | mixed-magnitude float arrays `loads` 1.12–1.32× | **fixed** ([#9](https://github.com/TinDang97/rjson/issues/9)): full-precision doubles (16–19 fraction digits) fell off the fast path; now 0.89–0.95× on 3.11 and 3.13. Arrays dominated by `0.0` stay at ~1.05× (float allocation, not parsing) |
+| 13 | UTF-8 cache attached by `dumps`, copies in `loads(str)` / `loads(memoryview)` | **fixed** ([#10](https://github.com/TinDang97/rjson/issues/10)): hybrid by size (short strings keep CPython's cached copy, long ones are encoded directly / via a temporary buffer); whole-object memoryviews parsed in place |
+
+Numbers: [docs/PRODUCTION_READINESS.md](PRODUCTION_READINESS.md#performance-fixes).
+
 ### Threading and I/O (researched, mostly not applicable)
 
 - **io_uring: rejected.** `loads`/`dumps` do no I/O. Even reading a file from the page cache is 1–4% of parse time: canada.json takes 0.2 ms to read and 14 ms for orjson to parse. It only matters for a bulk-ingestion CLI.
@@ -187,7 +199,10 @@ Tried and reverted, because each measured slower: SWAR digit formatting for all 
 - **CI.** `.github/workflows/ci.yml`: clippy, then build + pytest on 3.10–3.14 (ubuntu x86_64), a no-AVX-512 variant, ubuntu-24.04-arm (3.10, 3.13), macos-14 and Windows (3.13). `cargo fmt --check` is not enforced yet (`entry.rs` and `parser.rs` are not rustfmt-clean) and clippy warnings are not fatal (one in `ser.rs`; five more dead-code/unused warnings only on aarch64).
 - **Performance regression gate.** `.github/workflows/perf.yml` (PRs labelled `perf`, or manual): builds base and head in one job, runs `corpus_benchmark.py --output-json` for both, interleaved ×5 on 3.11 and 3.13, and `benches/perf_gate.py` fails if any geomean is more than 5% worse. Corpora come from `benches/fetch_corpus.sh` (sha256-pinned). On this dev host, two runs of the same build differ by 1–3% in geomean, so 5% with 5 rounds is about the floor. Still to add: per-call time on tiny documents, `.so` size, import time and peak memory.
 - **Fuzzing.** Both review rounds ran differential fuzzers against stdlib `json` (≈150k `dumps` cases, plus `loads` value/error/float fuzzing), but the scripts live outside the repo. Next: check them in under `tests/fuzz/` and run a random-structure fuzzer under ASan in CI.
-- **Feature parity.** orjson also offers indent, sorted keys, `default=`, and serialization of datetime, UUID, dataclasses and numpy. Add them behind `METH_FASTCALL|METH_KEYWORDS` with hand-parsed keyword names, resolving those types lazily so import time stays low.
+- **Feature parity.** `default=` is done (entry is `METH_FASTCALL|METH_KEYWORDS`; per-call cost unchanged, containers +~8 instructions for the mode check). Native datetime/date/time, UUID, dataclass and Enum are done (issue #5, `src/native.rs`), resolved lazily from `sys.modules` (no import cost), with no change in instructions for documents without them. orjson also offers indent, sorted keys and numpy. Add them as further hand-parsed keyword names.
+- **Native types vs orjson** (CPython 3.13, rjson time ÷ orjson time, same process, 1,000 values unless noted): naive datetimes 0.92, UTC datetimes 0.29 (one-entry offset cache for `datetime.timezone`), `ZoneInfo` datetimes 0.45 (its C `utcoffset` called through the method descriptor), dates 0.97, UUIDs 1.04 (slot read with `PyMember_GetOne`, digits read inline, table hex), Enums 0.41, 500 API rows with UUID/datetime/Enum 0.75–0.80, 500 dataclasses 0.70. The FastAPI example's `RJSONResponse` on 100 such rows went from ~700 µs (fallback through `jsonable_encoder`) to 14 µs.
+- **`non_str_keys=True` vs orjson `OPT_NON_STR_KEYS`** (rjson time ÷ orjson time, CPython 3.13): 1,000 int keys 0.49, a `Counter` of ints 0.45, records with small int-keyed maps 0.52–0.55, 1,000 float keys 1.14–1.20, UUID keys 1.45, date keys 1.53; `json.dumps` is 7–10× slower than rjson where it accepts the keys. Float keys use `repr` text (as `json`), built from zmij's digits; `PyOS_double_to_string` was 5–6× slower than orjson. With the option off, instruction counts are unchanged on the corpora (tiny calls +6 instructions for the options struct).
+- **`loads(..., lenient=True)`** (issue #7): `NaN`/`Infinity`, a UTF-8 BOM and overflow to `inf` are parsed natively, only on paths that are errors in strict mode (5,000 rows with `NaN`/`Infinity`: 1.9× faster than `json.loads`, the same time as strict rjson on numbers). Lone surrogates, UTF-16/32 and nesting beyond 1024 go through `json.loads`. `loads` became `METH_FASTCALL | METH_KEYWORDS` for the keyword: +29 instructions per call on tiny documents (≈1.8% of a 5-byte `loads`); the corpora are within layout noise (twitter +0.5% instructions, canada +0.05%; an unrelated one-line change moved twitter by 3%).
 
 ## 5. Decisions (resolved)
 
@@ -203,7 +218,7 @@ Tried and reverted, because each measured slower: SWAR digit formatting for all 
 uv venv .venv -p 3.11 && . .venv/bin/activate
 uv pip install maturin orjson pytest
 maturin develop --release
-python -m pytest tests -q                      # 250 tests
+python -m pytest tests -q                      # 1052 tests
 benches/fetch_corpus.sh                        # corpora -> benches/data/ (sha256-pinned)
 python benches/corpus_benchmark.py [--json] [--output-json results.json]
 python benches/make_charts.py results.json     # README charts -> docs/img/

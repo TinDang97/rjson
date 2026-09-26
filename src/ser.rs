@@ -10,7 +10,7 @@
 //!   (gated and self-tested, see `dictiter`), else with `PyDict_Next`. Runs of
 //!   exact ints/floats in lists use a register-resident loop.
 //! - Output is written straight into the result object (`Out`): a `bytes`
-//!   object, or a compact ASCII `str`, sized from the previous output length on
+//!   object, or a compact ASCII `str`, sized from the recent output lengths on
 //!   this thread, grown with realloc and shortened at the end. No final copy,
 //!   and no shared buffer that a re-entrant call could trip over.
 //! - Every write reserves its worst case before writing through raw pointers, so
@@ -45,6 +45,8 @@ use pyo3::prelude::*;
 use std::cell::Cell;
 use std::ptr;
 
+use crate::native;
+
 /// Maximum container nesting depth (same as orjson).
 pub const RECURSION_LIMIT: u32 = 254;
 
@@ -53,12 +55,24 @@ pub const RECURSION_LIMIT: u32 = 254;
 const ESCAPE_CHUNK: usize = 64 * 1024;
 
 /// Error kind; payloads live in `Serializer::err_*`.
+///
+/// Every kind except `PyErrSet` is raised as `rjson.JSONEncodeError` (see
+/// `to_pyerr`); `PyErrSet` propagates the Python exception as-is.
 #[derive(Clone, Copy)]
 pub enum SerError {
     NonFinite,
+    /// `err_obj` is the offending value (a strong reference).
     Unsupported,
+    /// `err_obj` is the offending key (a strong reference).
     KeyNotStr,
     Recursion,
+    /// `datetime.time` with a `tzinfo` (orjson rejects it too: a time of day
+    /// has no well-defined UTC offset).
+    TimeTz,
+    /// Serializing a native type would run Python code while unguarded;
+    /// `dumps_raw` restarts in guarded mode (see `Serializer::guard`). Never
+    /// reaches Python.
+    NeedGuard,
     /// A Python exception is already set (e.g. lone surrogate, int too large to
     /// convert, MemoryError).
     PyErrSet,
@@ -1171,34 +1185,87 @@ struct Segment {
 /// Output buffer that *is* the result object: a `bytes` object (bytes mode) or
 /// a compact ASCII `str` (str mode), grown with realloc and shrunk to the final
 /// length at the end, so the output is never copied (like orjson's BytesWriter).
-/// The initial capacity comes from the previous output size on this thread.
+/// The initial capacity comes from the recent output sizes on this thread.
 struct Out {
     obj: *mut ffi::PyObject,
     data: *mut u8,
     len: usize,
     cap: usize,
     unicode: bool,
+    /// Capacity the first growth jumps to (the larger recent output size,
+    /// with headroom), or 0: see `reserve`.
+    jump: usize,
+}
+
+/// Recent output sizes of one mode on one thread: the capacity hints.
+#[derive(Clone, Copy)]
+struct SizeHistory {
+    /// The last two sizes; their minimum is the initial capacity. The
+    /// minimum of two rather than the last size: a steady workload still gets
+    /// an exactly sized buffer, but one large result (a big page among small
+    /// responses) no longer makes the next small call allocate, touch and
+    /// free a block of the large size (an ~800 KB malloc/free that glibc may
+    /// serve with mmap: 2x the time of a 150 B dumps).
+    last: usize,
+    prev: usize,
+    /// Largest size of the last `PEAK_CALLS` calls: where the buffer jumps
+    /// when it first has to grow (`Out::reserve`), so a periodic big result
+    /// among small ones gets one allocation of its usual size (which the
+    /// heap can reuse) instead of a chain of doublings into fresh memory.
+    peak: usize,
+    /// Calls since `peak` was set.
+    age: usize,
+}
+
+const PEAK_CALLS: usize = 64;
+
+impl SizeHistory {
+    const EMPTY: SizeHistory = SizeHistory { last: 0, prev: 0, peak: 0, age: 0 };
+
+    #[inline(always)]
+    fn push(self, len: usize) -> SizeHistory {
+        let (peak, age) = if len >= self.peak || self.age >= PEAK_CALLS {
+            (len, 0)
+        } else {
+            (self.peak, self.age + 1)
+        };
+        SizeHistory { last: len, prev: self.last, peak, age }
+    }
 }
 
 thread_local! {
-    /// Size of the previous output buffer on this thread, per mode ([bytes,
-    /// str]): the capacity hint. Kept per mode because a str-mode buffer
-    /// holds only the ASCII parts of non-ASCII output, so a shared hint made
-    /// alternating dumps/dumps_str calls grow and then shrink the buffer.
-    static LAST_LEN: [Cell<usize>; 2] = const { [Cell::new(0), Cell::new(0)] };
+    /// Per mode ([bytes, str]) because a str-mode buffer holds only the
+    /// ASCII parts of non-ASCII output, so a shared history made alternating
+    /// dumps/dumps_str calls grow and then shrink the buffer.
+    static SIZES: [Cell<SizeHistory>; 2] =
+        const { [Cell::new(SizeHistory::EMPTY), Cell::new(SizeHistory::EMPTY)] };
 }
 
 const MIN_CAPACITY: usize = 128;
 /// Shrinking a much larger buffer copies instead of reallocating in place, so
 /// a small result never pins a large (possibly mmapped) block.
 const SHRINK_COPY_THRESHOLD: usize = 64 * 1024;
+/// Growth past this size (without a size estimate from recent results)
+/// reserves at least `LARGE_RESERVE`; see `Out::reserve`.
+const LARGE_GROWTH: usize = 1 << 20;
+/// Above glibc's largest dynamic mmap threshold (32 MiB on 64-bit), so the
+/// block is always mmapped: untouched pages cost no memory, and growing or
+/// shrinking it is an mremap (no copy). Other allocators treat a request
+/// this size the same way.
+const LARGE_RESERVE: usize = (32 << 20) + (64 << 10);
+
+/// Capacity for an expected output of `len` bytes: headroom below the
+/// shrink threshold in `into_object`, so a steady workload never shrinks.
+#[inline(always)]
+fn with_headroom(len: usize) -> usize {
+    (len + len / 16 + 16).max(MIN_CAPACITY)
+}
 
 impl Out {
     unsafe fn new(unicode: bool) -> Out {
-        let hint = LAST_LEN.with(|c| c[unicode as usize].get());
-        // Headroom stays below the shrink threshold in `into_object`, so a
-        // steady workload never shrinks (see there).
-        let cap = (hint + hint / 16 + 16).max(MIN_CAPACITY);
+        let h = SIZES.with(|c| c[unicode as usize].get());
+        let cap = with_headroom(h.last.min(h.prev));
+        let jump = with_headroom(h.peak);
         let obj = Self::alloc(cap, unicode);
         Out {
             obj,
@@ -1206,6 +1273,7 @@ impl Out {
             len: 0,
             cap,
             unicode,
+            jump: if jump > cap { jump } else { 0 },
         }
     }
 
@@ -1260,15 +1328,37 @@ impl Out {
     }
 
     /// Ensures room for `n` more bytes.
+    ///
+    /// Growth policy (a large output that has to grow is where time and
+    /// peak memory went, see docs/PERFORMANCE_REVIEW.md):
+    /// - The first growth jumps to the larger recent output size when that
+    ///   suffices, so a big result after a small one is one realloc to its
+    ///   usual size, which is then freed at that size (not shrunk).
+    /// - Otherwise the capacity doubles; once that passes `LARGE_GROWTH` it
+    ///   jumps to at least `LARGE_RESERVE`, which malloc serves with mmap.
+    ///   Doubling on the brk heap copied the buffer at every step that could
+    ///   not extend in place, and the step that crossed glibc's dynamic mmap
+    ///   threshold moved it to a fresh mapping, stranding the old block on
+    ///   the heap (a 21 MB result peaked at 1.8x its size and left 16 MB
+    ///   resident). A mapped buffer grows and shrinks by mremap, without
+    ///   copying, and only its written pages become resident.
     #[inline(never)]
     fn reserve(&mut self, n: usize) {
         if self.cap - self.len >= n {
             return;
         }
-        let mut cap = self.cap * 2;
-        while cap - self.len < n {
-            cap *= 2;
-        }
+        let need = self.len.checked_add(n).unwrap_or_else(|| Self::oom(isize::MAX as usize));
+        let jump = std::mem::replace(&mut self.jump, 0);
+        let cap = if jump >= need {
+            jump
+        } else {
+            let cap = need.max(self.cap.saturating_mul(2));
+            if cap >= LARGE_GROWTH {
+                cap.max(LARGE_RESERVE)
+            } else {
+                cap
+            }
+        };
         unsafe { self.resize(cap) };
     }
 
@@ -1285,10 +1375,24 @@ impl Out {
         self.cap = cap;
     }
 
+    /// Records this call's output size for the next call's capacity hint.
+    /// Called exactly once per `Out` (by `into_object`, or by `drop` when the
+    /// buffer was not handed over).
+    #[inline(always)]
+    fn record_len(&self) {
+        SIZES.with(|c| {
+            let c = &c[self.unicode as usize];
+            c.set(c.get().push(self.len));
+        });
+    }
+
     /// Shrinks to the written length and hands the object over.
     unsafe fn into_object(&mut self) -> *mut ffi::PyObject {
-        LAST_LEN.with(|c| c[self.unicode as usize].set(self.len));
-        if self.cap > SHRINK_COPY_THRESHOLD && self.len < self.cap / 4 {
+        self.record_len();
+        if self.cap > SHRINK_COPY_THRESHOLD
+            && self.len < self.cap / 4
+            && self.len <= SHRINK_COPY_THRESHOLD
+        {
             let small = Self::alloc(self.len, self.unicode);
             ptr::copy_nonoverlapping(self.data, Self::data_of(small, self.unicode), self.len);
             ffi::Py_DECREF(self.obj);
@@ -1305,8 +1409,12 @@ impl Out {
         // freed before). Freeing blocks of the requested size keeps them on
         // the heap.
         if slack > 4096 && slack > self.len / 8 {
-            self.resize(self.len);
-        } else if slack != 0 {
+            // Shrink to what the next call of this size will request (not
+            // to the exact length), for the same reason: a grown buffer
+            // then leaves a freed block the next request fits in.
+            self.resize(with_headroom(self.len));
+        }
+        if self.cap != self.len {
             // Small slack: just shorten the object in place. A bytes/str
             // object does not record its allocation size, so a shorter length
             // (plus the NUL terminator CPython expects) is fully valid and
@@ -1326,7 +1434,9 @@ impl Out {
 impl Drop for Out {
     fn drop(&mut self) {
         if !self.obj.is_null() {
-            LAST_LEN.with(|c| c[self.unicode as usize].set(self.len));
+            // Non-ASCII str results (and errors) end here: the buffer's
+            // length is what the next call's buffer will hold.
+            self.record_len();
             unsafe { ffi::Py_DECREF(self.obj) };
         }
     }
@@ -1368,8 +1478,29 @@ pub struct Serializer {
     max_kind: u32,
     seg_chars: usize,
     err: SerError,
+    /// Strong reference (set by `fail_obj`): with `default=`, the offending
+    /// object may live in a temporary `default` result that is released
+    /// before the error message is built.
     err_obj: *mut ffi::PyObject,
     err_float: f64,
+    /// `default=` callable (borrowed from the call's arguments), or null.
+    /// When set, unsupported objects are replaced by `default(obj)`.
+    default: *mut ffi::PyObject,
+    /// `passthrough=` flags (`native::PT_*`): native kinds sent to `default`.
+    passthrough: u32,
+    /// `non_str_keys=True`: bool/None/int/float keys get `json.dumps`'s text,
+    /// Enum keys their value, datetime/date/time/UUID keys their native text
+    /// (see `key_text`). Otherwise a non-str key raises.
+    non_str_keys: bool,
+    /// Guarded mode: Python code may run during serialization (`default`, a
+    /// dataclass attribute, a Python `tzinfo`), so containers are held by a
+    /// strong reference while serialized and dicts are walked with
+    /// `PyDict_Next` plus a size check (see `guarded`). Set when `default` is
+    /// given; otherwise a native value that needs Python code fails with
+    /// `NeedGuard` before running any, and `dumps_raw` starts over in this
+    /// mode. Unguarded, no Python code runs, so the fast paths iterate
+    /// borrowed references.
+    guard: bool,
 }
 
 impl Drop for Serializer {
@@ -1377,11 +1508,15 @@ impl Drop for Serializer {
         for s in self.segs.drain(..) {
             unsafe { ffi::Py_DECREF(s.obj) };
         }
+        if !self.err_obj.is_null() {
+            unsafe { ffi::Py_DECREF(self.err_obj) };
+        }
     }
 }
 
 impl Serializer {
-    unsafe fn new(str_mode: bool) -> Self {
+    unsafe fn new(str_mode: bool, opts: &DumpsOpts, guard: bool) -> Self {
+        let default = opts.default;
         Serializer {
             buf: Out::new(str_mode),
             depth: 0,
@@ -1391,6 +1526,10 @@ impl Serializer {
             seg_chars: 0,
             err: SerError::PyErrSet,
             err_obj: ptr::null_mut(),
+            default,
+            passthrough: opts.passthrough,
+            non_str_keys: opts.non_str_keys,
+            guard: guard || !default.is_null(),
             err_float: 0.0,
         }
     }
@@ -1400,6 +1539,18 @@ impl Serializer {
     fn fail(&mut self, e: SerError) -> Cur {
         self.err = e;
         ptr::null_mut()
+    }
+
+    /// `fail` that also records the offending object (borrowed; it stays alive
+    /// until `to_pyerr` because its container is still referenced by the caller
+    /// of `dumps`, and no Python code runs in between).
+    #[cold]
+    #[inline(never)]
+    fn fail_obj(&mut self, e: SerError, obj: *mut ffi::PyObject) -> Cur {
+        // A serializer stops at its first error, so this is set at most once.
+        unsafe { ffi::Py_INCREF(obj) };
+        self.err_obj = obj;
+        self.fail(e)
     }
 
     #[inline(always)]
@@ -1687,11 +1838,65 @@ impl Serializer {
         if self.str_mode {
             return self.write_str_segment(p, obj, len);
         }
-        let (src, n) = match utf8_of(obj) {
-            Ok(v) => v,
-            Err(e) => return self.fail(e),
+        // bytes output. A UTF-8 copy CPython already cached is the fastest
+        // source. Otherwise encode the native UCS1/2/4 data directly:
+        // `PyUnicode_AsUTF8AndSize` would attach a UTF-8 copy to the string
+        // for the rest of its life (+98% memory on non-ASCII text that
+        // outlives the call).
+        if crate::compat::PyUnicode_IS_COMPACT(obj) != 0 {
+            let c = obj as *mut ffi::PyCompactUnicodeObject;
+            if !(*c).utf8.is_null() {
+                return self.write_utf8(p, (*c).utf8 as *const u8, (*c).utf8_length as usize, 0, 0);
+            }
+        }
+        if len < DIRECT_UTF8_MIN_CHARS {
+            // Short strings (keys, names, labels) are cheap to cache and
+            // often serialized again: let CPython attach the UTF-8 copy.
+            let (src, n) = match utf8_of(obj) {
+                Ok(v) => v,
+                Err(e) => return self.fail(e),
+            };
+            return self.write_utf8(p, src, n, 0, 0);
+        }
+        let kind = crate::compat::PyUnicode_KIND(obj);
+        if kind == 1 {
+            // Latin-1: CPython's UTF-8 encoder is faster than per-character
+            // encoding here (accented letters every few characters defeat
+            // the 8-unit ASCII blocks). Encode into a temporary bytes object,
+            // which is not attached to the string, and escape-copy it.
+            let b = ffi::PyUnicode_AsUTF8String(obj);
+            if b.is_null() {
+                return self.fail(SerError::PyErrSet);
+            }
+            let q = self.write_utf8(p, ffi::PyBytes_AsString(b) as *const u8, ffi::PyBytes_Size(b) as usize, 0, 0);
+            ffi::Py_DECREF(b);
+            return q;
+        }
+        // Worst case 6 output bytes per character (an escape; UTF-8 needs at
+        // most 4), two quotes, and 8 bytes for the blind escape-table store.
+        let q = self.reserve(p, len * 6 + 2 + 8);
+        let data = crate::compat::PyUnicode_DATA(obj);
+        *q = b'"';
+        let end = if kind == 2 {
+            encode_utf8_escaped(q.add(1), data as *const u16, len)
+        } else {
+            encode_utf8_escaped(q.add(1), data as *const u32, len)
         };
-        self.write_utf8(p, src, n, 0, 0)
+        match end {
+            Some(e) => {
+                *e = b'"';
+                e.add(1)
+            }
+            // A lone surrogate: let CPython's encoder raise the same
+            // UnicodeEncodeError as before (nothing past `q` is kept).
+            None => {
+                let (src, n) = match utf8_of(obj) {
+                    Ok(v) => v,
+                    Err(e) => return self.fail(e),
+                };
+                self.write_utf8(q, src, n, 0, 0)
+            }
+        }
     }
 
     /// `str` output: record the non-ASCII string instead of encoding it.
@@ -1723,6 +1928,14 @@ impl Serializer {
 
     #[inline(never)]
     unsafe fn ser_list(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        if self.guard {
+            return self.guarded(p, obj, Self::ser_list_inner);
+        }
+        self.ser_list_inner(p, obj)
+    }
+
+    #[inline(always)]
+    unsafe fn ser_list_inner(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
         if self.depth >= RECURSION_LIMIT {
             return self.fail(SerError::Recursion);
         }
@@ -1818,6 +2031,14 @@ impl Serializer {
 
     #[inline(never)]
     unsafe fn ser_tuple(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        if self.guard {
+            return self.guarded(p, obj, Self::ser_tuple_inner);
+        }
+        self.ser_tuple_inner(p, obj)
+    }
+
+    #[inline(always)]
+    unsafe fn ser_tuple_inner(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
         if self.depth >= RECURSION_LIMIT {
             return self.fail(SerError::Recursion);
         }
@@ -1836,6 +2057,62 @@ impl Serializer {
 
     #[inline(never)]
     unsafe fn ser_dict(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        if self.guard {
+            return self.guarded(p, obj, Self::ser_dict_checked);
+        }
+        self.ser_dict_inner(p, obj)
+    }
+
+    /// Guarded mode: `container` is kept alive by a strong reference while
+    /// it is serialized. `default` runs arbitrary code, which could drop the
+    /// last other reference to a list or dict we are in the middle of
+    /// (e.g. clear the list that holds it).
+    #[cold]
+    #[inline(never)]
+    unsafe fn guarded(
+        &mut self,
+        p: Cur,
+        container: *mut ffi::PyObject,
+        f: unsafe fn(&mut Self, Cur, *mut ffi::PyObject) -> CurResult,
+    ) -> CurResult {
+        ffi::Py_INCREF(container);
+        let r = f(self, p, container);
+        ffi::Py_DECREF(container);
+        r
+    }
+
+    /// Guarded-mode dicts: `PyDict_Next` (re-validates its position
+    /// against the current table on every call) instead of the direct entry
+    /// walk, which keeps a pointer into the table that `default` could free
+    /// by resizing the dict; and CPython's "dictionary changed size during
+    /// iteration" error if `default` adds or removes items.
+    unsafe fn ser_dict_checked(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        if self.depth >= RECURSION_LIMIT {
+            return self.fail(SerError::Recursion);
+        }
+        let size = ffi::PyDict_Size(obj);
+        if size == 0 {
+            return self.put2(p, b"{}");
+        }
+        self.depth += 1;
+        let mut p = self.put(p, b'{');
+        let mut ns = 0;
+        let mut pos: ffi::Py_ssize_t = 0;
+        let mut key: *mut ffi::PyObject = ptr::null_mut();
+        let mut value: *mut ffi::PyObject = ptr::null_mut();
+        while ffi::PyDict_Next(obj, &mut pos, &mut key, &mut value) != 0 {
+            p = tri!(self.dict_item(p, key, value, ns));
+            if ffi::PyDict_Size(obj) != size {
+                return self.dict_changed();
+            }
+            ns = 1;
+        }
+        self.depth -= 1;
+        self.put(p, b'}')
+    }
+
+    #[inline(always)]
+    unsafe fn ser_dict_inner(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
         if self.depth >= RECURSION_LIMIT {
             return self.fail(SerError::Recursion);
         }
@@ -1885,10 +2162,90 @@ impl Serializer {
         } else if ffi::PyUnicode_Check(key) != 0 {
             let p = self.put_sep(p, b',', ns);
             tri!(self.write_str_slow(p, key))
+        } else if self.non_str_keys {
+            let p = self.put_sep(p, b',', ns);
+            tri!(self.key_text(p, key, 0))
         } else {
-            return self.fail(SerError::KeyNotStr);
+            return self.fail_obj(SerError::KeyNotStr, key);
         };
         self.ser(p, value, b':', 1)
+    }
+
+    /// A non-str dict key as a JSON string (`non_str_keys=True`). bool, None,
+    /// int and float get exactly `json.dumps`'s key text (`"true"`, `"null"`,
+    /// any-size ints, float `repr` such as `"1e-07"`, `"NaN"`/`"Infinity"`);
+    /// types `json` rejects follow orjson's `OPT_NON_STR_KEYS`: an Enum key is
+    /// its value's key text, datetime/date/time/UUID keys their native text
+    /// (unless passed through). Anything else raises.
+    #[cold]
+    #[inline(never)]
+    unsafe fn key_text(&mut self, p: Cur, key: *mut ffi::PyObject, level: u32) -> CurResult {
+        let ty = ffi::Py_TYPE(key);
+        if ty == bool_type() {
+            return self.put_quoted(p, if key == ffi::Py_True() { b"true" } else { b"false" });
+        }
+        if key == ffi::Py_None() {
+            return self.put_quoted(p, b"null");
+        }
+        if ffi::PyLong_Check(key) != 0 {
+            // int subclasses (IntEnum, IntFlag) too, as their int value.
+            let p = self.put(p, b'"');
+            let p = tri!(self.write_int_slow(p, key));
+            return self.put(p, b'"');
+        }
+        if ffi::PyFloat_Check(key) != 0 {
+            return self.float_key(p, ffi::PyFloat_AS_DOUBLE(key));
+        }
+        if ffi::PyUnicode_Check(key) != 0 {
+            return self.write_str_slow(p, key); // an Enum's str value
+        }
+        let t = native::types();
+        if self.passthrough & native::PT_DATETIME == 0 && !t.datetime.is_null() {
+            if ty == t.datetime {
+                return self.write_datetime(p, key, t);
+            } else if ty == t.date {
+                return self.write_date(p, key);
+            } else if ty == t.time {
+                return self.write_time(p, key);
+            }
+        }
+        if self.passthrough & native::PT_UUID == 0 && ty == t.uuid && !ty.is_null() {
+            return self.write_uuid(p, key, t);
+        }
+        if level == 0
+            && self.passthrough & native::PT_ENUM == 0
+            && !t.enum_meta.is_null()
+            && ffi::PyType_IsSubtype(ffi::Py_TYPE(ty as *mut ffi::PyObject), t.enum_meta) != 0
+        {
+            if !self.guard && !enum_value_plain(ty) {
+                return self.fail(SerError::NeedGuard);
+            }
+            ffi::Py_INCREF(key);
+            let v = ffi::PyObject_GetAttr(key, native::names().value);
+            ffi::Py_DECREF(key);
+            if v.is_null() {
+                return self.fail(SerError::PyErrSet);
+            }
+            let q = self.key_text(p, v, level + 1);
+            ffi::Py_DECREF(v);
+            return q;
+        }
+        self.fail_obj(SerError::KeyNotStr, key)
+    }
+
+    /// Float key text as `json.dumps` writes it: `float.__repr__`, or
+    /// `NaN`/`Infinity`/`-Infinity` (valid here: a key is a string).
+    unsafe fn float_key(&mut self, p: Cur, v: f64) -> CurResult {
+        if v.is_nan() {
+            return self.put_quoted(p, b"NaN");
+        } else if v == f64::INFINITY {
+            return self.put_quoted(p, b"Infinity");
+        } else if v == f64::NEG_INFINITY {
+            return self.put_quoted(p, b"-Infinity");
+        }
+        let mut b = [0u8; 32];
+        let n = native::fmt_float_repr(v, &mut b);
+        self.put_quoted(p, &b[..n])
     }
 
     // ----- dispatch -----
@@ -1947,9 +2304,360 @@ impl Serializer {
         } else if ffi::PyFloat_Check(obj) != 0 {
             self.write_float(p, ffi::PyFloat_AS_DOUBLE(obj), 0, 0)
         } else {
-            self.err_obj = obj;
-            self.fail(SerError::Unsupported)
+            self.ser_other(p, obj)
         }
+    }
+
+    /// Everything that is not a JSON builtin or a subclass of one: the native
+    /// types (unless passed through), then `default`, else an error.
+    #[cold]
+    #[inline(never)]
+    unsafe fn ser_other(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        let t = native::types();
+        let ty = ffi::Py_TYPE(obj);
+        let pt = self.passthrough;
+        if pt & native::PT_DATETIME == 0 && !t.datetime.is_null() {
+            if ty == t.datetime {
+                return self.write_datetime(p, obj, t);
+            } else if ty == t.date {
+                return self.write_date(p, obj);
+            } else if ty == t.time {
+                return self.write_time(p, obj);
+            }
+        }
+        if pt & native::PT_UUID == 0 && ty == t.uuid && !ty.is_null() {
+            return self.write_uuid(p, obj, t);
+        }
+        if pt & native::PT_ENUM == 0
+            && !t.enum_meta.is_null()
+            && ffi::PyType_IsSubtype(ffi::Py_TYPE(ty as *mut ffi::PyObject), t.enum_meta) != 0
+        {
+            return self.ser_enum(p, obj, ty);
+        }
+        if pt & native::PT_DATACLASS == 0
+            && !native::own_attr(ty, native::names().dataclass_fields).is_null()
+        {
+            return self.ser_dataclass(p, obj, ty, t);
+        }
+        if !self.default.is_null() {
+            self.call_default(p, obj)
+        } else {
+            self.fail_obj(SerError::Unsupported, obj)
+        }
+    }
+
+    /// Writes `"` + `b[..n]` (ASCII) + `"`.
+    unsafe fn put_quoted(&mut self, p: Cur, b: &[u8]) -> Cur {
+        let n = b.len();
+        let p = self.reserve(p, n + 2);
+        *p = b'"';
+        ptr::copy_nonoverlapping(b.as_ptr(), p.add(1), n);
+        *p.add(n + 1) = b'"';
+        p.add(n + 2)
+    }
+
+    /// `datetime` (exact type) as RFC 3339, like orjson: `YYYY-MM-DDTHH:MM:SS`,
+    /// `.ffffff` if microseconds are non-zero, and `+HH:MM` if aware.
+    /// `utcoffset()` returning None counts as naive (Python's rule; orjson
+    /// writes `+00:00`).
+    unsafe fn write_datetime(
+        &mut self,
+        p: Cur,
+        obj: *mut ffi::PyObject,
+        t: &native::Types,
+    ) -> CurResult {
+        let mut b = [0u8; 32];
+        let mut n = native::fmt_date(
+            &mut b,
+            0,
+            ffi::PyDateTime_GET_YEAR(obj) as u32,
+            ffi::PyDateTime_GET_MONTH(obj) as u32,
+            ffi::PyDateTime_GET_DAY(obj) as u32,
+        );
+        b[n] = b'T';
+        n = native::fmt_time(
+            &mut b,
+            n + 1,
+            ffi::PyDateTime_DATE_GET_HOUR(obj) as u32,
+            ffi::PyDateTime_DATE_GET_MINUTE(obj) as u32,
+            ffi::PyDateTime_DATE_GET_SECOND(obj) as u32,
+            ffi::PyDateTime_DATE_GET_MICROSECOND(obj) as u32,
+        );
+        let tz = ffi::PyDateTime_DATE_GET_TZINFO(obj);
+        if tz != ffi::Py_None() {
+            let tzt = ffi::Py_TYPE(tz);
+            // `timezone` and the C `ZoneInfo` compute the offset in C; any
+            // other tzinfo (pytz, dateutil, subclasses) runs Python code.
+            let c_tz = tzt == t.timezone || (tzt == t.zoneinfo && !tzt.is_null());
+            if !c_tz && !self.guard {
+                return self.fail(SerError::NeedGuard);
+            }
+            match utc_offset(obj, tz, tzt, t) {
+                Ok(Some(secs)) => n = native::fmt_offset(&mut b, n, secs),
+                Ok(None) => {}
+                Err(()) => return self.fail(SerError::PyErrSet),
+            }
+        }
+        self.put_quoted(p, &b[..n])
+    }
+
+    /// `date` (exact type) as `YYYY-MM-DD`.
+    unsafe fn write_date(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        let mut b = [0u8; 10];
+        let n = native::fmt_date(
+            &mut b,
+            0,
+            ffi::PyDateTime_GET_YEAR(obj) as u32,
+            ffi::PyDateTime_GET_MONTH(obj) as u32,
+            ffi::PyDateTime_GET_DAY(obj) as u32,
+        );
+        self.put_quoted(p, &b[..n])
+    }
+
+    /// `time` (exact type) as `HH:MM:SS[.ffffff]`; with a tzinfo it raises.
+    unsafe fn write_time(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        if ffi::PyDateTime_TIME_GET_TZINFO(obj) != ffi::Py_None() {
+            return self.fail(SerError::TimeTz);
+        }
+        let mut b = [0u8; 15];
+        let n = native::fmt_time(
+            &mut b,
+            0,
+            ffi::PyDateTime_TIME_GET_HOUR(obj) as u32,
+            ffi::PyDateTime_TIME_GET_MINUTE(obj) as u32,
+            ffi::PyDateTime_TIME_GET_SECOND(obj) as u32,
+            ffi::PyDateTime_TIME_GET_MICROSECOND(obj) as u32,
+        );
+        self.put_quoted(p, &b[..n])
+    }
+
+    /// `uuid.UUID` (exact type) as its canonical lowercase hyphenated form,
+    /// from its `int` attribute.
+    unsafe fn write_uuid(
+        &mut self,
+        p: Cur,
+        obj: *mut ffi::PyObject,
+        t: &native::Types,
+    ) -> CurResult {
+        if !t.uuid_plain && !self.guard {
+            return self.fail(SerError::NeedGuard);
+        }
+        ffi::Py_INCREF(obj);
+        let v = if t.uuid_int.is_null() {
+            ffi::PyObject_GetAttr(obj, native::names().int)
+        } else {
+            // The slot directly: no attribute lookup.
+            ffi::PyMember_GetOne(obj as *const std::os::raw::c_char, t.uuid_int)
+        };
+        ffi::Py_DECREF(obj);
+        if v.is_null() {
+            return self.fail(SerError::PyErrSet);
+        }
+        let r = uuid_value(v);
+        ffi::Py_DECREF(v);
+        let Some(val) = r else {
+            return self.fail(SerError::PyErrSet);
+        };
+        let mut b = [0u8; 36];
+        native::fmt_uuid(&mut b, val);
+        self.put_quoted(p, &b)
+    }
+
+    /// `Enum` member (any Enum subclass; int/str/float mix-ins never get
+    /// here): its `_value_`, serialized in place (it may itself be native).
+    unsafe fn ser_enum(
+        &mut self,
+        p: Cur,
+        obj: *mut ffi::PyObject,
+        ty: *mut ffi::PyTypeObject,
+    ) -> CurResult {
+        if self.depth >= RECURSION_LIMIT {
+            return self.fail(SerError::Recursion);
+        }
+        if !self.guard && !enum_value_plain(ty) {
+            return self.fail(SerError::NeedGuard);
+        }
+        ffi::Py_INCREF(obj);
+        let v = ffi::PyObject_GetAttr(obj, native::names().value);
+        ffi::Py_DECREF(obj);
+        if v.is_null() {
+            return self.fail(SerError::PyErrSet);
+        }
+        self.depth += 1;
+        let q = self.ser(p, v, 0, 0);
+        self.depth -= 1;
+        ffi::Py_DECREF(v);
+        q
+    }
+
+    /// Dataclass instance (its type's own `__dict__` has
+    /// `__dataclass_fields__`) as an object, like orjson: without
+    /// `__slots__` in the type, the instance `__dict__` in order; else the
+    /// fields in definition order (ClassVar/InitVar excluded). Either way,
+    /// names starting with `_` are skipped. Reading attributes may run
+    /// Python code, so this always runs in guarded mode.
+    unsafe fn ser_dataclass(
+        &mut self,
+        p: Cur,
+        obj: *mut ffi::PyObject,
+        ty: *mut ffi::PyTypeObject,
+        t: &native::Types,
+    ) -> CurResult {
+        if !self.guard {
+            return self.fail(SerError::NeedGuard);
+        }
+        if self.depth >= RECURSION_LIMIT {
+            return self.fail(SerError::Recursion);
+        }
+        self.depth += 1;
+        ffi::Py_INCREF(obj);
+        let q = self.ser_dataclass_inner(p, obj, ty, t);
+        ffi::Py_DECREF(obj);
+        self.depth -= 1;
+        q
+    }
+
+    unsafe fn ser_dataclass_inner(
+        &mut self,
+        p: Cur,
+        obj: *mut ffi::PyObject,
+        ty: *mut ffi::PyTypeObject,
+        t: &native::Types,
+    ) -> CurResult {
+        let names = native::names();
+        if native::own_attr(ty, names.slots).is_null() {
+            let d = ffi::PyObject_GetAttr(obj, names.dict);
+            if d.is_null() {
+                if ffi::PyErr_ExceptionMatches(ffi::PyExc_AttributeError) == 0 {
+                    return self.fail(SerError::PyErrSet);
+                }
+                ffi::PyErr_Clear();
+            } else if ffi::PyDict_Check(d) != 0 {
+                let q = self.ser_attr_dict(p, d);
+                ffi::Py_DECREF(d);
+                return q;
+            } else {
+                ffi::Py_DECREF(d);
+            }
+        }
+        // Fields: re-read, since `__dict__` access may have run Python code.
+        let fields = native::own_attr(ty, names.dataclass_fields);
+        if fields.is_null() || ffi::PyDict_Check(fields) == 0 {
+            return self.fail_obj(SerError::Unsupported, obj);
+        }
+        ffi::Py_INCREF(fields);
+        let q = self.ser_fields(p, obj, fields, t);
+        ffi::Py_DECREF(fields);
+        q
+    }
+
+    /// Instance `__dict__` of a dataclass: `_`-prefixed names skipped.
+    unsafe fn ser_attr_dict(&mut self, p: Cur, d: *mut ffi::PyObject) -> CurResult {
+        let size = ffi::PyDict_Size(d);
+        let mut p = self.put(p, b'{');
+        let mut ns = 0;
+        let mut pos: ffi::Py_ssize_t = 0;
+        let mut key: *mut ffi::PyObject = ptr::null_mut();
+        let mut value: *mut ffi::PyObject = ptr::null_mut();
+        while ffi::PyDict_Next(d, &mut pos, &mut key, &mut value) != 0 {
+            if underscore_name(key) {
+                continue;
+            }
+            // `value` is borrowed from `d`, which Python code run while
+            // serializing it could change.
+            ffi::Py_INCREF(value);
+            let q = self.dict_item(p, key, value, ns);
+            ffi::Py_DECREF(value);
+            p = tri!(q);
+            if ffi::PyDict_Size(d) != size {
+                return self.dict_changed();
+            }
+            ns = 1;
+        }
+        self.put(p, b'}')
+    }
+
+    /// `__dataclass_fields__` entries that are real fields, read with getattr.
+    unsafe fn ser_fields(
+        &mut self,
+        p: Cur,
+        obj: *mut ffi::PyObject,
+        fields: *mut ffi::PyObject,
+        t: &native::Types,
+    ) -> CurResult {
+        let names = native::names();
+        let size = ffi::PyDict_Size(fields);
+        let mut p = self.put(p, b'{');
+        let mut ns = 0;
+        let mut pos: ffi::Py_ssize_t = 0;
+        let mut name: *mut ffi::PyObject = ptr::null_mut();
+        let mut field: *mut ffi::PyObject = ptr::null_mut();
+        while ffi::PyDict_Next(fields, &mut pos, &mut name, &mut field) != 0 {
+            if ffi::PyUnicode_Check(name) == 0 || underscore_name(name) {
+                continue;
+            }
+            ffi::Py_INCREF(name);
+            let kind = ffi::PyObject_GetAttr(field, names.field_type);
+            if kind.is_null() {
+                ffi::Py_DECREF(name);
+                return self.fail(SerError::PyErrSet);
+            }
+            ffi::Py_DECREF(kind); // only compared by identity
+            if kind != t.dc_field {
+                ffi::Py_DECREF(name);
+                continue;
+            }
+            let value = ffi::PyObject_GetAttr(obj, name);
+            if value.is_null() {
+                ffi::Py_DECREF(name);
+                return self.fail(SerError::PyErrSet);
+            }
+            let q = self.dict_item(p, name, value, ns);
+            ffi::Py_DECREF(value);
+            ffi::Py_DECREF(name);
+            p = tri!(q);
+            if ffi::PyDict_Size(fields) != size {
+                return self.dict_changed();
+            }
+            ns = 1;
+        }
+        self.put(p, b'}')
+    }
+
+    #[cold]
+    unsafe fn dict_changed(&mut self) -> Cur {
+        ffi::PyErr_SetString(
+            ffi::PyExc_RuntimeError,
+            c"dictionary changed size during iteration".as_ptr(),
+        );
+        self.fail(SerError::PyErrSet)
+    }
+
+    /// Serializes `default(obj)` in place of `obj` (the separator is already
+    /// written). The result may itself be unsupported, in which case
+    /// `default` is called on it again; each call counts as a nesting level,
+    /// so a `default` that never converges (e.g. `lambda o: o`) raises the
+    /// nesting-depth error instead of recursing forever. Exceptions raised by
+    /// `default` propagate unchanged, as in `json.dumps`.
+    #[cold]
+    #[inline(never)]
+    unsafe fn call_default(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        if self.depth >= RECURSION_LIMIT {
+            return self.fail(SerError::Recursion);
+        }
+        // The call's caller must own its argument: `obj` is borrowed from a
+        // container that `default` itself could modify.
+        ffi::Py_INCREF(obj);
+        let res = ffi::PyObject_CallOneArg(self.default, obj);
+        ffi::Py_DECREF(obj);
+        if res.is_null() {
+            return self.fail(SerError::PyErrSet);
+        }
+        self.depth += 1;
+        let q = self.ser(p, res, 0, 0);
+        self.depth -= 1;
+        ffi::Py_DECREF(res);
+        q
     }
 
     // ----- results -----
@@ -1965,8 +2673,8 @@ impl Serializer {
             return self.buf.into_object();
         }
         // Non-ASCII: the buffer holds the ASCII parts; build the final string
-        // with the exact kind and drop the buffer.
-        LAST_LEN.with(|c| c[1].set(len));
+        // with the exact kind and drop the buffer (`Out::drop` records its
+        // length as the size hint).
         let total = len + self.seg_chars;
         // Escapes in the non-ASCII strings are only found while copying them;
         // leave some room so that a few do not need a realloc.
@@ -2098,6 +2806,131 @@ unsafe fn write_utf8_unchecked(p: Cur, src: *const u8, len: usize, sep: u8, ns: 
     dst.add(1)
 }
 
+/// Non-ASCII strings of at least this many characters are encoded directly
+/// by `dumps` (bytes) instead of through CPython's cached UTF-8 copy.
+const DIRECT_UTF8_MIN_CHARS: usize = 256;
+
+/// Code unit of a str's native data (UCS2/UCS4; UCS1 goes through CPython's
+/// encoder, see `write_str_slow`).
+trait StrUnit: Copy {
+    fn get(self) -> u32;
+    /// Packs 8 units starting at `p` into 8 bytes such that the result is
+    /// "all bytes < 0x80 and none needs escaping" only if all 8 units are
+    /// ASCII needing no escape (then the bytes are exactly those units).
+    unsafe fn pack8(p: *const Self) -> u64;
+}
+impl StrUnit for u16 {
+    #[inline(always)]
+    fn get(self) -> u32 {
+        self as u32
+    }
+    #[inline(always)]
+    unsafe fn pack8(p: *const u16) -> u64 {
+        #[cfg(target_arch = "x86_64")]
+        {
+            use std::arch::x86_64::*;
+            // packus treats lanes as signed: 0x100..=0x7FFF saturate to 0xFF
+            // (high bit set) and 0x8000..=0xFFFF to 0x00, which the caller's
+            // escape check rejects. Either way no non-ASCII unit can pass as
+            // an ASCII byte that needs no escaping.
+            let v = _mm_loadu_si128(p as *const __m128i);
+            _mm_cvtsi128_si64(_mm_packus_epi16(v, v)) as u64
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let mut w = 0u64;
+            for k in 0..8 {
+                w |= ((*p.add(k)).min(0xFF) as u64) << (8 * k);
+            }
+            w
+        }
+    }
+}
+impl StrUnit for u32 {
+    #[inline(always)]
+    fn get(self) -> u32 {
+        self
+    }
+    #[inline(always)]
+    unsafe fn pack8(p: *const u32) -> u64 {
+        #[cfg(target_arch = "x86_64")]
+        {
+            use std::arch::x86_64::*;
+            // Code points are <= 0x10FFFF, so the signed saturation of
+            // packs_epi32 keeps them positive; packus then saturates > 0xFF.
+            let a = _mm_loadu_si128(p as *const __m128i);
+            let b = _mm_loadu_si128(p.add(4) as *const __m128i);
+            let w = _mm_packs_epi32(a, b);
+            _mm_cvtsi128_si64(_mm_packus_epi16(w, w)) as u64
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let mut w = 0u64;
+            for k in 0..8 {
+                w |= ((*p.add(k)).min(0xFF) as u64) << (8 * k);
+            }
+            w
+        }
+    }
+}
+
+/// Encodes `len` units of native str data as escaped UTF-8 at `dst` (the
+/// body of a JSON string, without quotes) and returns the end, or None at a
+/// lone surrogate (not encodable; the caller reports it).
+///
+/// SAFETY: `len * 6 + 8` bytes of room at `dst` (worst case: every unit an
+/// escape; `write_escape` stores 8 bytes blindly), `src..src+len` readable.
+#[inline(always)]
+unsafe fn encode_utf8_escaped<T: StrUnit>(mut dst: *mut u8, src: *const T, len: usize) -> Option<*mut u8> {
+    let mut i = 0;
+    while i < len {
+        let c = (*src.add(i)).get();
+        if c < 0x80 {
+            // Runs of 8 ASCII units that need no escaping: one 8-byte store.
+            // Only tried at an ASCII unit: text of non-ASCII runs (CJK) paid
+            // a failed pack and check per character (2x slower).
+            if i + 8 <= len {
+                let w = T::pack8(src.add(i));
+                if w & 0x8080_8080_8080_8080 == 0 && !swar_needs_escape(w) {
+                    ptr::write_unaligned(dst as *mut u64, w);
+                    dst = dst.add(8);
+                    i += 8;
+                    continue;
+                }
+            }
+            i += 1;
+            if *NEEDS_ESCAPE.get_unchecked(c as usize) != 0 {
+                write_escape(c as u8, &mut dst);
+            } else {
+                *dst = c as u8;
+                dst = dst.add(1);
+            }
+        } else if c < 0x800 {
+            i += 1;
+            *dst = 0xC0 | (c >> 6) as u8;
+            *dst.add(1) = 0x80 | (c & 0x3F) as u8;
+            dst = dst.add(2);
+        } else if c < 0x10000 {
+            i += 1;
+            if c & 0xF800 == 0xD800 {
+                return None;
+            }
+            *dst = 0xE0 | (c >> 12) as u8;
+            *dst.add(1) = 0x80 | ((c >> 6) & 0x3F) as u8;
+            *dst.add(2) = 0x80 | (c & 0x3F) as u8;
+            dst = dst.add(3);
+        } else {
+            i += 1;
+            *dst = 0xF0 | (c >> 18) as u8;
+            *dst.add(1) = 0x80 | ((c >> 12) & 0x3F) as u8;
+            *dst.add(2) = 0x80 | ((c >> 6) & 0x3F) as u8;
+            *dst.add(3) = 0x80 | (c & 0x3F) as u8;
+            dst = dst.add(4);
+        }
+    }
+    Some(dst)
+}
+
 /// UTF-8 view of a (non-ASCII) string, using CPython's cached copy when present.
 #[inline(always)]
 unsafe fn utf8_of(obj: *mut ffi::PyObject) -> Result<(*const u8, usize), SerError> {
@@ -2115,39 +2948,239 @@ unsafe fn utf8_of(obj: *mut ffi::PyObject) -> Result<(*const u8, usize), SerErro
     Ok((p as *const u8, n as usize))
 }
 
+/// `rjson.JSONEncodeError`, created once (at module init, see `encode_error_type`).
+static JSON_ENCODE_ERROR: pyo3::sync::PyOnceLock<Py<pyo3::types::PyType>> =
+    pyo3::sync::PyOnceLock::new();
+
+/// Returns `rjson.JSONEncodeError`, a subclass of both `TypeError` (what
+/// `json.dumps`/`orjson.dumps` raise for unsupported values, so `except
+/// TypeError` handlers keep working) and `ValueError` (what rjson raised
+/// before, so existing `except ValueError` handlers keep working too), like
+/// `orjson.JSONEncodeError`.
+pub fn encode_error_type(py: Python<'_>) -> PyResult<&Py<pyo3::types::PyType>> {
+    JSON_ENCODE_ERROR.get_or_try_init(py, || unsafe {
+        let bases = ffi::PyTuple_Pack(2, ffi::PyExc_TypeError, ffi::PyExc_ValueError);
+        if bases.is_null() {
+            return Err(PyErr::fetch(py));
+        }
+        let ty = ffi::PyErr_NewExceptionWithDoc(
+            c"rjson.JSONEncodeError".as_ptr(),
+            c"Raised by dumps/dumps_str/dumps_bytes when an object cannot be serialized: \
+unsupported type, non-str dict key, NaN/Infinity, or nesting too deep (circular \
+reference). Subclasses both TypeError and ValueError."
+                .as_ptr(),
+            bases,
+            ptr::null_mut(),
+        );
+        ffi::Py_DECREF(bases);
+        // A NULL return has the exception set; `from_owned_ptr_or_err` fetches it.
+        Ok(Bound::from_owned_ptr_or_err(py, ty)?
+            .cast_into::<pyo3::types::PyType>()?
+            .unbind())
+    })
+}
+
+/// `type(obj)` as `module.QualName` (just `QualName` for builtins), for messages.
+/// Last `datetime.timezone` seen and its offset in seconds. A `timezone` is
+/// immutable and its offset does not depend on the datetime; the cache holds
+/// a strong reference, so the address cannot be reused by another object.
+static mut TZ_CACHE: (usize, i64) = (0, 0);
+
+/// UTC offset of an aware datetime in seconds (None if `utcoffset()` is None),
+/// or Err with a Python exception set. Runs Python code unless `tzt` is
+/// `timezone` or the C `ZoneInfo`.
+unsafe fn utc_offset(
+    obj: *mut ffi::PyObject,
+    tz: *mut ffi::PyObject,
+    tzt: *mut ffi::PyTypeObject,
+    t: &native::Types,
+) -> Result<Option<i64>, ()> {
+    let cache = ptr::addr_of_mut!(TZ_CACHE);
+    if tzt == t.timezone && (*cache).0 == tz as usize {
+        return Ok(Some((*cache).1));
+    }
+    ffi::Py_INCREF(obj);
+    let off = if tzt == t.zoneinfo && !t.zoneinfo_utcoffset.is_null() {
+        // ZoneInfo.utcoffset(tz, dt) through its method descriptor.
+        let args = [tz, obj];
+        ffi::PyObject_Vectorcall(t.zoneinfo_utcoffset, args.as_ptr(), 2, ptr::null_mut())
+    } else {
+        // `datetime.utcoffset()` calls `tzinfo.utcoffset(dt)` and checks the
+        // result: None or a timedelta strictly within one day.
+        ffi::PyObject_CallMethodNoArgs(obj, native::names().utcoffset)
+    };
+    ffi::Py_DECREF(obj);
+    if off.is_null() {
+        return Err(());
+    }
+    if off == ffi::Py_None() {
+        ffi::Py_DECREF(off);
+        return Ok(None);
+    }
+    if ffi::Py_TYPE(off) != t.timedelta {
+        // Only possible from the direct ZoneInfo call (datetime.utcoffset
+        // validates); the C ZoneInfo always returns a timedelta.
+        ffi::Py_DECREF(off);
+        ffi::PyErr_SetString(ffi::PyExc_TypeError, c"utcoffset() must return a timedelta".as_ptr());
+        return Err(());
+    }
+    let secs = ffi::PyDateTime_DELTA_GET_DAYS(off) as i64 * 86400
+        + ffi::PyDateTime_DELTA_GET_SECONDS(off) as i64;
+    ffi::Py_DECREF(off);
+    if !(-86399..=86399).contains(&secs) {
+        ffi::PyErr_SetString(ffi::PyExc_ValueError, c"utcoffset() out of range".as_ptr());
+        return Err(());
+    }
+    if tzt == t.timezone {
+        let old = (*cache).0 as *mut ffi::PyObject;
+        ffi::Py_INCREF(tz);
+        *cache = (tz as usize, secs);
+        if !old.is_null() {
+            ffi::Py_DECREF(old);
+        }
+    }
+    Ok(Some(secs))
+}
+
+/// Keyword options of `dumps`/`dumps_str` (parsed in entry.rs).
+pub struct DumpsOpts {
+    /// `default=` callable (borrowed from the call's arguments), or null.
+    pub default: *mut ffi::PyObject,
+    /// `passthrough=` flags (`native::PT_*`).
+    pub passthrough: u32,
+    /// `non_str_keys=`.
+    pub non_str_keys: bool,
+}
+
+impl DumpsOpts {
+    pub const NONE: DumpsOpts = DumpsOpts {
+        default: ptr::null_mut(),
+        passthrough: 0,
+        non_str_keys: false,
+    };
+}
+
+/// 128-bit value of a UUID's `int` (None with an exception set).
+unsafe fn uuid_value(v: *mut ffi::PyObject) -> Option<u128> {
+    if ffi::Py_TYPE(v) == int_type() && INLINE_INT {
+        // Up to five 30-bit digits (the layout checked at init).
+        let (neg, nd) = int_shape(v);
+        let d = ptr::addr_of!((*(v as *const LongHeader)).ob_digit) as *const u32;
+        // 4 digits hold 120 bits; a 5th may add 8 more (< 2**128).
+        if !neg && (nd <= 4 || (nd == 5 && *d.add(4) < 256)) {
+            let mut x: u128 = 0;
+            for i in (0..nd).rev() {
+                x = (x << 30) | *d.add(i) as u128;
+            }
+            return Some(x);
+        }
+    }
+    if ffi::PyLong_Check(v) == 0 {
+        ffi::PyErr_SetString(ffi::PyExc_TypeError, c"UUID.int is not an int".as_ptr());
+        return None;
+    }
+    let lo = ffi::PyLong_AsUnsignedLongLongMask(v);
+    if lo == u64::MAX && !ffi::PyErr_Occurred().is_null() {
+        return None;
+    }
+    let h = ffi::PyNumber_Rshift(v, native::names().sixty_four);
+    if h.is_null() {
+        return None;
+    }
+    let hi = ffi::PyLong_AsUnsignedLongLongMask(h);
+    ffi::Py_DECREF(h);
+    if hi == u64::MAX && !ffi::PyErr_Occurred().is_null() {
+        return None;
+    }
+    Some(((hi as u128) << 64) | lo as u128)
+}
+
+/// Reading an Enum member's `_value_` runs no Python code: generic attribute
+/// lookup, and no class in the MRO defines `_value_` (which could be a
+/// descriptor), so it comes from the instance dict.
+unsafe fn enum_value_plain(ty: *mut ffi::PyTypeObject) -> bool {
+    if !native::generic_getattr(ty) {
+        return false;
+    }
+    let mro = (*ty).tp_mro;
+    if mro.is_null() || ffi::PyTuple_Check(mro) == 0 {
+        return false;
+    }
+    for i in 0..ffi::PyTuple_GET_SIZE(mro) {
+        let base = ffi::PyTuple_GET_ITEM(mro, i) as *mut ffi::PyTypeObject;
+        if !native::own_attr(base, native::names().value).is_null() {
+            return false;
+        }
+    }
+    true
+}
+
+/// `key` is a str starting with `_` (dataclass names orjson leaves out).
+unsafe fn underscore_name(key: *mut ffi::PyObject) -> bool {
+    ffi::PyUnicode_Check(key) != 0
+        && ffi::PyUnicode_GetLength(key) > 0
+        && ffi::PyUnicode_ReadChar(key, 0) == b'_' as u32
+}
+
+fn type_name(py: Python<'_>, obj: *mut ffi::PyObject) -> String {
+    use pyo3::types::PyTypeMethods;
+    if obj.is_null() {
+        return "unknown".to_string();
+    }
+    // SAFETY: `obj` is a live borrowed pointer (see `Serializer::fail_obj`).
+    let ty = unsafe { Bound::from_borrowed_ptr(py, obj) }.get_type();
+    match ty.fully_qualified_name() {
+        Ok(n) => n.to_string(),
+        Err(_) => ty.name().map(|n| n.to_string()).unwrap_or_else(|_| "unknown".to_string()),
+    }
+}
+
 #[cold]
 #[inline(never)]
 fn to_pyerr(py: Python<'_>, ser: &Serializer, e: SerError) -> PyErr {
-    use pyo3::exceptions::PyValueError;
-    match e {
-        SerError::NonFinite => PyValueError::new_err(format!(
-            "Cannot serialize non-finite float: {}",
-            ser.err_float
-        )),
+    let msg = match e {
+        SerError::NonFinite => format!(
+            "Cannot serialize non-finite float: {} (JSON has no NaN or Infinity)",
+            // Python's repr spelling (Rust would print `NaN`).
+            if ser.err_float.is_nan() {
+                "nan"
+            } else if ser.err_float > 0.0 {
+                "inf"
+            } else {
+                "-inf"
+            }
+        ),
         SerError::Unsupported => {
-            let name = unsafe { Bound::from_borrowed_ptr(py, ser.err_obj) }
-                .get_type()
-                .name()
-                .map(|n| n.to_string())
-                .unwrap_or_else(|_| "unknown".to_string());
-            PyValueError::new_err(format!(
-                "Unsupported Python type for JSON serialization: {}",
-                name
-            ))
+            format!("Type is not JSON serializable: {}", type_name(py, ser.err_obj))
         }
-        SerError::KeyNotStr => {
-            PyValueError::new_err("Dictionary keys must be strings for JSON serialization")
-        }
-        SerError::Recursion => PyValueError::new_err(format!(
+        SerError::KeyNotStr if ser.non_str_keys => format!(
+            "Dictionary key of type {} is not supported (non_str_keys allows str, int, float, \
+             bool, None, Enum, datetime, date, time and UUID keys)",
+            type_name(py, ser.err_obj)
+        ),
+        SerError::KeyNotStr => format!(
+            "Dictionary keys must be strings for JSON serialization, not {} \
+             (non_str_keys=True converts int, float, bool and None keys)",
+            type_name(py, ser.err_obj)
+        ),
+        SerError::Recursion => format!(
             "Maximum nesting depth ({}) exceeded during JSON serialization (circular reference?)",
             RECURSION_LIMIT
-        )),
-        SerError::PyErrSet => PyErr::fetch(py),
+        ),
+        SerError::TimeTz => "datetime.time must not have tzinfo set".to_string(),
+        SerError::NeedGuard => "internal error: unguarded native value".to_string(),
+        SerError::PyErrSet => return PyErr::fetch(py),
+    };
+    match encode_error_type(py) {
+        Ok(ty) => PyErr::from_type(ty.bind(py).clone(), msg),
+        // Only if creating the type failed (e.g. MemoryError): still a ValueError.
+        Err(_) => pyo3::exceptions::PyValueError::new_err(msg),
     }
 }
 
 /// Serializes `obj` (borrowed) and returns a new reference to a `str`
-/// (`as_str`) or `bytes`. Entry point for raw METH_O wrappers.
+/// (`as_str`) or `bytes`. Entry point for the raw `dumps`/`dumps_str` wrappers;
+/// `opts` are the keyword options.
 ///
 /// # Safety
 /// `obj` must be a valid object pointer and the GIL must be held.
@@ -2155,10 +3188,18 @@ pub unsafe fn dumps_raw(
     py: Python<'_>,
     obj: *mut ffi::PyObject,
     as_str: bool,
+    opts: &DumpsOpts,
 ) -> PyResult<*mut ffi::PyObject> {
-    let mut ser = Serializer::new(as_str);
+    let mut ser = Serializer::new(as_str, opts, false);
     let start = ser.start();
-    let end = ser.ser(start, obj, 0, 0);
+    let mut end = ser.ser(start, obj, 0, 0);
+    if end.is_null() && matches!(ser.err, SerError::NeedGuard) {
+        // A native value needs Python code (dataclass, Python tzinfo, ...).
+        // Nothing ran yet, so start over in guarded mode.
+        ser = Serializer::new(as_str, opts, true);
+        let start = ser.start();
+        end = ser.ser(start, obj, 0, 0);
+    }
     if end.is_null() {
         return Err(to_pyerr(py, &ser, ser.err));
     }

@@ -2,6 +2,9 @@
 name = "rjson"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+description = "Fast JSON for Python, written in Rust against the CPython C API"
+repository = "https://github.com/TinDang97/rjson"
 
 [lib]
 name = "rjson"

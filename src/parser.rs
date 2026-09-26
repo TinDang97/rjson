@@ -4,7 +4,8 @@
 //!
 //! * Input is borrowed: `str` via `PyUnicode_AsUTF8AndSize` (zero-copy for
 //!   compact ASCII strings, cached UTF-8 otherwise), `bytes`/`bytearray`
-//!   directly; `memoryview` is copied. All of these are followed by a NUL
+//!   directly; `memoryview` is parsed in place when it ends where its
+//!   `bytes`/`bytearray` ends, else copied. All of these are followed by a NUL
 //!   byte, so `peek()` needs no bounds check (see `parse`). Bytes input is
 //!   validated once up front with `simdutf8`.
 //! * Recursive descent with one value stack (`Vec<*mut PyObject>`, pooled
@@ -125,6 +126,15 @@ type PResult<T> = Result<T, Fail>;
 
 static JSON_DECODE_ERROR: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 
+/// `json.JSONDecodeError`, which `loads` raises and the module exports as
+/// `rjson.JSONDecodeError` (the same object, so either name catches it).
+pub(crate) fn decode_error_type(py: Python<'_>) -> PyResult<&Py<PyType>> {
+    JSON_DECODE_ERROR.get_or_try_init(py, || -> PyResult<Py<PyType>> {
+        let m = py.import("json")?;
+        Ok(m.getattr("JSONDecodeError")?.cast_into::<PyType>()?.unbind())
+    })
+}
+
 #[cold]
 #[inline(never)]
 fn raise_decode_error(py: Python<'_>, msg: &str, doc: &[u8], pos: usize) -> PyErr {
@@ -133,14 +143,12 @@ fn raise_decode_error(py: Python<'_>, msg: &str, doc: &[u8], pos: usize) -> PyEr
     let doc_str = String::from_utf8_lossy(doc);
     let pos = pos.min(doc.len());
     let char_pos = doc[..pos].iter().filter(|&&b| (b & 0xC0) != 0x80).count();
-    let full = format!("JSON parsing error: {msg}");
-    let ty = JSON_DECODE_ERROR.get_or_try_init(py, || -> PyResult<Py<PyType>> {
-        let m = py.import("json")?;
-        Ok(m.getattr("JSONDecodeError")?.cast_into::<PyType>()?.unbind())
-    });
+    // `msg` is the bare reason, as with json/orjson (`exc.msg`); JSONDecodeError
+    // formats str(exc) as "<msg>: line L column C (char P)".
+    let ty = decode_error_type(py);
     match ty {
-        Ok(ty) => PyErr::from_type(ty.bind(py).clone(), (full, doc_str.into_owned(), char_pos)),
-        Err(_) => pyo3::exceptions::PyValueError::new_err(full),
+        Ok(ty) => PyErr::from_type(ty.bind(py).clone(), (msg.to_owned(), doc_str.into_owned(), char_pos)),
+        Err(_) => pyo3::exceptions::PyValueError::new_err(msg.to_owned()),
     }
 }
 
@@ -160,6 +168,10 @@ struct Parser<'a> {
     scratch: Vec<u8>,
     /// Message and byte offset of the first error.
     error: std::cell::Cell<(&'static str, usize)>,
+    /// `loads(..., lenient=True)`: also accept `NaN`, `Infinity`,
+    /// `-Infinity` and numbers that overflow to infinity, as `json.loads`
+    /// does. Only checked on paths that are errors in strict mode.
+    lenient: bool,
 }
 
 #[inline(always)]
@@ -234,6 +246,20 @@ impl<'a> Parser<'a> {
         Err(Fail)
     }
 
+    /// Trailing comma before `]`/`}` (at `self.pos`). Reported at the comma,
+    /// the last non-whitespace byte before the bracket, like `json` and
+    /// orjson (`[1,]` -> char 2, column 3); found by scanning back so the
+    /// success path does not track the comma's position.
+    #[cold]
+    #[inline(never)]
+    fn err_trailing_comma<T>(&self) -> PResult<T> {
+        let mut i = self.pos.min(self.buf.len());
+        while i > 0 && is_ws(self.buf[i - 1]) {
+            i -= 1;
+        }
+        self.err("trailing comma is not allowed", i.saturating_sub(1))
+    }
+
     #[cold]
     #[inline(never)]
     fn err_unexpected<T>(&self, expected: &'static str) -> PResult<T> {
@@ -258,8 +284,38 @@ impl<'a> Parser<'a> {
             b't' => self.parse_literal(b"true", unsafe { ffi::Py_True() }),
             b'f' => self.parse_literal(b"false", unsafe { ffi::Py_False() }),
             b'n' => self.parse_literal(b"null", unsafe { ffi::Py_None() }),
-            _ => self.err_unexpected("unexpected character, expected a JSON value"),
+            _ => self.parse_other(),
         }
+    }
+
+    /// Not a JSON value: an error, or in lenient mode `NaN`/`Infinity`.
+    #[cold]
+    #[inline(never)]
+    fn parse_other(&mut self) -> PResult<*mut ffi::PyObject> {
+        if self.lenient {
+            if let Some(r) = self.nonfinite_literal(self.pos, false) {
+                return r;
+            }
+        }
+        self.err_unexpected("unexpected character, expected a JSON value")
+    }
+
+    /// Lenient mode: `NaN` or `Infinity` at `at` (after a `-` when `neg`;
+    /// `-NaN` is not accepted, as in `json.loads`). None if neither.
+    #[cold]
+    #[inline(never)]
+    fn nonfinite_literal(&mut self, at: usize, neg: bool) -> Option<PResult<*mut ffi::PyObject>> {
+        let rest = &self.buf[at.min(self.buf.len())..];
+        let (len, v) = if !neg && rest.starts_with(b"NaN") {
+            (3, f64::NAN)
+        } else if rest.starts_with(b"Infinity") {
+            (8, if neg { f64::NEG_INFINITY } else { f64::INFINITY })
+        } else {
+            return None;
+        };
+        self.pos = at + len;
+        let r = unsafe { ffi::PyFloat_FromDouble(v) };
+        Some(if r.is_null() { self.err_oom() } else { Ok(r) })
     }
 
     #[inline(always)]
@@ -317,7 +373,7 @@ impl<'a> Parser<'a> {
                         self.pos += 1;
                         self.skip_ws();
                         if self.peek() == b']' {
-                            return self.err("trailing comma is not allowed", self.pos);
+                            return self.err_trailing_comma();
                         }
                     }
                     b']' => {
@@ -370,7 +426,7 @@ impl<'a> Parser<'a> {
                         self.pos += 1;
                         self.skip_ws();
                         if self.peek() == b'}' {
-                            return self.err("trailing comma is not allowed", self.pos);
+                            return self.err_trailing_comma();
                         }
                     }
                     b'}' => {
@@ -742,8 +798,9 @@ impl<'a> Parser<'a> {
         self.parse_number_general(start)
     }
 
-    /// Fast path for the common number shapes: `-?\d{1,15}(\.\d{1,15})?`
-    /// with at most 19 digits in total, optionally followed by an exponent
+    /// Fast path for the common number shapes: `-?\d{1,15}(\.\d{1,19})?`
+    /// with at most 19 significant digits (a leading `0.` counts none),
+    /// optionally followed by an exponent
     /// of at most 4 digits. Returns None (without consuming anything) for
     /// every other shape, including all invalid ones, so the general parser
     /// keeps sole ownership of error reporting and of the rare shapes.
@@ -788,27 +845,34 @@ impl<'a> Parser<'a> {
         let mut mant = int;
         let mut n2 = 0;
         if c == b'.' {
-            let (frac, n) = digits16(p.add(j + 1))?;
-            if n == 0 || n1 + n > 19 {
+            let (frac, n) = digits19(p.add(j + 1))?;
+            // At most 19 significant digits, so the mantissa is exact in a
+            // u64: an integer part of 0 adds none (full-precision doubles
+            // such as 0.8601898621952831 or 0.0086018986219528 have 16-19
+            // fraction digits).
+            // Branch-free significant-digit count: a branch on `int != 0`
+            // mispredicted on arrays mixing 0.0 with other values (+6%).
+            let sig = n + n1 * (int != 0) as usize;
+            if n == 0 || sig > 19 {
                 return None;
             }
-            // <= 19 digits: exact in a u64.
             mant = int * POW10_U64[n] + frac;
             n2 = n;
-            j += 1 + n; // <= start + 32
+            j += 1 + n; // <= start + 36
             c = *p.add(j);
         }
         let v = if (c | 0x20) != b'e' {
             if mant <= (1u64 << 53) {
-                // Clinger: exact mantissa and power of ten (n2 <= 15 <= 22),
+                // Clinger: exact mantissa and power of ten (n2 <= 19 <= 22),
                 // so one correctly rounded division.
                 mant as f64 / POW10[n2]
             } else {
-                // n2 in 1..=15 and mant > 2^53: within the specialised range.
+                // n2 in 1..=19 and mant > 2^53 (so != 0): within the
+                // specialised range (q in -22..=22).
                 crate::lemire::compute_float64_small(-(n2 as i64), mant)
             }
         } else {
-            // Exponent: optional sign and 1..=4 digits (reads <= start + 38).
+            // Exponent: optional sign and 1..=4 digits (reads <= start + 42).
             j += 1;
             let s = *p.add(j);
             let eneg = s == b'-';
@@ -867,6 +931,11 @@ impl<'a> Parser<'a> {
         } else if first.is_ascii_digit() {
             self.digits(&mut i, &mut mant, &mut nd);
         } else {
+            if self.lenient && neg {
+                if let Some(r) = self.nonfinite_literal(i, true) {
+                    return r; // -Infinity
+                }
+            }
             return self.err_num_digit(i, "no digit after sign");
         }
         let c = self.peek_at(i);
@@ -963,7 +1032,7 @@ impl<'a> Parser<'a> {
             };
             if let Some(v) = v {
                 if v.is_infinite() {
-                    return self.err("number is infinity when parsed as double", start);
+                    return self.infinite_number(neg, start);
                 }
                 let r = unsafe { ffi::PyFloat_FromDouble(if neg { -v } else { v }) };
                 if r.is_null() {
@@ -973,6 +1042,21 @@ impl<'a> Parser<'a> {
             }
         }
         self.parse_float_slow(start, i)
+    }
+
+    /// A number overflowing to infinity: an error, or `±inf` in lenient
+    /// mode (as `json.loads` gives). Cold, so the check stays off the hot path.
+    #[cold]
+    #[inline(never)]
+    fn infinite_number(&self, neg: bool, start: usize) -> PResult<*mut ffi::PyObject> {
+        if !self.lenient {
+            return self.err("number is infinity when parsed as double", start);
+        }
+        let r = unsafe { ffi::PyFloat_FromDouble(if neg { f64::NEG_INFINITY } else { f64::INFINITY }) };
+        if r.is_null() {
+            return self.err_oom();
+        }
+        Ok(r)
     }
 
     #[cold]
@@ -989,7 +1073,7 @@ impl<'a> Parser<'a> {
     fn parse_float_slow(&self, start: usize, end: usize) -> PResult<*mut ffi::PyObject> {
         let s = &self.buf[start..end];
         match fast_float::parse::<f64, _>(s) {
-            Ok(v) if v.is_finite() => unsafe { Ok(ffi::PyFloat_FromDouble(v)) },
+            Ok(v) if v.is_finite() || self.lenient => unsafe { Ok(ffi::PyFloat_FromDouble(v)) },
             Ok(_) => self.err("number is infinity when parsed as double", start),
             Err(_) => self.err("invalid number", start),
         }
@@ -1021,9 +1105,9 @@ impl<'a> Parser<'a> {
 }
 
 /// Bytes `parse_number_fast` may read from the start of the number: sign,
-/// up to 16 integer-digit bytes, '.', 16 fraction-digit bytes, and an
-/// exponent ('e', sign, 4 digits and the byte after).
-const NUM_FAST_LOOKAHEAD: usize = 40;
+/// up to 16 integer-digit bytes, '.', 24 fraction bytes (three words), and
+/// an exponent ('e', sign, 4 digits and the byte after): at most 43.
+const NUM_FAST_LOOKAHEAD: usize = 48;
 
 /// Number of leading ASCII digits in the 8 bytes of `w` (little endian).
 #[inline(always)]
@@ -1045,12 +1129,12 @@ fn parse_digits_prefix(w: u64, n: usize) -> u64 {
     digits8_value(d)
 }
 
-/// Leading decimal digits at `p`: (value, count) for up to 15 digits, None
-/// for 16 or more.
+/// Leading decimal digits at `p`: (value, count) for up to 19 digits (the
+/// value fits a u64), None for 20 or more.
 ///
-/// SAFETY: `p..p+16` readable.
+/// SAFETY: `p..p+24` readable.
 #[inline(always)]
-unsafe fn digits16(p: *const u8) -> Option<(u64, usize)> {
+unsafe fn digits19(p: *const u8) -> Option<(u64, usize)> {
     let w1 = u64::from_le(ptr::read_unaligned(p as *const u64));
     let na = digit_run(w1);
     if na < 8 {
@@ -1058,10 +1142,17 @@ unsafe fn digits16(p: *const u8) -> Option<(u64, usize)> {
     }
     let w2 = u64::from_le(ptr::read_unaligned(p.add(8) as *const u64));
     let nb = digit_run(w2);
-    if nb == 8 {
+    if nb < 8 {
+        return Some((parse_8digits(w1) * POW10_U64[nb] + parse_digits_prefix(w2, nb), 8 + nb));
+    }
+    // 16..=19 digits: full-precision doubles.
+    let w3 = u64::from_le(ptr::read_unaligned(p.add(16) as *const u64));
+    let nc = digit_run(w3);
+    if nc > 3 {
         return None;
     }
-    Some((parse_8digits(w1) * POW10_U64[nb] + parse_digits_prefix(w2, nb), 8 + nb))
+    let hi = parse_8digits(w1) * 100_000_000 + parse_8digits(w2); // < 10^16
+    Some((hi * POW10_U64[nc] + parse_digits_prefix(w3, nc), 16 + nc))
 }
 
 #[inline(always)]
@@ -1489,10 +1580,159 @@ unsafe fn new_utf8_str(bytes: &[u8]) -> *mut ffi::PyObject {
     let data = crate::compat::PyUnicode_DATA(s);
     match crate::compat::PyUnicode_KIND(s) {
         1 => decode_into(bytes, data as *mut u8),
-        2 => decode_into(bytes, data as *mut u16),
+        2 => decode_ucs2(bytes, data as *mut u16, nchars),
         _ => decode_into(bytes, data as *mut u32),
     }
     s
+}
+
+/// `decode_into` for UCS2 results (CJK, and most other non-Latin-1 text),
+/// with SIMD fast paths for the two runs that dominate such text: ASCII
+/// (spaces, digits, markup) and 3-byte sequences (U+0800..U+FFFF, which
+/// covers CJK, kana and hangul). Each step looks at the next 16 input bytes
+/// at a character boundary:
+/// * leading ASCII bytes: all 16 bytes are widened and stored, and the
+///   cursor advances by the number of leading ASCII bytes;
+/// * leading 3-byte sequences (up to 5 in 15 bytes): validated as lead
+///   `1110xxxx` + two `10xxxxxx` per character with one masked compare,
+///   assembled into UTF-16 with shuffles, 8 units stored, the cursor
+///   advancing by the number of leading complete sequences;
+/// * anything else (2-byte sequences): one character, scalar.
+///
+/// Stores may write past the characters they account for (up to 16 units
+/// for ASCII, 8 for 3-byte runs); they are only taken when that many units
+/// are left in the `nchars`-unit result, and later steps overwrite the
+/// extra units. The input is valid UTF-8 (validated before), so the scalar
+/// step never reads past `bytes`.
+#[inline(always)]
+unsafe fn decode_ucs2(bytes: &[u8], out: *mut u16, nchars: usize) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
+    {
+        decode_ucs2_ssse3(bytes, out, nchars)
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "ssse3")))]
+    {
+        let _ = nchars;
+        decode_into(bytes, out)
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
+#[inline(always)]
+unsafe fn decode_ucs2_ssse3(bytes: &[u8], mut out: *mut u16, nchars: usize) {
+    use std::arch::x86_64::*;
+    let n = bytes.len();
+    let p = bytes.as_ptr();
+    let out_end = out.add(nchars);
+    let mut i = 0;
+    // Byte pattern of five 3-byte sequences in bytes 0..15; byte 15 is
+    // masked out (always matches).
+    let mask3 = _mm_setr_epi8(
+        0xF0u8 as i8, 0xC0u8 as i8, 0xC0u8 as i8, 0xF0u8 as i8, 0xC0u8 as i8, 0xC0u8 as i8, 0xF0u8 as i8,
+        0xC0u8 as i8, 0xC0u8 as i8, 0xF0u8 as i8, 0xC0u8 as i8, 0xC0u8 as i8, 0xF0u8 as i8, 0xC0u8 as i8,
+        0xC0u8 as i8, 0,
+    );
+    let want3 = _mm_setr_epi8(
+        0xE0u8 as i8, 0x80u8 as i8, 0x80u8 as i8, 0xE0u8 as i8, 0x80u8 as i8, 0x80u8 as i8, 0xE0u8 as i8,
+        0x80u8 as i8, 0x80u8 as i8, 0xE0u8 as i8, 0x80u8 as i8, 0x80u8 as i8, 0xE0u8 as i8, 0x80u8 as i8,
+        0x80u8 as i8, 0,
+    );
+    // u16 lane k = byte 3k+1 (low) | byte 3k (high); lanes 5..7 unused.
+    let lead_mid = _mm_setr_epi8(1, 0, 4, 3, 7, 6, 10, 9, 13, 12, -1, -1, -1, -1, -1, -1);
+    // u16 lane k = byte 3k+2.
+    let last = _mm_setr_epi8(2, -1, 5, -1, 8, -1, 11, -1, 14, -1, -1, -1, -1, -1, -1, -1);
+    let zero = _mm_setzero_si128();
+    // Only whole blocks take the vector path: the cursor then advances by a
+    // constant, so the next load doesn't wait for this block's compare (a
+    // data-dependent advance made mixed text 1.4-1.6x slower). Partial runs
+    // go through the scalar step, which branch prediction runs ahead on.
+    // A block is only loaded when scalar checks say it is whole (two ASCII
+    // words; the byte pattern of bytes 8..15 after two 3-byte leads), so
+    // text that alternates short runs (hangul words, Cyrillic with ASCII)
+    // pays a scalar compare per step, not a vector load and compare.
+    // Measured alternatives that lost: checking the leads at bytes 3/6/9/12
+    // separately, backing off after a failed attempt, a once-per-run flag,
+    // and moving the block conversion out of line.
+    while i + 16 <= n {
+        let b0 = *p.add(i);
+        if b0 < 0x80 {
+            // ASCII: 8 bytes at a time (as in `decode_into`), 16 when the
+            // next 8 are ASCII too and 16 units are left. These 8 bytes are
+            // 8 characters, so 8 units are always left (i + 16 <= n).
+            let w = ptr::read_unaligned(p.add(i) as *const u64);
+            if w & 0x8080_8080_8080_8080 == 0 {
+                let w2 = ptr::read_unaligned(p.add(i + 8) as *const u64);
+                if w2 & 0x8080_8080_8080_8080 == 0 && out.add(16) <= out_end {
+                    let v = _mm_loadu_si128(p.add(i) as *const __m128i);
+                    _mm_storeu_si128(out as *mut __m128i, _mm_unpacklo_epi8(v, zero));
+                    _mm_storeu_si128(out.add(8) as *mut __m128i, _mm_unpackhi_epi8(v, zero));
+                    out = out.add(16);
+                    i += 16;
+                } else {
+                    let v = _mm_loadl_epi64(p.add(i) as *const __m128i);
+                    _mm_storeu_si128(out as *mut __m128i, _mm_unpacklo_epi8(v, zero));
+                    out = out.add(8);
+                    i += 8;
+                }
+                continue;
+            }
+            *out = b0 as u16;
+            out = out.add(1);
+            i += 1;
+            continue;
+        }
+        if b0 >= 0xE0 {
+            let b3 = *p.add(i + 3);
+            if b3 < 0xE0 {
+                // A lone 3-byte character (a 4-byte one can't occur in UCS2).
+                *out = ((b0 as u16 & 0x0F) << 12) | ((*p.add(i + 1) as u16 & 0x3F) << 6) | (*p.add(i + 2) as u16 & 0x3F);
+                out = out.add(1);
+                i += 3;
+                continue;
+            }
+            // At least two 3-byte characters. Bytes 8..15 in one scalar
+            // load: a whole block has leads at 9 and 12 and continuations at
+            // 8, 10, 11, 13, 14; this rejects nearly every block that the
+            // vector compare would (hangul words, CJK mixed with spaces).
+            let w = ptr::read_unaligned(p.add(i + 8) as *const u64);
+            if w & 0x00C0_C0F0_C0C0_F0C0 == 0x0080_80E0_8080_E080 && out.add(8) <= out_end {
+                let v = _mm_loadu_si128(p.add(i) as *const __m128i);
+                if _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_and_si128(v, mask3), want3)) == 0xFFFF {
+                    let a = _mm_shuffle_epi8(v, lead_mid); // b0 << 8 | b1
+                    let b = _mm_shuffle_epi8(v, last); // b2
+                    let hi = _mm_slli_epi16(_mm_and_si128(a, _mm_set1_epi16(0x0F00)), 4);
+                    let mid = _mm_slli_epi16(_mm_and_si128(a, _mm_set1_epi16(0x003F)), 6);
+                    let lo = _mm_and_si128(b, _mm_set1_epi16(0x003F));
+                    _mm_storeu_si128(out as *mut __m128i, _mm_or_si128(_mm_or_si128(hi, mid), lo));
+                    out = out.add(5);
+                    i += 15;
+                    continue;
+                }
+            }
+            // Two characters per iteration: short runs (2-4 hangul
+            // syllables per word) take half the loop trips. Both are complete
+            // (the input is valid UTF-8 and i + 6 <= i + 16 <= n) and fit in
+            // the result.
+            *out = ((b0 as u16 & 0x0F) << 12) | ((*p.add(i + 1) as u16 & 0x3F) << 6) | (*p.add(i + 2) as u16 & 0x3F);
+            *out.add(1) = ((b3 as u16 & 0x0F) << 12) | ((*p.add(i + 4) as u16 & 0x3F) << 6) | (*p.add(i + 5) as u16 & 0x3F);
+            out = out.add(2);
+            i += 6;
+            continue;
+        }
+        // 2-byte sequences (Cyrillic, Greek, Hebrew, Arabic, ...): two per
+        // iteration when the next character is one too (0xC0..0xDF lead).
+        *out = ((b0 as u16 & 0x1F) << 6) | (*p.add(i + 1) as u16 & 0x3F);
+        let b2 = *p.add(i + 2);
+        if b2 & 0xE0 == 0xC0 {
+            *out.add(1) = ((b2 as u16 & 0x1F) << 6) | (*p.add(i + 3) as u16 & 0x3F);
+            out = out.add(2);
+            i += 4;
+        } else {
+            out = out.add(1);
+            i += 2;
+        }
+    }
+    decode_into(bytes.get_unchecked(i..), out);
 }
 
 #[inline(always)]
@@ -1598,25 +1838,41 @@ unsafe fn decode_into<T: CodeUnit>(bytes: &[u8], mut out: *mut T) {
 
 /// Borrowed view of the input document plus whatever keeps it alive.
 /// `ptr[len]` is always a readable NUL byte (required by `parse`): `str`
-/// (UTF-8 cache), `bytes` and `bytearray` buffers guarantee one; other
-/// buffers are copied into `owned` with one appended.
+/// (UTF-8 cache), `bytes` and `bytearray` buffers guarantee one; a
+/// memoryview that ends where its `bytes`/`bytearray` ends is parsed in
+/// place (`held`); other buffers are copied into `owned` with one appended.
 pub(crate) struct Input {
     pub(crate) ptr: *const u8,
     pub(crate) len: usize,
     pub(crate) utf8_valid: bool,
     #[allow(dead_code)] // only keeps the copy alive
     owned: Option<Vec<u8>>,
+    /// A buffer export held for the parse (released on drop, with the GIL
+    /// held: `Input` lives inside `loads`). While it is held a `bytearray`
+    /// cannot be resized, so `ptr` stays valid.
+    held: Option<Box<ffi::Py_buffer>>,
+    /// A temporary `bytes` holding the input (UTF-8 of a non-ASCII `str`),
+    /// released on drop; null if none.
+    temp: *mut ffi::PyObject,
+}
+
+impl Drop for Input {
+    fn drop(&mut self) {
+        if let Some(view) = self.held.as_mut() {
+            // SAFETY: obtained by PyObject_GetBuffer and not released yet;
+            // `loads` still holds the GIL when its `Input` is dropped.
+            unsafe { ffi::PyBuffer_Release(&mut **view) };
+        }
+        if !self.temp.is_null() {
+            // SAFETY: a strong reference owned by this Input; GIL held (as above).
+            unsafe { ffi::Py_DECREF(self.temp) };
+        }
+    }
 }
 
 pub(crate) unsafe fn get_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyResult<Input> {
     if ffi::PyUnicode_Check(obj) != 0 {
-        let mut size: ffi::Py_ssize_t = 0;
-        let p = ffi::PyUnicode_AsUTF8AndSize(obj, &mut size);
-        if p.is_null() {
-            ffi::PyErr_Clear();
-            return Err(raise_decode_error(py, "str is not valid UTF-8: surrogates not allowed", b"", 0));
-        }
-        return Ok(Input { ptr: p as *const u8, len: size as usize, utf8_valid: true, owned: None });
+        return str_input(py, obj);
     }
     if ffi::PyBytes_Check(obj) != 0 {
         return Ok(Input {
@@ -1624,6 +1880,8 @@ pub(crate) unsafe fn get_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyRes
             len: ffi::PyBytes_Size(obj) as usize,
             utf8_valid: false,
             owned: None,
+            held: None,
+            temp: ptr::null_mut(),
         });
     }
     if ffi::PyByteArray_Check(obj) != 0 {
@@ -1632,24 +1890,190 @@ pub(crate) unsafe fn get_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyRes
             len: ffi::PyByteArray_Size(obj) as usize,
             utf8_valid: false,
             owned: None,
+            held: None,
+            temp: ptr::null_mut(),
         });
     }
     if ffi::PyMemoryView_Check(obj) != 0 {
-        let mut view: ffi::Py_buffer = std::mem::zeroed();
-        if ffi::PyObject_GetBuffer(obj, &mut view, ffi::PyBUF_C_CONTIGUOUS) != 0 {
+        return memoryview_input(py, obj);
+    }
+    Err(input_type_error(py, obj))
+}
+
+/// UTF-8 bytes of a `str` input. ASCII strings (their data is the UTF-8),
+/// strings with a cached UTF-8 copy and short strings are read through
+/// `PyUnicode_AsUTF8AndSize`. Longer non-ASCII strings are encoded into a
+/// temporary `bytes` object (NUL-terminated, released after the parse):
+/// `PyUnicode_AsUTF8AndSize` would attach the UTF-8 copy to the caller's
+/// string for the rest of its life (+132% memory on non-ASCII input that
+/// outlives the call).
+unsafe fn str_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyResult<Input> {
+    #[cfg(not(Py_3_12))]
+    {
+        // Legacy (not ready) strings: the ASCII flag is only valid once ready.
+        #[allow(deprecated)]
+        if ffi::PyUnicode_READY(obj) != 0 {
             return Err(PyErr::fetch(py));
         }
-        // No terminator guarantee for arbitrary buffers: copy and append one.
-        let len = view.len as usize;
-        let mut owned = Vec::with_capacity(len + 1);
-        if len > 0 {
-            owned.extend_from_slice(std::slice::from_raw_parts(view.buf as *const u8, len));
-        }
-        owned.push(0);
-        ffi::PyBuffer_Release(&mut view);
-        return Ok(Input { ptr: owned.as_ptr(), len, utf8_valid: false, owned: Some(owned) });
     }
-    Err(PyTypeError::new_err("Input must be bytes, bytearray, memoryview, or str"))
+    let in_place = crate::compat::PyUnicode_IS_ASCII(obj) != 0
+        || compact_utf8_cached(obj)
+        // Small inputs (request bodies): CPython's cached copy is faster than
+        // a temporary bytes object (~12% at 300 B) and costs little memory.
+        || (ffi::PyUnicode_GET_LENGTH(obj) as usize) < STR_TEMP_MIN_CHARS;
+    let cached = if in_place {
+        let mut size: ffi::Py_ssize_t = 0;
+        let p = ffi::PyUnicode_AsUTF8AndSize(obj, &mut size);
+        if !p.is_null() {
+            return Ok(Input {
+                ptr: p as *const u8,
+                len: size as usize,
+                utf8_valid: true,
+                owned: None,
+                held: None,
+                temp: ptr::null_mut(),
+            });
+        }
+        true
+    } else {
+        false
+    };
+    let b = if cached { ptr::null_mut() } else { ffi::PyUnicode_AsUTF8String(obj) };
+    if b.is_null() {
+        // Lone surrogates (not encodable as UTF-8): same error as before.
+        ffi::PyErr_Clear();
+        return Err(raise_decode_error(py, "str is not valid UTF-8: surrogates not allowed", b"", 0));
+    }
+    Ok(Input {
+        ptr: ffi::PyBytes_AsString(b) as *const u8,
+        len: ffi::PyBytes_Size(b) as usize,
+        utf8_valid: true,
+        owned: None,
+        held: None,
+        temp: b,
+    })
+}
+
+/// Non-ASCII `str` inputs of at least this many characters are encoded into
+/// a temporary buffer instead of getting CPython's cached UTF-8 copy.
+const STR_TEMP_MIN_CHARS: usize = 4096;
+
+/// A compact non-ASCII str whose UTF-8 form CPython already cached.
+#[inline(always)]
+unsafe fn compact_utf8_cached(obj: *mut ffi::PyObject) -> bool {
+    crate::compat::PyUnicode_IS_COMPACT(obj) != 0 && !(*(obj as *mut ffi::PyCompactUnicodeObject)).utf8.is_null()
+}
+
+/// Copies a memoryview's bytes (in C order, like `mv.tobytes()`) and appends
+/// the NUL terminator `parse` needs. Accepts any layout: contiguous views are
+/// copied directly, strided (`mv[::2]`), Fortran-ordered or indirect
+/// (suboffsets) views are gathered with `PyBuffer_ToContiguous`. Requesting
+/// `PyBUF_C_CONTIGUOUS` instead raised `BufferError` for non-contiguous views.
+#[inline(never)]
+unsafe fn memoryview_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyResult<Input> {
+    let mut view: ffi::Py_buffer = std::mem::zeroed();
+    // FULL_RO = strides + suboffsets + format, read-only: the most general
+    // request, so every memoryview can satisfy it (a released one raises).
+    if ffi::PyObject_GetBuffer(obj, &mut view, ffi::PyBUF_FULL_RO) != 0 {
+        return Err(PyErr::fetch(py));
+    }
+    // `view.len` is the total byte size (product(shape) * itemsize) for any layout.
+    let len = view.len as usize;
+    if len >= MEMORYVIEW_IN_PLACE_MIN && ffi::PyBuffer_IsContiguous(&view, b'C' as std::os::raw::c_char) != 0 {
+        if let Some(input) = memoryview_in_place(obj, &view) {
+            return Ok(input.with_view(view));
+        }
+    }
+    let mut owned: Vec<u8> = Vec::with_capacity(len + 1);
+    if len > 0 {
+        if ffi::PyBuffer_IsContiguous(&view, b'C' as std::os::raw::c_char) != 0 {
+            owned.extend_from_slice(std::slice::from_raw_parts(view.buf as *const u8, len));
+        } else {
+            // SAFETY: `owned` has capacity for `len` bytes; on success
+            // PyBuffer_ToContiguous has written exactly `view.len` bytes.
+            // A raw `*mut` (which also coerces to `*const`): pyo3-ffi declares
+            // `src` as `*mut` before 3.11 and `*const` from 3.11 on; CPython
+            // only reads it.
+            let len_ssize = view.len;
+            let rc = ffi::PyBuffer_ToContiguous(
+                owned.as_mut_ptr() as *mut std::os::raw::c_void,
+                ptr::addr_of_mut!(view),
+                len_ssize,
+                b'C' as std::os::raw::c_char,
+            );
+            if rc != 0 {
+                ffi::PyBuffer_Release(&mut view);
+                return Err(PyErr::fetch(py));
+            }
+            owned.set_len(len);
+        }
+    }
+    owned.push(0);
+    ffi::PyBuffer_Release(&mut view);
+    Ok(Input { ptr: owned.as_ptr(), len, utf8_valid: false, owned: Some(owned), held: None, temp: ptr::null_mut() })
+}
+
+/// Below this size the copy is cheaper than looking up `memoryview.obj`.
+const MEMORYVIEW_IN_PLACE_MIN: usize = 4096;
+
+impl Input {
+    fn with_view(mut self, view: ffi::Py_buffer) -> Input {
+        self.held = Some(Box::new(view));
+        self
+    }
+}
+
+/// Zero-copy input for a C-contiguous memoryview whose bytes end exactly
+/// where the data of the `bytes`/`bytearray` it views ends: that object's
+/// data is followed by a NUL byte (CPython keeps both NUL-terminated), which
+/// `parse` needs. A view that ends earlier (`mv[:n]` of a larger buffer) is
+/// followed by arbitrary bytes and must be copied. The underlying object is
+/// read through the public `memoryview.obj` attribute (the struct layout is
+/// not part of the stable API). Returns None to fall back to the copy.
+#[cold]
+unsafe fn memoryview_in_place(mv: *mut ffi::PyObject, view: &ffi::Py_buffer) -> Option<Input> {
+    let base = ffi::PyObject_GetAttrString(mv, c"obj".as_ptr());
+    if base.is_null() {
+        ffi::PyErr_Clear();
+        return None;
+    }
+    let (data, size) = if ffi::PyBytes_Check(base) != 0 {
+        (ffi::PyBytes_AsString(base) as *const u8, ffi::PyBytes_Size(base))
+    } else if ffi::PyByteArray_Check(base) != 0 {
+        (ffi::PyByteArray_AsString(base) as *const u8, ffi::PyByteArray_Size(base))
+    } else {
+        (ptr::null(), 0)
+    };
+    // `view` holds an export of `mv`, which keeps `base` alive and (for a
+    // bytearray) unresizable, so dropping this reference is safe.
+    ffi::Py_DECREF(base);
+    if data.is_null() || size < 0 {
+        ffi::PyErr_Clear();
+        return None;
+    }
+    let buf = view.buf as *const u8;
+    let len = view.len as usize;
+    let end = data.add(size as usize);
+    if buf < data || buf.add(len) != end {
+        return None;
+    }
+    debug_assert_eq!(*end, 0);
+    Some(Input { ptr: buf, len, utf8_valid: false, owned: None, held: None, temp: ptr::null_mut() })
+}
+
+#[cold]
+#[inline(never)]
+fn input_type_error(py: Python<'_>, obj: *mut ffi::PyObject) -> PyErr {
+    use pyo3::types::PyTypeMethods;
+    // SAFETY: `obj` is the (borrowed, live) argument of `loads`.
+    let ty = unsafe { Bound::from_borrowed_ptr(py, obj) }.get_type();
+    let name = ty
+        .fully_qualified_name()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    PyTypeError::new_err(format!(
+        "loads() argument must be str, bytes, bytearray or memoryview, not {name}"
+    ))
 }
 
 #[inline(always)]
@@ -1691,7 +2115,15 @@ const MAX_POOLED_SCRATCH: usize = 1 << 20;
 /// Unless `buf` is empty, the byte just past its end (`buf.as_ptr() +
 /// buf.len()`) must be readable and 0 (every `Input` from `get_input`
 /// guarantees this). The parser peeks at `pos <= len` without bounds checks.
-pub(crate) unsafe fn parse(py: Python<'_>, buf: &[u8], utf8_valid: bool) -> PyResult<*mut ffi::PyObject> {
+// Its only caller is `entry::loads_impl`; inlining it there saves a call
+// and prologue per `loads` (~50 instructions, measurable on tiny documents).
+#[inline(always)]
+pub(crate) unsafe fn parse(
+    py: Python<'_>,
+    buf: &[u8],
+    utf8_valid: bool,
+    lenient: bool,
+) -> PyResult<*mut ffi::PyObject> {
     if buf.is_empty() {
         return Err(raise_decode_error(py, "input data is empty", buf, 0));
     }
@@ -1710,6 +2142,7 @@ pub(crate) unsafe fn parse(py: Python<'_>, buf: &[u8], utf8_valid: bool) -> PyRe
         stack: unsafe { std::mem::take(&mut *ptr::addr_of_mut!(STACK_POOL)) },
         scratch: unsafe { std::mem::take(&mut *ptr::addr_of_mut!(SCRATCH_POOL)) },
         error: std::cell::Cell::new(("", 0)),
+        lenient,
     };
     p.skip_ws();
     // Pause the cyclic GC while building the document (CPython < 3.12 only).

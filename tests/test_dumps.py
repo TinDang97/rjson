@@ -131,6 +131,297 @@ class TestStrings:
             rjson.dumps({"\ud800": 1})
 
 
+class TestDirectUtf8Encoding:
+    """dumps (bytes) encodes non-ASCII strings of >= 256 characters directly
+    from their UCS2/UCS4 data (Latin-1 via a temporary bytes object) instead
+    of through CPython's cached UTF-8 copy, which would stay attached to the
+    string. Shorter strings still use the cache. Output must be identical."""
+
+    UNITS = [
+        "é", "ÿ", "Ж", "\u07ff", "\u0800", "日", "\uac00", "\uffff", "\ue000",
+        "😀", "\U0010ffff", "a", " ", '"', "\\", "\n", "\x00", "\x1f", "\x7f",
+    ]
+
+    @staticmethod
+    def expected(obj):
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
+
+    @pytest.mark.parametrize("n", [255, 256, 257, 300, 1000, 5000])
+    def test_lengths_around_threshold(self, n):
+        for base in ("日本語のテキスト ", "héllo wörld 😀 ", "Café déjà vu ", "Быстрый JSON ", "한국어 텍스트 "):
+            s = (base * (n // len(base) + 1))[:n]
+            for obj in (s, [s, {"k": s}], {s: s}):
+                assert rjson.dumps(obj) == self.expected(obj)
+
+    def test_every_unit_at_every_offset(self):
+        # Each character kind (incl. escapes) at every offset of the 8-unit
+        # ASCII blocks, in strings long enough for the direct encoder.
+        for u in self.UNITS:
+            for filler in ("a", "日", "😀"):
+                for off in range(0, 20):
+                    s = filler * off + u + "x" * 300 + u + "é"
+                    assert rjson.dumps(s) == self.expected(s), (u, filler, off)
+
+    def test_random_strings(self):
+        import random
+
+        rng = random.Random(21)
+        pool = self.UNITS + ["b", "c", "ü", "中", "𝄞"]
+        for _ in range(500):
+            s = "".join(rng.choice(pool) for _ in range(rng.randrange(256, 1200)))
+            assert rjson.dumps(s) == self.expected(s)
+
+    @pytest.mark.parametrize("n", [10, 300])
+    @pytest.mark.parametrize("filler", ["日", "😀", "é"])
+    def test_lone_surrogate_still_raises(self, n, filler):
+        s = filler * n + "\ud800" + filler
+        with pytest.raises(UnicodeEncodeError):
+            rjson.dumps(s)
+        with pytest.raises(UnicodeEncodeError):
+            rjson.dumps({"k": [s]})
+        assert rjson.dumps_str(s)  # str output passes surrogates through
+
+    def test_long_strings_get_no_utf8_cache(self):
+        # sys.getsizeof counts CPython's attached UTF-8 copy, if any.
+        for s in ("日本語テキスト " * 60, "héllo 😀 " * 60, "Café déjà vu " * 40):
+            before = sys.getsizeof(s)
+            rjson.dumps([s, {"k": s}])
+            assert sys.getsizeof(s) == before
+
+    def test_str_subclass_and_dumps_str(self):
+        class S(str):
+            pass
+
+        s = S("日本語 😀 é" * 60)
+        assert rjson.dumps(s) == self.expected(str(s))
+        assert rjson.dumps_str([s]) == json.dumps([str(s)], ensure_ascii=False, separators=(",", ":"))
+
+
+class TestDefaultHook:
+    """dumps(obj, /, *, default=None) calls default(o) for each object it
+    cannot serialize and serializes the result instead, like json.dumps and
+    orjson.dumps."""
+
+    @staticmethod
+    def expected(obj, default):
+        return json.dumps(obj, default=default, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def conv(o):
+        import dataclasses
+        import datetime
+        import decimal
+        import uuid
+
+        if isinstance(o, (datetime.date, datetime.time)):
+            return o.isoformat()
+        if isinstance(o, (uuid.UUID, decimal.Decimal)):
+            return str(o)
+        if isinstance(o, (set, frozenset)):
+            return sorted(o)
+        if isinstance(o, bytes):
+            return o.decode("latin-1")
+        if dataclasses.is_dataclass(o):
+            return dataclasses.asdict(o)
+        if hasattr(o, "__dict__"):
+            return vars(o)
+        raise TypeError(f"no conversion for {type(o).__name__}")
+
+    def sample(self):
+        import dataclasses
+        import datetime
+        import decimal
+        import uuid
+
+        @dataclasses.dataclass
+        class Point:
+            x: int
+            y: float
+            tags: set
+
+        class Obj:
+            def __init__(self):
+                self.name = "é日😀"
+                self.when = datetime.date(2024, 5, 1)
+
+        return {
+            "dt": datetime.datetime(2024, 1, 2, 3, 4, 5, 678),
+            "u": uuid.UUID(int=7),
+            "d": decimal.Decimal("10.50"),
+            "s": {3, 1, 2},
+            "b": b"raw",
+            "p": Point(1, 2.5, {"b", "a"}),
+            "o": Obj(),
+            "list": [datetime.time(1, 2), (uuid.UUID(int=1), [decimal.Decimal("0.1")])],
+            "plain": [1, "x", None, True, 2.5],
+        }
+
+    def test_matches_json(self):
+        obj = self.sample()
+        want = self.expected(obj, self.conv)
+        assert rjson.dumps(obj, default=self.conv) == want.encode()
+        assert rjson.dumps_bytes(obj, default=self.conv) == want.encode()
+        assert rjson.dumps_str(obj, default=self.conv) == want
+
+    def test_default_none_or_absent(self):
+        import decimal
+
+        assert rjson.dumps({"a": 1}, default=None) == b'{"a":1}'
+        for kw in ({}, {"default": None}):
+            with pytest.raises(rjson.JSONEncodeError, match="not JSON serializable"):
+                rjson.dumps(decimal.Decimal("1.5"), **kw)
+
+    def test_not_called_for_supported_types(self):
+        calls = []
+
+        def d(o):
+            calls.append(o)
+
+        obj = {"a": [1, 2.5, "s", None, True, (1, 2)], "b": {"c": 2**100}}
+        assert rjson.dumps(obj, default=d) == json.dumps(obj, separators=(",", ":")).encode()
+        assert calls == []
+
+    def test_chained_results(self):
+        # default's result is itself unsupported: default is called again.
+        class A:
+            pass
+
+        class B:
+            pass
+
+        def d(o):
+            return B() if isinstance(o, A) else "b"
+
+        assert rjson.dumps([A(), {"k": A()}], default=d) == b'["b",{"k":"b"}]'
+
+    def test_non_converging_default_hits_depth_limit(self):
+        with pytest.raises(rjson.JSONEncodeError, match="Maximum nesting depth"):
+            rjson.dumps(object(), default=lambda o: o)
+        with pytest.raises(TypeError):
+            rjson.dumps([object()], default=lambda o: [o])
+
+    def test_exceptions_propagate_unchanged(self):
+        class Boom(Exception):
+            pass
+
+        def d(o):
+            raise Boom("no")
+
+        with pytest.raises(Boom, match="no"):
+            rjson.dumps({"a": [object()]}, default=d)
+        with pytest.raises(Boom):
+            rjson.dumps_str([1, object()], default=d)
+
+    def test_result_errors_are_reported(self):
+        # Errors inside a temporary default result: NaN, non-str keys (the
+        # message names the key's type, which only lives in that result).
+        class K:
+            pass
+
+        with pytest.raises(rjson.JSONEncodeError, match="non-finite"):
+            rjson.dumps(object(), default=lambda o: float("nan"))
+        with pytest.raises(rjson.JSONEncodeError, match=r"not \S*\bK\b"):
+            rjson.dumps(object(), default=lambda o: {K(): 1})
+        with pytest.raises(UnicodeEncodeError):
+            rjson.dumps(object(), default=lambda o: "\ud800")
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            lambda: rjson.dumps(),
+            lambda: rjson.dumps(1, 2),
+            lambda: rjson.dumps(1, 2, default=str),
+            lambda: rjson.dumps(1, foo=1),
+            lambda: rjson.dumps(1, default=3),
+            lambda: rjson.dumps_str(1, default="str"),
+            lambda: rjson.dumps(obj=1),
+        ],
+    )
+    def test_argument_errors(self, call):
+        with pytest.raises(TypeError):
+            call()
+
+    @staticmethod
+    def _raise_type_error(o):
+        raise TypeError("unsupported")
+
+    def test_no_reference_leaks(self):
+        import decimal
+
+        d = decimal.Decimal("1.5")
+        conv = self.conv
+        obj = {"a": [d, d], "b": d}
+        for f in (rjson.dumps, rjson.dumps_str):
+            f(obj, default=conv)
+            before = (sys.getrefcount(d), sys.getrefcount(conv), sys.getrefcount(obj))
+            for _ in range(1000):
+                f(obj, default=conv)
+                with pytest.raises(TypeError):
+                    f([object()], default=self._raise_type_error)
+            assert (sys.getrefcount(d), sys.getrefcount(conv), sys.getrefcount(obj)) == before
+
+    # --- default mutating the containers being serialized ------------------
+
+    def test_default_clears_parent_list(self):
+        # The dict being iterated loses its last other reference while
+        # default runs: it must stay alive until the serializer is done.
+        for _ in range(200):
+            outer = [{"a": object(), "b": list(range(50)), "c": "x" * 100}]
+
+            def d(o, outer=outer):
+                outer.clear()
+                return "gone"
+
+            out = rjson.dumps(outer, default=d)
+            assert json.loads(out)[0]["a"] == "gone"
+
+    def test_default_resizes_dict_being_iterated(self):
+        dct = {"a": object(), "b": 2}
+
+        def grow(o):
+            dct.update({f"k{i}": i for i in range(100)})
+            return 1
+
+        with pytest.raises(RuntimeError, match="changed size"):
+            rjson.dumps(dct, default=grow)
+
+        dct2 = {"a": object(), "b": 2, "c": 3}
+
+        def shrink(o):
+            dct2.clear()
+            return 1
+
+        with pytest.raises(RuntimeError, match="changed size"):
+            rjson.dumps(dct2, default=shrink)
+
+    def test_default_mutates_list_being_iterated(self):
+        # Lists are re-read on every item: appended items are serialized,
+        # removed ones are not; never a crash.
+        lst = [object(), 1, 2]
+
+        def d(o):
+            lst.append(3)
+            return 0
+
+        out = json.loads(rjson.dumps(lst, default=d))
+        assert out[:3] == [0, 1, 2]
+        lst2 = [object(), 1, 2, 3]
+
+        def d2(o):
+            del lst2[1:]
+            return 0
+
+        assert json.loads(rjson.dumps(lst2, default=d2)) == [0]
+
+    def test_default_calls_rjson_reentrantly(self):
+        def d(o):
+            return json.loads(rjson.dumps({"inner": [1, 2]}))
+
+        assert rjson.dumps([object(), {"x": object()}], default=d) == (
+            b'[{"inner":[1,2]},{"x":{"inner":[1,2]}}]'
+        )
+
+
 class TestNumbers:
     def test_int_boundaries(self):
         vals = [0, 1, -1, 9, 10, 99, 100, 999, 1000, 9999, 10000, 123456, 2**30 - 1, 2**30, -(2**30),
@@ -329,10 +620,144 @@ class TestSubclasses:
 
     def test_unsupported(self):
         for f in (rjson.dumps_str, rjson.dumps):
-            with pytest.raises(ValueError, match="Unsupported Python type"):
+            with pytest.raises(ValueError, match="Type is not JSON serializable"):
                 f([1, {"a": object()}])
             with pytest.raises(ValueError, match="keys must be strings"):
                 f({1: 2})
+
+
+def _circular():
+    a = []
+    a.append(a)
+    return a
+
+
+def _nest(n):
+    x = []
+    for _ in range(n):
+        x = [x]
+    return x
+
+
+class _Custom:
+    pass
+
+
+class _DictSub(dict):
+    pass
+
+
+class _ListSub(list):
+    pass
+
+
+# (value, message fragment) for every serialization failure class.
+ENCODE_FAILURES = [
+    (_Custom(), "Type is not JSON serializable: test_dumps._Custom"),
+    (object(), "Type is not JSON serializable: object"),
+    ({1, 2}, "Type is not JSON serializable: set"),
+    (b"bytes", "Type is not JSON serializable: bytes"),
+    (1j, "Type is not JSON serializable: complex"),
+    ({1: "v"}, "keys must be strings for JSON serialization, not int"),
+    ({None: "v"}, "keys must be strings for JSON serialization, not NoneType"),
+    ({(1,): "v"}, "keys must be strings for JSON serialization, not tuple"),
+    (float("nan"), "non-finite float: nan"),
+    (float("inf"), "non-finite float: inf"),
+    (float("-inf"), "non-finite float: -inf"),
+    (_circular(), "Maximum nesting depth"),
+    (_nest(254), "Maximum nesting depth"),
+]
+ENCODERS = [rjson.dumps, rjson.dumps_str, rjson.dumps_bytes]
+
+
+class TestEncodeErrorContract:
+    """Every dumps failure raises rjson.JSONEncodeError, a subclass of both
+    TypeError (what json/orjson raise) and ValueError (what rjson raised
+    before), so either kind of existing ``except`` clause catches it."""
+
+    def test_type(self):
+        E = rjson.JSONEncodeError
+        assert issubclass(E, TypeError)
+        assert issubclass(E, ValueError)
+        assert E.__module__ == "rjson"
+        assert E.__name__ == "JSONEncodeError"
+        assert E.__doc__
+
+    @pytest.mark.parametrize("f", ENCODERS, ids=lambda f: f.__name__)
+    @pytest.mark.parametrize("value,msg", ENCODE_FAILURES, ids=lambda v: type(v).__name__)
+    def test_every_failure_class(self, f, value, msg):
+        with pytest.raises(rjson.JSONEncodeError) as ei:
+            f(value)
+        assert isinstance(ei.value, TypeError)
+        assert isinstance(ei.value, ValueError)
+        assert type(ei.value) is rjson.JSONEncodeError
+        assert msg in str(ei.value)
+
+    @pytest.mark.parametrize("f", ENCODERS, ids=lambda f: f.__name__)
+    def test_except_typeerror_and_valueerror_both_catch(self, f):
+        # The json/orjson migration case: handlers written as `except TypeError`.
+        for exc_type in (TypeError, ValueError):
+            try:
+                f({"when": object()})
+            except exc_type:
+                pass
+            else:
+                pytest.fail("no exception raised")
+
+    @pytest.mark.parametrize("f", ENCODERS, ids=lambda f: f.__name__)
+    @pytest.mark.parametrize("value,msg", ENCODE_FAILURES[:9], ids=lambda v: type(v).__name__)
+    def test_nested_and_subclass_containers_propagate_same_type(self, f, value, msg):
+        # Deep inside containers, after output was already written (incl.
+        # non-ASCII strings, which dumps_str keeps as pending segments), and
+        # below the subclass code paths.
+        for wrapped in (
+            ["é" * 50, "x" * 5000, {"k": [1, 2.5, value]}],
+            {"a": "😀", "b": [{"c": value}]},
+            _DictSub(z="é", y=_ListSub([1, value])),
+            (1, "é", [value]),
+        ):
+            with pytest.raises(rjson.JSONEncodeError) as ei:
+                f(wrapped)
+            assert msg in str(ei.value)
+
+    def test_failure_does_not_leak_pending_strings(self):
+        # dumps_str holds references to non-ASCII source strings until the
+        # result is built; a failure after them must release them.
+        s = "é" * 100 + "x"
+        before = sys.getrefcount(s)
+        for _ in range(1000):
+            with pytest.raises(rjson.JSONEncodeError):
+                rjson.dumps_str([s, s, {"k": s, "bad": object()}])
+        assert sys.getrefcount(s) == before
+        # And the serializer still works afterwards.
+        assert rjson.dumps_str([s]) == ref([s])
+
+    def test_key_error_names_subclass_key_type(self):
+        class K(int):
+            pass
+
+        with pytest.raises(rjson.JSONEncodeError, match="not test_dumps.*K"):
+            rjson.dumps(_DictSub({K(1): 2}))
+
+    def test_error_pickles(self):
+        # Exceptions cross process boundaries (multiprocessing, Celery):
+        # the class must be importable as rjson.JSONEncodeError.
+        import pickle
+
+        with pytest.raises(rjson.JSONEncodeError) as ei:
+            rjson.dumps(object())
+        e = pickle.loads(pickle.dumps(ei.value))
+        assert type(e) is rjson.JSONEncodeError
+        assert e.args == ei.value.args
+
+    @pytest.mark.parametrize("f", [rjson.dumps, rjson.dumps_bytes], ids=lambda f: f.__name__)
+    def test_lone_surrogate_stays_unicode_encode_error(self, f):
+        # Not a JSONEncodeError: the UTF-8 codec error propagates unchanged
+        # (UnicodeEncodeError is itself a ValueError subclass).
+        with pytest.raises(UnicodeEncodeError) as ei:
+            f(["ok", "\ud800"])
+        assert not isinstance(ei.value, rjson.JSONEncodeError)
+        assert isinstance(ei.value, ValueError)
 
 
 class TestRecursion:
@@ -371,6 +796,122 @@ class TestOutputBuffer:
     def test_top_level_scalars(self):
         for obj in (None, True, False, 0, -5, "", "x", "é", [], {}, ()):
             assert both(obj) == ref(obj)
+
+    @staticmethod
+    def _peak_alloc(fn, obj):
+        """Peak traced allocation (bytes) while running fn(obj)."""
+        import tracemalloc
+
+        tracemalloc.start()
+        try:
+            tracemalloc.reset_peak()
+            base, _ = tracemalloc.get_traced_memory()
+            out = fn(obj)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        return peak - base, out
+
+    @pytest.mark.parametrize("fn", [rjson.dumps, rjson.dumps_str], ids=["bytes", "str"])
+    def test_small_after_one_big_does_not_allocate_big(self, fn):
+        # The size hint used to be the previous result's size, so a 150 B
+        # response right after an 800 KB page allocated (and then shrink-
+        # copied out of) an 800 KB buffer.
+        big = ["x" * 100] * 8000
+        small = {"ok": True, "id": 12345, "status": "created"}
+        fn(small)
+        fn(big)
+        peak, out = self._peak_alloc(fn, small)
+        assert len(out) == len(ref(small))
+        assert peak < 16 * 1024
+
+    @pytest.mark.parametrize("fn", [rjson.dumps, rjson.dumps_str], ids=["bytes", "str"])
+    def test_repeated_big_is_presized(self, fn):
+        # A steady workload still gets an exactly sized buffer: no doubling
+        # growth (peak up to ~2x) once the size was seen twice in a row.
+        big = ["x" * 100] * 8000
+        for obj in ({"a": 1}, big, big):
+            fn(obj)
+        peak, out = self._peak_alloc(fn, big)
+        assert peak < len(out) * 1.25
+
+    @staticmethod
+    def _in_fresh_thread(func):
+        """Run func in a new thread: the size history is thread-local, so it starts empty."""
+        import threading
+
+        result, errors = [], []
+
+        def run():
+            try:
+                result.append(func())
+            except BaseException as exc:  # re-raised in the caller
+                errors.append(exc)
+
+        t = threading.Thread(target=run)
+        t.start()
+        t.join()
+        if errors:
+            raise errors[0]
+        return result[0]
+
+    @pytest.mark.parametrize(
+        "n_items",
+        # Outputs just below/above the 1 MiB large-growth threshold, a few MB
+        # (inside the 32 MiB reservation) and ~40 MB (grows past it).
+        [10_300, 10_500, 50_000, 400_000],
+    )
+    def test_growth_across_large_reserve_boundaries(self, n_items):
+        # Escapes make the worst-case reservation per string 6x its length.
+        obj = [f'item {i} "quoted" \\ tab\t é 😀' for i in range(n_items)]
+        expected = ref(obj)
+
+        def run():
+            return rjson.dumps(obj), rjson.dumps_str(obj)
+
+        out_bytes, out_str = self._in_fresh_thread(run)
+        assert out_bytes == expected.encode()
+        assert out_str == expected
+
+    def test_periodic_big_results_among_small_ones(self):
+        # The first growth jumps to the recent peak size: check jumps that are
+        # large enough, too small (fall back to doubling) and much too large.
+        small = {"ok": True, "items": [1, 2, 3]}
+        sizes = [2_000, 20_000, 2_000, 200_000, 20_000, 2_000, 400_000, 50]
+
+        def run():
+            outs = []
+            for n in sizes:
+                for _ in range(3):
+                    outs.append((small, rjson.dumps(small)))
+                big = ["y" * 50 + str(i) for i in range(n)]
+                outs.append((big, rjson.dumps(big)))
+                outs.append((big, rjson.dumps_str(big).encode()))
+            return outs
+
+        for obj, out in self._in_fresh_thread(run):
+            assert out == ref(obj).encode()
+
+    def test_large_result_does_not_keep_the_reservation(self):
+        # Growth past 1 MiB reserves 32 MiB (mmapped, pages untouched); the
+        # finished result must be shrunk back to about its length.
+        import tracemalloc
+
+        obj = ["z" * 100] * 12_000  # ~1.2 MB, grown from an empty size history
+
+        def run():
+            tracemalloc.start()
+            try:
+                base, _ = tracemalloc.get_traced_memory()
+                out = rjson.dumps(obj)
+                current, _ = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+            return current - base, out
+
+        held, out = self._in_fresh_thread(run)
+        assert out == ref(obj).encode()
+        assert held < len(out) * 1.25
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="glibc malloc behaviour")
