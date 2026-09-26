@@ -96,7 +96,7 @@ rjson.dumps({"price": Decimal("9.99")}, default=str)             # convert the r
 
 | name | kind | notes |
 |---|---|---|
-| `loads(data)` | function → object | `data`: `str`, `bytes`, `bytearray` or `memoryview` (any layout) |
+| `loads(data, *, lenient=False)` | function → object | `data`: `str`, `bytes`, `bytearray` or `memoryview` (any layout) |
 | `dumps(obj, *, default=None, passthrough=0, non_str_keys=False)` | function → `bytes` | compact UTF-8 JSON, like `orjson.dumps` |
 | `dumps_str(obj, *, default=None, passthrough=0, non_str_keys=False)` | function → `str` | like `json.dumps(obj, ensure_ascii=False, separators=(",", ":"))` |
 | `dumps_bytes(...)` | function → `bytes` | alias of `dumps`, kept for compatibility |
@@ -107,6 +107,11 @@ rjson.dumps({"price": Decimal("9.99")}, default=str)             # convert the r
 
 The wheel ships type stubs (`py.typed`), so mypy and pyright check calls to rjson.
 
+- **`lenient=True` (`loads`):** accepts everything `json.loads` accepts, with the same
+  result: `NaN`/`Infinity`/`-Infinity`, a UTF-8 BOM on bytes and numbers overflowing to
+  `inf` are parsed natively (no speed cost); lone surrogates (`"\ud83d"`, sent by
+  JavaScript clients that cut an emoji in half), UTF-16/UTF-32 bytes and nesting deeper
+  than 1024 go through `json.loads`. The default stays strict, like orjson.
 - **Types:** `dict` (str keys), `list`, `tuple`, `str`, `int` (any size), `float`, `bool`,
   `None`, and their subclasses (`IntEnum`, `str` enums, `OrderedDict`, `namedtuple`, …).
 - **Native types, byte-identical to orjson:** `datetime` (RFC 3339: `2024-05-01T09:30:00`,
@@ -164,7 +169,6 @@ What does **not** carry over yet, and how to handle it:
 | feature | status | workaround |
 |---|---|---|
 | NaN / Infinity | by design | `dumps` raises (`json` writes `NaN`, orjson `null`) |
-| lenient `loads` (BOM, `NaN`, lone `"\ud800"`) | [#7](https://github.com/TinDang97/rjson/issues/7) | rejected, like orjson; `json` accepts them |
 | `indent`, `sort_keys` | planned | use `json` for human-facing output |
 | floats below 1e-4 | by design | `1e-7`, same as orjson; `json` writes `1e-07` (same value, different bytes) |
 
@@ -218,7 +222,7 @@ bodies, NDJSON logs, 100 MB files, cache blobs) rjson is faster on most shapes (
 
 **Is it safe?**
 It checks the exact type of every value, reserves the worst-case output size before
-writing, and version-gates every CPython internal it uses, with self-tests at import. 978
+writing, and version-gates every CPython internal it uses, with self-tests at import. 1052
 tests, fuzzing against `json`, and 0 mismatches against orjson on all benchmark workloads.
 It is still 0.x: pin the version.
 
@@ -246,8 +250,9 @@ A `str` containing emoji must store every character in 4 bytes, and CJK text in 
 UTF-8 `bytes` stay compact.
 
 **Why does my previously accepted request now fail with a 422?**
-`loads` rejects a UTF-8 BOM, `NaN`/`Infinity` literals and escaped lone surrogates, like
-orjson does (the stdlib accepts them). See [#7](https://github.com/TinDang97/rjson/issues/7).
+By default `loads` rejects a UTF-8 BOM, `NaN`/`Infinity` literals and escaped lone
+surrogates, like orjson does (the stdlib accepts them). Pass `lenient=True` to accept
+exactly what `json.loads` accepts.
 
 </details>
 
@@ -310,7 +315,7 @@ maturin develop --release && python -m pytest tests -q
 
 ## Roadmap
 
-- Options: lenient `loads` ([#7](https://github.com/TinDang97/rjson/issues/7)), `indent`, `sort_keys`
+- Options: `indent`, `sort_keys`
 - Streaming decoder/encoder for async I/O; free-threading and subinterpreter support ([docs/ASYNC.md](docs/ASYNC.md#roadmap))
 - Performance: NEON kernels for aarch64
 - First PyPI release as `pyrjson`

@@ -30,8 +30,13 @@ PASSTHROUGH_ENUM: Final[int]  # enum.Enum members (int/str/float mix-ins stay va
 class JSONEncodeError(TypeError, ValueError):
     """Raised by dumps/dumps_str/dumps_bytes when an object cannot be serialized."""
 
-def loads(data: str | bytes | bytearray | memoryview, /) -> Any:
-    """Deserialize JSON to Python objects; raises JSONDecodeError (a ValueError)."""
+def loads(data: str | bytes | bytearray | memoryview, /, *, lenient: bool = False) -> Any:
+    """Deserialize JSON to Python objects; raises JSONDecodeError (a ValueError).
+
+    lenient: also accept what json.loads accepts (NaN/Infinity, a UTF-8 BOM on
+    bytes, numbers overflowing to inf, lone surrogates, UTF-16/32 bytes); the
+    result then equals json.loads's.
+    """
 
 def dumps(
     obj: Any,

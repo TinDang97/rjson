@@ -168,6 +168,10 @@ struct Parser<'a> {
     scratch: Vec<u8>,
     /// Message and byte offset of the first error.
     error: std::cell::Cell<(&'static str, usize)>,
+    /// `loads(..., lenient=True)`: also accept `NaN`, `Infinity`,
+    /// `-Infinity` and numbers that overflow to infinity, as `json.loads`
+    /// does. Only checked on paths that are errors in strict mode.
+    lenient: bool,
 }
 
 #[inline(always)]
@@ -280,8 +284,38 @@ impl<'a> Parser<'a> {
             b't' => self.parse_literal(b"true", unsafe { ffi::Py_True() }),
             b'f' => self.parse_literal(b"false", unsafe { ffi::Py_False() }),
             b'n' => self.parse_literal(b"null", unsafe { ffi::Py_None() }),
-            _ => self.err_unexpected("unexpected character, expected a JSON value"),
+            _ => self.parse_other(),
         }
+    }
+
+    /// Not a JSON value: an error, or in lenient mode `NaN`/`Infinity`.
+    #[cold]
+    #[inline(never)]
+    fn parse_other(&mut self) -> PResult<*mut ffi::PyObject> {
+        if self.lenient {
+            if let Some(r) = self.nonfinite_literal(self.pos, false) {
+                return r;
+            }
+        }
+        self.err_unexpected("unexpected character, expected a JSON value")
+    }
+
+    /// Lenient mode: `NaN` or `Infinity` at `at` (after a `-` when `neg`;
+    /// `-NaN` is not accepted, as in `json.loads`). None if neither.
+    #[cold]
+    #[inline(never)]
+    fn nonfinite_literal(&mut self, at: usize, neg: bool) -> Option<PResult<*mut ffi::PyObject>> {
+        let rest = &self.buf[at.min(self.buf.len())..];
+        let (len, v) = if !neg && rest.starts_with(b"NaN") {
+            (3, f64::NAN)
+        } else if rest.starts_with(b"Infinity") {
+            (8, if neg { f64::NEG_INFINITY } else { f64::INFINITY })
+        } else {
+            return None;
+        };
+        self.pos = at + len;
+        let r = unsafe { ffi::PyFloat_FromDouble(v) };
+        Some(if r.is_null() { self.err_oom() } else { Ok(r) })
     }
 
     #[inline(always)]
@@ -897,6 +931,11 @@ impl<'a> Parser<'a> {
         } else if first.is_ascii_digit() {
             self.digits(&mut i, &mut mant, &mut nd);
         } else {
+            if self.lenient && neg {
+                if let Some(r) = self.nonfinite_literal(i, true) {
+                    return r; // -Infinity
+                }
+            }
             return self.err_num_digit(i, "no digit after sign");
         }
         let c = self.peek_at(i);
@@ -993,7 +1032,7 @@ impl<'a> Parser<'a> {
             };
             if let Some(v) = v {
                 if v.is_infinite() {
-                    return self.err("number is infinity when parsed as double", start);
+                    return self.infinite_number(neg, start);
                 }
                 let r = unsafe { ffi::PyFloat_FromDouble(if neg { -v } else { v }) };
                 if r.is_null() {
@@ -1003,6 +1042,21 @@ impl<'a> Parser<'a> {
             }
         }
         self.parse_float_slow(start, i)
+    }
+
+    /// A number overflowing to infinity: an error, or `±inf` in lenient
+    /// mode (as `json.loads` gives). Cold, so the check stays off the hot path.
+    #[cold]
+    #[inline(never)]
+    fn infinite_number(&self, neg: bool, start: usize) -> PResult<*mut ffi::PyObject> {
+        if !self.lenient {
+            return self.err("number is infinity when parsed as double", start);
+        }
+        let r = unsafe { ffi::PyFloat_FromDouble(if neg { f64::NEG_INFINITY } else { f64::INFINITY }) };
+        if r.is_null() {
+            return self.err_oom();
+        }
+        Ok(r)
     }
 
     #[cold]
@@ -1019,7 +1073,7 @@ impl<'a> Parser<'a> {
     fn parse_float_slow(&self, start: usize, end: usize) -> PResult<*mut ffi::PyObject> {
         let s = &self.buf[start..end];
         match fast_float::parse::<f64, _>(s) {
-            Ok(v) if v.is_finite() => unsafe { Ok(ffi::PyFloat_FromDouble(v)) },
+            Ok(v) if v.is_finite() || self.lenient => unsafe { Ok(ffi::PyFloat_FromDouble(v)) },
             Ok(_) => self.err("number is infinity when parsed as double", start),
             Err(_) => self.err("invalid number", start),
         }
@@ -2061,7 +2115,15 @@ const MAX_POOLED_SCRATCH: usize = 1 << 20;
 /// Unless `buf` is empty, the byte just past its end (`buf.as_ptr() +
 /// buf.len()`) must be readable and 0 (every `Input` from `get_input`
 /// guarantees this). The parser peeks at `pos <= len` without bounds checks.
-pub(crate) unsafe fn parse(py: Python<'_>, buf: &[u8], utf8_valid: bool) -> PyResult<*mut ffi::PyObject> {
+// Its only caller is `entry::loads_impl`; inlining it there saves a call
+// and prologue per `loads` (~50 instructions, measurable on tiny documents).
+#[inline(always)]
+pub(crate) unsafe fn parse(
+    py: Python<'_>,
+    buf: &[u8],
+    utf8_valid: bool,
+    lenient: bool,
+) -> PyResult<*mut ffi::PyObject> {
     if buf.is_empty() {
         return Err(raise_decode_error(py, "input data is empty", buf, 0));
     }
@@ -2080,6 +2142,7 @@ pub(crate) unsafe fn parse(py: Python<'_>, buf: &[u8], utf8_valid: bool) -> PyRe
         stack: unsafe { std::mem::take(&mut *ptr::addr_of_mut!(STACK_POOL)) },
         scratch: unsafe { std::mem::take(&mut *ptr::addr_of_mut!(SCRATCH_POOL)) },
         error: std::cell::Cell::new(("", 0)),
+        lenient,
     };
     p.skip_ws();
     // Pause the cyclic GC while building the document (CPython < 3.12 only).

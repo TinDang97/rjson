@@ -202,6 +202,7 @@ Numbers: [docs/PRODUCTION_READINESS.md](PRODUCTION_READINESS.md#performance-fixe
 - **Feature parity.** `default=` is done (entry is `METH_FASTCALL|METH_KEYWORDS`; per-call cost unchanged, containers +~8 instructions for the mode check). Native datetime/date/time, UUID, dataclass and Enum are done (issue #5, `src/native.rs`), resolved lazily from `sys.modules` (no import cost), with no change in instructions for documents without them. orjson also offers indent, sorted keys and numpy. Add them as further hand-parsed keyword names.
 - **Native types vs orjson** (CPython 3.13, rjson time ÷ orjson time, same process, 1,000 values unless noted): naive datetimes 0.92, UTC datetimes 0.29 (one-entry offset cache for `datetime.timezone`), `ZoneInfo` datetimes 0.45 (its C `utcoffset` called through the method descriptor), dates 0.97, UUIDs 1.04 (slot read with `PyMember_GetOne`, digits read inline, table hex), Enums 0.41, 500 API rows with UUID/datetime/Enum 0.75–0.80, 500 dataclasses 0.70. The FastAPI example's `RJSONResponse` on 100 such rows went from ~700 µs (fallback through `jsonable_encoder`) to 14 µs.
 - **`non_str_keys=True` vs orjson `OPT_NON_STR_KEYS`** (rjson time ÷ orjson time, CPython 3.13): 1,000 int keys 0.49, a `Counter` of ints 0.45, records with small int-keyed maps 0.52–0.55, 1,000 float keys 1.14–1.20, UUID keys 1.45, date keys 1.53; `json.dumps` is 7–10× slower than rjson where it accepts the keys. Float keys use `repr` text (as `json`), built from zmij's digits; `PyOS_double_to_string` was 5–6× slower than orjson. With the option off, instruction counts are unchanged on the corpora (tiny calls +6 instructions for the options struct).
+- **`loads(..., lenient=True)`** (issue #7): `NaN`/`Infinity`, a UTF-8 BOM and overflow to `inf` are parsed natively, only on paths that are errors in strict mode (5,000 rows with `NaN`/`Infinity`: 1.9× faster than `json.loads`, the same time as strict rjson on numbers). Lone surrogates, UTF-16/32 and nesting beyond 1024 go through `json.loads`. `loads` became `METH_FASTCALL | METH_KEYWORDS` for the keyword: +29 instructions per call on tiny documents (≈1.8% of a 5-byte `loads`); the corpora are within layout noise (twitter +0.5% instructions, canada +0.05%; an unrelated one-line change moved twitter by 3%).
 
 ## 5. Decisions (resolved)
 
@@ -217,7 +218,7 @@ Numbers: [docs/PRODUCTION_READINESS.md](PRODUCTION_READINESS.md#performance-fixe
 uv venv .venv -p 3.11 && . .venv/bin/activate
 uv pip install maturin orjson pytest
 maturin develop --release
-python -m pytest tests -q                      # 978 tests
+python -m pytest tests -q                      # 1052 tests
 benches/fetch_corpus.sh                        # corpora -> benches/data/ (sha256-pinned)
 python benches/corpus_benchmark.py [--json] [--output-json results.json]
 python benches/make_charts.py results.json     # README charts -> docs/img/

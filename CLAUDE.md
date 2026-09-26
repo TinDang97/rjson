@@ -4,7 +4,7 @@
 
 **rjson** is a JSON library for Python written in Rust directly against the CPython C API (PyO3 is used only for module setup and the entry-point trampoline). Goal: beat orjson on every metric while staying correct on every supported CPython version.
 
-- API: `loads(str | bytes | bytearray | memoryview)`, `dumps(obj, *, default=None, passthrough=0, non_str_keys=False) -> bytes` (like orjson), `dumps_str(...) -> str`, `dumps_bytes` = alias of `dumps`; `PASSTHROUGH_DATETIME/_UUID/_DATACLASS/_ENUM` flags; `JSONDecodeError` (= json's), `JSONEncodeError(TypeError, ValueError)`, `__version__`; stub `rjson.pyi` (maturin installs it as `rjson/__init__.pyi` + `py.typed`)
+- API: `loads(str | bytes | bytearray | memoryview, *, lenient=False)`, `dumps(obj, *, default=None, passthrough=0, non_str_keys=False) -> bytes` (like orjson), `dumps_str(...) -> str`, `dumps_bytes` = alias of `dumps`; `PASSTHROUGH_DATETIME/_UUID/_DATACLASS/_ENUM` flags; `JSONDecodeError` (= json's), `JSONEncodeError(TypeError, ValueError)`, `__version__`; stub `rjson.pyi` (maturin installs it as `rjson/__init__.pyi` + `py.typed`)
 - Packaging: PyPI distribution `pyrjson` (the name `rjson` is taken); import name `rjson`. MIT license.
 - Supported: CPython 3.10-3.14 (`requires-python >=3.10`), GIL builds only
 - Status: experimental; APIs may change before 1.0
@@ -15,7 +15,7 @@
 ```
 src/
   lib.rs      # module definition only
-  entry.rs    # raw entry points (loads METH_O; dumps, dumps_str, dumps_bytes alias FASTCALL|KEYWORDS) + registration
+  entry.rs    # raw entry points (loads, dumps, dumps_str, dumps_bytes alias: FASTCALL|KEYWORDS) + registration
   parser.rs   # loads: single-pass parser building PyObjects directly
   lemire.rs   # Eisel-Lemire float conversion (vendored from fast-float, MIT/Apache)
   ser.rs      # dumps (bytes) / dumps_str (str): direct serializer writing into the result object
@@ -25,7 +25,7 @@ src/
 build.rs      # pyo3_build_config::use_pyo3_cfgs() -> Py_3_10/Py_3_12... cfgs
 rjson.pyi     # type stub (installed as rjson/__init__.pyi + py.typed)
 examples/     # FastAPI, JSON logging/NDJSON, Redis/Kafka codec (tested by tests/test_examples.py)
-tests/        # test_rjson.py (general + regressions), test_dumps.py (serializer), test_native.py
+tests/        # test_rjson.py (general + regressions), test_dumps.py (serializer), test_lenient.py (loads lenient=), test_native.py
               # (datetime/UUID/dataclass/Enum, differential vs orjson), test_keys.py
               # (non_str_keys, vs json), test_examples.py
 benches/corpus_benchmark.py   # reference benchmark vs orjson (ratio, same process; --output-json)
@@ -49,6 +49,7 @@ docs/ASYNC.md                 # asyncio/threads guidance, free-threading/subinte
 - Numbers: 8-digits-at-a-time ints (big ints exact via PyLong_FromString), floats correctly rounded (exact fast path → Eisel-Lemire → fast_float). The fast path takes up to 19 fraction digits / 19 significant digits (`digits19`, lookahead 48 bytes), so full-precision doubles stay on it; keep its checks branch-free where data mixes shapes (0.0 among other values).
 - Own UTF-8 decoder writing into the final str; bytes input validated once with simdutf8. UCS2 results go through `decode_ucs2` (SSSE3, cfg-gated): 8/16-byte ASCII widening, 5×3-byte blocks via one u64 pattern pre-check + masked compare + shuffles, otherwise two chars per trip. Vector paths only for whole blocks with a constant advance (a data-dependent advance serialized the loop); wide stores only when that many units are left (`nchars`).
 - Cyclic GC paused during parsing on CPython 3.10/3.11 only (`pause_gc`/`resume_gc`).
+- `lenient=True` (issue #7): accepts exactly what `json.loads` accepts. `NaN`/`Infinity`/`-Infinity` (`parse_other`, `nonfinite_literal`), overflow to `inf` (`infinite_number`) and a UTF-8 BOM on bytes (skipped in `entry::loads_impl`) are native, checked only on paths that are errors in strict mode; anything else rejected goes to `json.loads` (`entry::loads_fallback`: lone surrogates, UTF-16/32, depth > 1024). If both reject, rjson's error is raised unless json's `JSONDecodeError.pos` is later; non-ValueError/RecursionError exceptions from the fallback propagate.
 - Errors: `json.JSONDecodeError` (exported as `rjson.JSONDecodeError`); `.msg` is the bare reason; positions match json (trailing comma at the comma); depth limit 1024; trailing content rejected.
 - Input: the parser needs a readable NUL after the document. memoryview: parsed in place when C-contiguous, >= 4 KiB and ending exactly where its `bytes`/`bytearray` ends (found via `memoryview.obj`; export held in `Input::held`), else copied in C order (any layout). Non-ASCII `str` >= 4096 chars without a cached UTF-8 copy: temporary `bytes` via `PyUnicode_AsUTF8String` (`Input::temp`), so no copy stays attached to the caller's string.
 
@@ -70,7 +71,7 @@ docs/ASYNC.md                 # asyncio/threads guidance, free-threading/subinte
 - Every serializer-detected failure raises `rjson.JSONEncodeError` (`ser::to_pyerr`, cold); Python-raised errors (`SerError::PyErrSet`) propagate unchanged.
 
 ### Entry points (`entry.rs`)
-- Raw builtins through PyO3's `impl_::trampoline` (`get_trampoline_function!(binaryfunc | fastcall_cfunction_with_keywords, ..)`; doc-hidden PyO3 API, keeps panics caught and GIL bookkeeping correct; re-check on every PyO3 upgrade). ~8 ns/call cheaper than `#[pyfunction]`. `loads` is `METH_O`; `dumps`/`dumps_str` are `METH_FASTCALL | METH_KEYWORDS` whose one-positional, no-kwnames call is a single compare (`dumps_args`), the rest in cold `dumps_args_slow`.
+- Raw builtins through PyO3's `impl_::trampoline` (`get_trampoline_function!(binaryfunc | fastcall_cfunction_with_keywords, ..)`; doc-hidden PyO3 API, keeps panics caught and GIL bookkeeping correct; re-check on every PyO3 upgrade). ~8 ns/call cheaper than `#[pyfunction]`. `loads`/`dumps`/`dumps_str` are `METH_FASTCALL | METH_KEYWORDS` whose one-positional, no-kwnames call is a single compare (`dumps_args`; `loads_body`), the rest in cold `dumps_args_slow`/`loads_args_slow`. Keep one call site of `loads_impl` (`#[inline(always)]`, as is `parser::parse`): with two, LLVM stopped inlining `get_input`/`parse` (+60 instructions per call).
 - `ALL` in entry.rs must list every public name (maturin's generated `__init__.py` star-imports from `rjson.rjson`); keep it in sync with `rjson.pyi`. The functions' `__module__` is the package `rjson`.
 - New keyword options go into `dumps_args_slow`'s hand-parsed kwnames, not PyO3 `FunctionDescription`.
 

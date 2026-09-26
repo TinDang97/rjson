@@ -33,11 +33,12 @@ rjson's API is `loads`, `dumps` (bytes), `dumps_str` (str). The keyword options 
   as orjson's `OPT_NON_STR_KEYS` does (`json_logging.py` uses it). Without it rjson raises,
   as orjson does without the option.
 - **NaN/Infinity raise** (`json` writes `NaN`, orjson writes `null`), and `loads` rejects
-  the `NaN`/`Infinity` literals that `json.loads` accepts.
+  the `NaN`/`Infinity` literals that `json.loads` accepts unless `lenient=True`.
 - **`loads` is stricter than `json.loads`:** it rejects a UTF-8 BOM in `bytes`, UTF-16/32
   input, escaped lone surrogates (`"\ud83d"`, which JavaScript clients send when they cut
   an emoji in half) and numbers that overflow to infinity. In FastAPI these requests get a
-  422 where the stdlib accepted them.
+  422 where the stdlib accepted them. `rjson.loads(body, lenient=True)` accepts exactly
+  what `json.loads` accepts, with the same result.
 - **Floats below 1e-4 format differently from `json`** (`1e-7` rather than `1e-07`). The
   output is identical to orjson and the values round-trip exactly, but body hashes, ETags
   and snapshot tests that compare bytes will change.
