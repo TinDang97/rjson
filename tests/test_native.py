@@ -28,6 +28,14 @@ ALL_PASSTHROUGH = (
 )
 
 
+def zone(key):
+    """ZoneInfo(key), or skip: Windows has no system tz database (pip install tzdata)."""
+    try:
+        return zoneinfo.ZoneInfo(key)
+    except zoneinfo.ZoneInfoNotFoundError:
+        pytest.skip(f"no tz database entry for {key} (install tzdata)")
+
+
 def both(obj, **kw):
     """dumps and dumps_str agree; return the bytes."""
     out = rjson.dumps(obj, **kw)
@@ -88,7 +96,7 @@ class TestDatetime:
         assert both(value) == f'"{want}"'.encode()
 
     def test_zoneinfo_and_fold(self):
-        ny = zoneinfo.ZoneInfo("America/New_York")
+        ny = zone("America/New_York")
         assert both(dt.datetime(2024, 7, 2, 3, 4, 5, tzinfo=ny)) == b'"2024-07-02T03:04:05-04:00"'
         # 01:30 happens twice on 2024-11-03; fold picks the second (EST).
         assert both(dt.datetime(2024, 11, 3, 1, 30, tzinfo=ny)) == b'"2024-11-03T01:30:00-04:00"'
@@ -504,7 +512,7 @@ class TestGuardedMode:
         assert both(doc) == both(doc, default=lambda o: 1 / 0)
 
     def test_no_reference_leaks(self):
-        ny = zoneinfo.ZoneInfo("America/New_York")
+        ny = zone("America/New_York")
         objs = [
             dt.datetime(2024, 1, 2, tzinfo=ny),
             dt.datetime(2024, 1, 2, tzinfo=PyTZ(60)),
@@ -583,7 +591,7 @@ class _Diff:
 
     def __init__(self, seed):
         self.rng = random.Random(seed)
-        self.zi = [zoneinfo.ZoneInfo(z) for z in self.ZONES]
+        self.zi = [zone(z) for z in self.ZONES]
 
     def datetime(self):
         r = self.rng
