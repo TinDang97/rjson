@@ -1488,6 +1488,10 @@ pub struct Serializer {
     default: *mut ffi::PyObject,
     /// `passthrough=` flags (`native::PT_*`): native kinds sent to `default`.
     passthrough: u32,
+    /// `non_str_keys=True`: bool/None/int/float keys get `json.dumps`'s text,
+    /// Enum keys their value, datetime/date/time/UUID keys their native text
+    /// (see `key_text`). Otherwise a non-str key raises.
+    non_str_keys: bool,
     /// Guarded mode: Python code may run during serialization (`default`, a
     /// dataclass attribute, a Python `tzinfo`), so containers are held by a
     /// strong reference while serialized and dicts are walked with
@@ -1511,7 +1515,8 @@ impl Drop for Serializer {
 }
 
 impl Serializer {
-    unsafe fn new(str_mode: bool, default: *mut ffi::PyObject, passthrough: u32, guard: bool) -> Self {
+    unsafe fn new(str_mode: bool, opts: &DumpsOpts, guard: bool) -> Self {
+        let default = opts.default;
         Serializer {
             buf: Out::new(str_mode),
             depth: 0,
@@ -1522,7 +1527,8 @@ impl Serializer {
             err: SerError::PyErrSet,
             err_obj: ptr::null_mut(),
             default,
-            passthrough,
+            passthrough: opts.passthrough,
+            non_str_keys: opts.non_str_keys,
             guard: guard || !default.is_null(),
             err_float: 0.0,
         }
@@ -2156,10 +2162,90 @@ impl Serializer {
         } else if ffi::PyUnicode_Check(key) != 0 {
             let p = self.put_sep(p, b',', ns);
             tri!(self.write_str_slow(p, key))
+        } else if self.non_str_keys {
+            let p = self.put_sep(p, b',', ns);
+            tri!(self.key_text(p, key, 0))
         } else {
             return self.fail_obj(SerError::KeyNotStr, key);
         };
         self.ser(p, value, b':', 1)
+    }
+
+    /// A non-str dict key as a JSON string (`non_str_keys=True`). bool, None,
+    /// int and float get exactly `json.dumps`'s key text (`"true"`, `"null"`,
+    /// any-size ints, float `repr` such as `"1e-07"`, `"NaN"`/`"Infinity"`);
+    /// types `json` rejects follow orjson's `OPT_NON_STR_KEYS`: an Enum key is
+    /// its value's key text, datetime/date/time/UUID keys their native text
+    /// (unless passed through). Anything else raises.
+    #[cold]
+    #[inline(never)]
+    unsafe fn key_text(&mut self, p: Cur, key: *mut ffi::PyObject, level: u32) -> CurResult {
+        let ty = ffi::Py_TYPE(key);
+        if ty == bool_type() {
+            return self.put_quoted(p, if key == ffi::Py_True() { b"true" } else { b"false" });
+        }
+        if key == ffi::Py_None() {
+            return self.put_quoted(p, b"null");
+        }
+        if ffi::PyLong_Check(key) != 0 {
+            // int subclasses (IntEnum, IntFlag) too, as their int value.
+            let p = self.put(p, b'"');
+            let p = tri!(self.write_int_slow(p, key));
+            return self.put(p, b'"');
+        }
+        if ffi::PyFloat_Check(key) != 0 {
+            return self.float_key(p, ffi::PyFloat_AS_DOUBLE(key));
+        }
+        if ffi::PyUnicode_Check(key) != 0 {
+            return self.write_str_slow(p, key); // an Enum's str value
+        }
+        let t = native::types();
+        if self.passthrough & native::PT_DATETIME == 0 && !t.datetime.is_null() {
+            if ty == t.datetime {
+                return self.write_datetime(p, key, t);
+            } else if ty == t.date {
+                return self.write_date(p, key);
+            } else if ty == t.time {
+                return self.write_time(p, key);
+            }
+        }
+        if self.passthrough & native::PT_UUID == 0 && ty == t.uuid && !ty.is_null() {
+            return self.write_uuid(p, key, t);
+        }
+        if level == 0
+            && self.passthrough & native::PT_ENUM == 0
+            && !t.enum_meta.is_null()
+            && ffi::PyType_IsSubtype(ffi::Py_TYPE(ty as *mut ffi::PyObject), t.enum_meta) != 0
+        {
+            if !self.guard && !enum_value_plain(ty) {
+                return self.fail(SerError::NeedGuard);
+            }
+            ffi::Py_INCREF(key);
+            let v = ffi::PyObject_GetAttr(key, native::names().value);
+            ffi::Py_DECREF(key);
+            if v.is_null() {
+                return self.fail(SerError::PyErrSet);
+            }
+            let q = self.key_text(p, v, level + 1);
+            ffi::Py_DECREF(v);
+            return q;
+        }
+        self.fail_obj(SerError::KeyNotStr, key)
+    }
+
+    /// Float key text as `json.dumps` writes it: `float.__repr__`, or
+    /// `NaN`/`Infinity`/`-Infinity` (valid here: a key is a string).
+    unsafe fn float_key(&mut self, p: Cur, v: f64) -> CurResult {
+        if v.is_nan() {
+            return self.put_quoted(p, b"NaN");
+        } else if v == f64::INFINITY {
+            return self.put_quoted(p, b"Infinity");
+        } else if v == f64::NEG_INFINITY {
+            return self.put_quoted(p, b"-Infinity");
+        }
+        let mut b = [0u8; 32];
+        let n = native::fmt_float_repr(v, &mut b);
+        self.put_quoted(p, &b[..n])
     }
 
     // ----- dispatch -----
@@ -2956,6 +3042,24 @@ unsafe fn utc_offset(
     Ok(Some(secs))
 }
 
+/// Keyword options of `dumps`/`dumps_str` (parsed in entry.rs).
+pub struct DumpsOpts {
+    /// `default=` callable (borrowed from the call's arguments), or null.
+    pub default: *mut ffi::PyObject,
+    /// `passthrough=` flags (`native::PT_*`).
+    pub passthrough: u32,
+    /// `non_str_keys=`.
+    pub non_str_keys: bool,
+}
+
+impl DumpsOpts {
+    pub const NONE: DumpsOpts = DumpsOpts {
+        default: ptr::null_mut(),
+        passthrough: 0,
+        non_str_keys: false,
+    };
+}
+
 /// 128-bit value of a UUID's `int` (None with an exception set).
 unsafe fn uuid_value(v: *mut ffi::PyObject) -> Option<u128> {
     if ffi::Py_TYPE(v) == int_type() && INLINE_INT {
@@ -3049,8 +3153,14 @@ fn to_pyerr(py: Python<'_>, ser: &Serializer, e: SerError) -> PyErr {
         SerError::Unsupported => {
             format!("Type is not JSON serializable: {}", type_name(py, ser.err_obj))
         }
+        SerError::KeyNotStr if ser.non_str_keys => format!(
+            "Dictionary key of type {} is not supported (non_str_keys allows str, int, float, \
+             bool, None, Enum, datetime, date, time and UUID keys)",
+            type_name(py, ser.err_obj)
+        ),
         SerError::KeyNotStr => format!(
-            "Dictionary keys must be strings for JSON serialization, not {}",
+            "Dictionary keys must be strings for JSON serialization, not {} \
+             (non_str_keys=True converts int, float, bool and None keys)",
             type_name(py, ser.err_obj)
         ),
         SerError::Recursion => format!(
@@ -3070,8 +3180,7 @@ fn to_pyerr(py: Python<'_>, ser: &Serializer, e: SerError) -> PyErr {
 
 /// Serializes `obj` (borrowed) and returns a new reference to a `str`
 /// (`as_str`) or `bytes`. Entry point for the raw `dumps`/`dumps_str` wrappers;
-/// `default` is the `default=` callable (borrowed), or null; `passthrough` the
-/// `native::PT_*` flags.
+/// `opts` are the keyword options.
 ///
 /// # Safety
 /// `obj` must be a valid object pointer and the GIL must be held.
@@ -3079,16 +3188,15 @@ pub unsafe fn dumps_raw(
     py: Python<'_>,
     obj: *mut ffi::PyObject,
     as_str: bool,
-    default: *mut ffi::PyObject,
-    passthrough: u32,
+    opts: &DumpsOpts,
 ) -> PyResult<*mut ffi::PyObject> {
-    let mut ser = Serializer::new(as_str, default, passthrough, false);
+    let mut ser = Serializer::new(as_str, opts, false);
     let start = ser.start();
     let mut end = ser.ser(start, obj, 0, 0);
     if end.is_null() && matches!(ser.err, SerError::NeedGuard) {
         // A native value needs Python code (dataclass, Python tzinfo, ...).
         // Nothing ran yet, so start over in guarded mode.
-        ser = Serializer::new(as_str, default, passthrough, true);
+        ser = Serializer::new(as_str, opts, true);
         let start = ser.start();
         end = ser.ser(start, obj, 0, 0);
     }

@@ -4,7 +4,7 @@
 
 **rjson** is a JSON library for Python written in Rust directly against the CPython C API (PyO3 is used only for module setup and the entry-point trampoline). Goal: beat orjson on every metric while staying correct on every supported CPython version.
 
-- API: `loads(str | bytes | bytearray | memoryview)`, `dumps(obj, *, default=None, passthrough=0) -> bytes` (like orjson), `dumps_str(...) -> str`, `dumps_bytes` = alias of `dumps`; `PASSTHROUGH_DATETIME/_UUID/_DATACLASS/_ENUM` flags; `JSONDecodeError` (= json's), `JSONEncodeError(TypeError, ValueError)`, `__version__`; stub `rjson.pyi` (maturin installs it as `rjson/__init__.pyi` + `py.typed`)
+- API: `loads(str | bytes | bytearray | memoryview)`, `dumps(obj, *, default=None, passthrough=0, non_str_keys=False) -> bytes` (like orjson), `dumps_str(...) -> str`, `dumps_bytes` = alias of `dumps`; `PASSTHROUGH_DATETIME/_UUID/_DATACLASS/_ENUM` flags; `JSONDecodeError` (= json's), `JSONEncodeError(TypeError, ValueError)`, `__version__`; stub `rjson.pyi` (maturin installs it as `rjson/__init__.pyi` + `py.typed`)
 - Packaging: PyPI distribution `pyrjson` (the name `rjson` is taken); import name `rjson`. MIT license.
 - Supported: CPython 3.10-3.14 (`requires-python >=3.10`), GIL builds only
 - Status: experimental; APIs may change before 1.0
@@ -26,7 +26,8 @@ build.rs      # pyo3_build_config::use_pyo3_cfgs() -> Py_3_10/Py_3_12... cfgs
 rjson.pyi     # type stub (installed as rjson/__init__.pyi + py.typed)
 examples/     # FastAPI, JSON logging/NDJSON, Redis/Kafka codec (tested by tests/test_examples.py)
 tests/        # test_rjson.py (general + regressions), test_dumps.py (serializer), test_native.py
-              # (datetime/UUID/dataclass/Enum, differential vs orjson), test_examples.py
+              # (datetime/UUID/dataclass/Enum, differential vs orjson), test_keys.py
+              # (non_str_keys, vs json), test_examples.py
 benches/corpus_benchmark.py   # reference benchmark vs orjson (ratio, same process; --output-json)
 benches/production_benchmark.py, prod_workloads.py   # production-shaped workloads (web/logs/big files/codec), time + RSS
 benches/fetch_corpus.sh       # download the corpora (sha256-pinned) into benches/data/
@@ -63,6 +64,7 @@ docs/ASYNC.md                 # asyncio/threads guidance, free-threading/subinte
 - Capacity: initial = min of the last two output sizes per thread and mode (`SizeHistory`); first growth jumps to the peak of the last 64 calls; growth past 1 MiB reserves ≥ 32 MiB + 64 KiB (always mmapped, shrunk back in `into_object`). Keep a result from ever holding the reservation.
 - Recursion limit 254 (also catches circular references); each `default` call counts as a level, so a non-converging `default` ends there.
 - Guarded mode (`Serializer::guard`): Python code run mid-serialization may mutate or free what we iterate. In guarded mode every list/tuple/dict is held by a strong ref while serialized (`guarded`), dicts use `PyDict_Next` plus a size check (CPython's "changed size during iteration" RuntimeError), never the direct entry walk; `call_default` and the native writers incref their object; `err_obj` is a strong ref. `default=` sets it. Otherwise no Python code may run: a native value that would run some (dataclass, a tzinfo other than `timezone`/C `ZoneInfo`, an Enum with custom attribute access, a UUID type whose `int` is not a plain slot) returns `SerError::NeedGuard` *before* running any, and `dumps_raw` restarts the whole call in guarded mode. Any new code path that can run Python code must do the same; the tests mutate containers from such code under `PYTHONMALLOC=debug`.
+- `non_str_keys=True` (issue #6): `dict_item`'s non-str branch calls cold `key_text`; bool/None/int/float keys get exactly `json.dumps`'s text (float `repr` rebuilt from zmij's digits in `native::fmt_float_repr`, which equal CPython's `repr` digits; Rust's `{:e}` does not), Enum/datetime/date/time/UUID keys follow orjson's `OPT_NON_STR_KEYS`. Str keys never reach it, so the option costs nothing when off. Options travel in `ser::DumpsOpts`.
 - Native types (`native.rs`, issue #5): exact `datetime`/`date`/`time`/`uuid.UUID` types, any `Enum` (metaclass check; int/str/float mix-ins are caught earlier as subclasses), dataclasses (`__dataclass_fields__` in the type's own dict). Output is orjson's byte for byte (differential test in `test_native.py`) except orjson's crashes/invalid output (documented there). Types come from `sys.modules` lazily; rjson never imports a module. Checked only after all builtin checks (`ser_other`, cold), so JSON-native documents pay nothing.
 - Non-ASCII strings in bytes output: cached UTF-8 copy if present; < 256 chars via `PyUnicode_AsUTF8AndSize` (attaches the copy: fast repeats); longer UCS2/UCS4 via `encode_utf8_escaped` (direct, ASCII 8-blocks only at ASCII units), longer Latin-1 via a temporary `PyUnicode_AsUTF8String`. No copy attached to long strings.
 - Every serializer-detected failure raises `rjson.JSONEncodeError` (`ser::to_pyerr`, cold); Python-raised errors (`SerError::PyErrSet`) propagate unchanged.

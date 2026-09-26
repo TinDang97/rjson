@@ -19,15 +19,15 @@ documents, and produced **0 mismatches** against orjson and `json` across all wo
 **Close to a drop-in for orjson.** `dumps(obj, default=f)` works as in orjson and `json`;
 datetime, date, time, UUID, dataclasses and Enum members serialize natively with
 orjson's exact output (differential-tested), and `passthrough=` replaces
-`OPT_PASSTHROUGH_*`. Still missing: non-str dict keys, `indent`/`sort_keys` and the other
-`option=` flags. You can work around these today (see [`examples/`](../examples/)), and
+`OPT_PASSTHROUGH_*`, and `non_str_keys=True` replaces `OPT_NON_STR_KEYS` (with `json`'s key
+text). Still missing: `indent`/`sort_keys` and the other `option=` flags. You can work around these today (see [`examples/`](../examples/)), and
 each is tracked as an issue.
 
 | question | answer |
 |---|---|
 | Faster than `json`? | Yes: 4–20× on `dumps`, 1.3–5× on `loads`. |
 | Faster than orjson? | Yes on most shapes: geomean `dumps` 0.76×, `loads` 0.87×, round trip 0.83× (rjson ÷ orjson time). CJK text (0.59–0.91×) and full-precision float arrays (0.89–0.95×) now load faster than orjson; see [Performance](#performance). |
-| Correct? | 0 mismatches. 921 tests, fuzzing against `json`, and output byte-identical to orjson. |
+| Correct? | 0 mismatches. 978 tests, fuzzing against `json`, and output byte-identical to orjson. |
 | Memory? | Better on large `loads`: peak RSS 30–37% below orjson. Retained small results cost ~400 B instead of ~8 KB each. |
 | Safe for async services? | Yes, but each call blocks the event loop, and `to_thread` doesn't help. See [ASYNC.md](ASYNC.md). |
 | Compress / go binary? | Compress at the transport, and only payloads of a few KB and up. Use Arrow/Polars only for columnar data. See [Transfer size](#transfer-size-compression-and-binary-formats). |
@@ -302,7 +302,7 @@ message: 0.01 ms).
 | `datetime` with a `tzinfo` whose `utcoffset()` raises; dataclass with a deleted `__slots__` field | that exception | crash (segfault) | that exception / n.a. |
 | `utcoffset()` returning `None` | no offset (like `isoformat()`) | `+00:00` | n.a. |
 | `Decimal`, `set`, `bytes` | `JSONEncodeError` | `TypeError` | `TypeError` |
-| non-str keys (`int`, `None`, …) | `JSONEncodeError` | `TypeError` (or `OPT_NON_STR_KEYS`) | coerced to str |
+| non-str keys (`int`, `None`, …) | `JSONEncodeError`, or with `non_str_keys=True` coerced exactly like `json` | `TypeError`, or `OPT_NON_STR_KEYS` (`1e-7` not `1e-07`, NaN → `"null"`, ints only to 64 bits) | coerced to str |
 | NaN / Infinity in `dumps` | `JSONEncodeError` | `null` | `NaN` |
 | `NaN` / BOM / `"\ud800"` in `loads` | `JSONDecodeError` | `JSONDecodeError` | accepted |
 | ints ≥ 2^64 | exact | float on `loads`, error on `dumps` | exact |
@@ -332,7 +332,6 @@ The full migration guide with code is in the [README](../README.md#migrating-fro
 
 | blocker | impact | issue |
 |---|---|---|
-| no non-str dict keys option | medium | [#6](https://github.com/TinDang97/rjson/issues/6) |
 | `loads` stricter than `json` (BOM, NaN, lone surrogates) | medium: new 4xx after migration | [#7](https://github.com/TinDang97/rjson/issues/7) |
 | not on PyPI | high: needs a Rust toolchain to install | publish `pyrjson` |
 | no free-threading / subinterpreter support | medium, growing with 3.14t adoption | [ASYNC.md roadmap](ASYNC.md#roadmap) |
@@ -344,10 +343,9 @@ The full migration guide with code is in the [README](../README.md#migrating-fro
    pipelines, cache codecs. Use the patterns in [`examples/`](../examples/), pin the
    version, and keep a fallback path for unsupported types.
 2. **orjson users:** `default=`, native datetime/UUID/dataclass/Enum and `passthrough=`
-   work as in orjson. Check the remaining `option=` flags you use (non-str keys, indent,
-   sort keys) against the table above.
-3. **Before 1.0:** publish `pyrjson` wheels, ship #6 and #7, and add free-threading
-   support.
+   work as in orjson, and `non_str_keys=True` covers `OPT_NON_STR_KEYS`. Check the
+   remaining `option=` flags you use (indent, sort keys) against the table above.
+3. **Before 1.0:** publish `pyrjson` wheels, ship #7, and add free-threading support.
 
 ## Reproducing
 
@@ -356,5 +354,5 @@ benches/fetch_corpus.sh
 python benches/production_benchmark.py --quick                 # ~30 s smoke run
 python benches/production_benchmark.py --output-json prod.json # full run, ~6 min
 python benches/production_benchmark.py --big-only              # large-file time + RSS
-python -m pytest tests -q                                      # 921 tests
+python -m pytest tests -q                                      # 978 tests
 ```

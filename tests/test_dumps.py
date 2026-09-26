@@ -320,7 +320,7 @@ class TestDefaultHook:
 
         with pytest.raises(rjson.JSONEncodeError, match="non-finite"):
             rjson.dumps(object(), default=lambda o: float("nan"))
-        with pytest.raises(rjson.JSONEncodeError, match=r"not \S*\bK$"):
+        with pytest.raises(rjson.JSONEncodeError, match=r"not \S*\bK\b"):
             rjson.dumps(object(), default=lambda o: {K(): 1})
         with pytest.raises(UnicodeEncodeError):
             rjson.dumps(object(), default=lambda o: "\ud800")

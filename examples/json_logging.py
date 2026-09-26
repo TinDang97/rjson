@@ -4,8 +4,9 @@
   (timestamp, level, logger, message, exception, ``extra=`` fields). It never raises:
   rjson serializes datetime, UUID, Enum and dataclass values itself; the rest (Decimal,
   timedelta, sets, subclasses of those types, arbitrary objects) is converted by a
-  ``default=`` hook inside the same ``dumps_str`` call; NaN, non-str keys and a
-  ``time`` with tzinfo, which ``default=`` does not cover, take a slower Python fallback.
+  ``default=`` hook inside the same ``dumps_str`` call, and int/float/bool/None keys are
+  written as ``json`` writes them (``non_str_keys=True``). NaN, other key types and a
+  ``time`` with tzinfo, which neither covers, take a slower Python fallback.
 * :func:`write_ndjson` / :func:`read_ndjson` stream newline-delimited JSON to and from a
   file object, skipping blank lines and reporting bad lines with their line number.
 
@@ -127,8 +128,8 @@ def _message(record: logging.LogRecord) -> str:
 
 def _to_json_line(payload: dict[str, Any]) -> str:
     try:
-        text = rjson.dumps_str(payload, default=_encode_default)
-    except (TypeError, ValueError):  # NaN, non-str key, too deep
+        text = rjson.dumps_str(payload, default=_encode_default, non_str_keys=True)
+    except (TypeError, ValueError):  # NaN, an unsupported key type, too deep
         try:
             text = rjson.dumps_str(_jsonable(payload, 0))
         except (TypeError, ValueError) as exc:  # not expected; logging must not raise

@@ -14,22 +14,24 @@ Copy the file you need into your project; nothing here is installed with rjson.
 
 ## Things to know before migrating
 
-rjson's API is `loads`, `dumps` (bytes), `dumps_str` (str). The only keyword option is
-`default=`:
+rjson's API is `loads`, `dumps` (bytes), `dumps_str` (str). The keyword options are
+`default=`, `passthrough=` and `non_str_keys=`:
 
 - **No `option=`, `indent`, `sort_keys`, `ensure_ascii`.** datetime, date, time, UUID,
   dataclasses and `Enum` members are serialized natively, byte for byte like orjson;
   `passthrough=` sends them to `default=` instead (`codec.py` does, to tag them). Decimal,
   sets, bytes and other types raise unless `default=` converts them (`json_logging.py`
-  does). `default` is not called for NaN or non-str keys, so the examples keep a second
+  does). `default` is not called for NaN or dict keys, so the examples keep a second
   tier: call rjson first, and only when it raises, convert the data in Python and call it
   again. Data that is already JSON-native pays nothing.
 - **`dumps` raises `rjson.JSONEncodeError`**, a subclass of both `TypeError` and
   `ValueError` (like `orjson.JSONEncodeError`), for an unsupported type, a non-str key,
   NaN/Infinity or too-deep nesting, so `except TypeError` handlers written for
   `json.dumps` keep working. A lone surrogate raises `UnicodeEncodeError` (a `ValueError`).
-- **Dict keys must be `str`.** `json` turns `int`/`float`/`bool`/`None` keys into strings,
-  and rjson raises instead (orjson does the same without `OPT_NON_STR_KEYS`).
+- **Dict keys must be `str` unless `non_str_keys=True`.** With it, `int`/`float`/`bool`/
+  `None` keys are written exactly as `json` writes them, and Enum, datetime and UUID keys
+  as orjson's `OPT_NON_STR_KEYS` does (`json_logging.py` uses it). Without it rjson raises,
+  as orjson does without the option.
 - **NaN/Infinity raise** (`json` writes `NaN`, orjson writes `null`), and `loads` rejects
   the `NaN`/`Infinity` literals that `json.loads` accepts.
 - **`loads` is stricter than `json.loads`:** it rejects a UTF-8 BOM in `bytes`, UTF-16/32
@@ -57,4 +59,4 @@ rjson's API is `loads`, `dumps` (bytes), `dumps_str` (str). The only keyword opt
 - Logging: 2.4 µs per record with `JSONFormatter` against 5.2 µs for the same payload
   through `json.dumps(default=str)`. A record with datetime and UUID extras takes 3.4–4 µs
   through the formatter's `default=` hook, against 7.6 µs with the old convert-and-retry
-  fallback, which now only runs for NaN and non-str keys.
+  fallback, which now only runs for NaN and unsupported key types.

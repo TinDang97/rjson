@@ -39,6 +39,7 @@ def dumps(
     *,
     default: Callable[[Any], Any] | None = None,
     passthrough: int | None = 0,
+    non_str_keys: bool = False,
 ) -> bytes:
     """Serialize to compact UTF-8 JSON bytes; raises JSONEncodeError.
 
@@ -48,6 +49,8 @@ def dumps(
     default: called with each object that cannot be serialized; its return
     value is serialized instead (it may raise to reject the object).
     passthrough: PASSTHROUGH_* flags; those types go to default instead.
+    non_str_keys: allow int, float, bool, None, Enum, datetime/date/time and UUID
+    dict keys (int/float/bool/None written as json.dumps writes them).
     """
 
 def dumps_str(
@@ -56,6 +59,7 @@ def dumps_str(
     *,
     default: Callable[[Any], Any] | None = None,
     passthrough: int | None = 0,
+    non_str_keys: bool = False,
 ) -> str:
     """Serialize to a compact JSON str (non-ASCII kept as-is); raises JSONEncodeError."""
 
@@ -65,5 +69,6 @@ def dumps_bytes(
     *,
     default: Callable[[Any], Any] | None = None,
     passthrough: int | None = 0,
+    non_str_keys: bool = False,
 ) -> bytes:
     """Alias of dumps."""

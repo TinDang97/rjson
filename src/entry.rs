@@ -2,7 +2,7 @@
 //!
 //! `loads` is a plain `METH_O` builtin; `dumps`/`dumps_str` are
 //! `METH_FASTCALL | METH_KEYWORDS` with hand-parsed `kwnames` (for the
-//! keyword-only `default=` and `passthrough=`): the common one-positional-argument call is one
+//! keyword-only `default=`, `passthrough=` and `non_str_keys=`): the common one-positional-argument call is one
 //! compare, everything else goes to a cold path. Neither uses PyO3
 //! `#[pyfunction]`s. A `#[pyfunction]` is `METH_FASTCALL|METH_KEYWORDS`
 //! and runs PyO3's generic argument extraction (`FunctionDescription`,
@@ -35,6 +35,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyCFunction;
 use std::ptr;
 
+use crate::ser::DumpsOpts;
+
 unsafe fn loads_body(py: Python<'_>, _m: *mut ffi::PyObject, arg: *mut ffi::PyObject) -> PyResult<*mut ffi::PyObject> {
     // str / bytes / bytearray / memoryview; see `parser::get_input`.
     let input = crate::parser::get_input(py, arg)?;
@@ -53,8 +55,8 @@ unsafe fn dumps_body(
     nargs: ffi::Py_ssize_t,
     kwnames: *mut ffi::PyObject,
 ) -> PyResult<*mut ffi::PyObject> {
-    let (obj, default, passthrough) = dumps_args(py, "dumps", args, nargs, kwnames)?;
-    crate::ser::dumps_raw(py, obj, false, default, passthrough)
+    let (obj, opts) = dumps_args(py, "dumps", args, nargs, kwnames)?;
+    crate::ser::dumps_raw(py, obj, false, &opts)
 }
 
 unsafe fn dumps_str_body(
@@ -64,14 +66,14 @@ unsafe fn dumps_str_body(
     nargs: ffi::Py_ssize_t,
     kwnames: *mut ffi::PyObject,
 ) -> PyResult<*mut ffi::PyObject> {
-    let (obj, default, passthrough) = dumps_args(py, "dumps_str", args, nargs, kwnames)?;
-    crate::ser::dumps_raw(py, obj, true, default, passthrough)
+    let (obj, opts) = dumps_args(py, "dumps_str", args, nargs, kwnames)?;
+    crate::ser::dumps_raw(py, obj, true, &opts)
 }
 
-/// Parses `(obj, /, *, default=None, passthrough=0)` from a vectorcall:
-/// returns `obj`, the `default` callable (null when absent or None), both
-/// borrowed from the call's arguments (which the caller keeps alive for the
-/// whole call), and the `passthrough` flags.
+/// Parses `(obj, /, *, default=None, passthrough=0, non_str_keys=False)` from
+/// a vectorcall: returns `obj` and the options. `obj` and the `default`
+/// callable (null when absent or None) are borrowed from the call's
+/// arguments, which the caller keeps alive for the whole call.
 ///
 /// The common call, one positional argument and no keywords, is a single
 /// compare. Errors follow CPython's argument-clinic wording.
@@ -82,11 +84,11 @@ unsafe fn dumps_args(
     args: *const *mut ffi::PyObject,
     nargs: ffi::Py_ssize_t,
     kwnames: *mut ffi::PyObject,
-) -> PyResult<(*mut ffi::PyObject, *mut ffi::PyObject, u32)> {
+) -> PyResult<(*mut ffi::PyObject, DumpsOpts)> {
     // PY_VECTORCALL_ARGUMENTS_OFFSET may be set in nargs.
     let n = ffi::PyVectorcall_NARGS(nargs as usize);
     if n == 1 && kwnames.is_null() {
-        return Ok((*args, ptr::null_mut(), 0));
+        return Ok((*args, DumpsOpts::NONE));
     }
     dumps_args_slow(py, name, args, n, kwnames)
 }
@@ -99,7 +101,7 @@ unsafe fn dumps_args_slow(
     args: *const *mut ffi::PyObject,
     n: ffi::Py_ssize_t,
     kwnames: *mut ffi::PyObject,
-) -> PyResult<(*mut ffi::PyObject, *mut ffi::PyObject, u32)> {
+) -> PyResult<(*mut ffi::PyObject, DumpsOpts)> {
     use pyo3::exceptions::PyTypeError;
     if n != 1 {
         return Err(PyTypeError::new_err(format!(
@@ -108,6 +110,7 @@ unsafe fn dumps_args_slow(
     }
     let mut default: *mut ffi::PyObject = ptr::null_mut();
     let mut passthrough: u32 = 0;
+    let mut non_str_keys = false;
     let nkw = if kwnames.is_null() {
         0
     } else {
@@ -121,6 +124,12 @@ unsafe fn dumps_args_slow(
             default = value;
         } else if ffi::PyUnicode_CompareWithASCIIString(kw, c"passthrough".as_ptr()) == 0 {
             passthrough = passthrough_flags(py, name, value)?;
+        } else if ffi::PyUnicode_CompareWithASCIIString(kw, c"non_str_keys".as_ptr()) == 0 {
+            // Truthiness, like json.dumps's flags (runs before serializing).
+            match ffi::PyObject_IsTrue(value) {
+                -1 => return Err(PyErr::fetch(py)),
+                v => non_str_keys = v == 1,
+            }
         } else {
             let kw_str = pyo3::Bound::from_borrowed_ptr(py, kw).to_string();
             return Err(PyTypeError::new_err(format!(
@@ -138,7 +147,14 @@ unsafe fn dumps_args_slow(
             "rjson.{name}() default must be callable, not {tn}"
         )));
     }
-    Ok((*args, default, passthrough))
+    Ok((
+        *args,
+        DumpsOpts {
+            default,
+            passthrough,
+            non_str_keys,
+        },
+    ))
 }
 
 /// `passthrough=`: None or an int made of `rjson.PASSTHROUGH_*` flags.
@@ -220,19 +236,19 @@ static METHODS: MethodDefs = MethodDefs([
         ml_name: c"dumps".as_ptr(),
         ml_meth: ffi::PyMethodDefPointer { PyCFunctionFastWithKeywords: dumps },
         ml_flags: ffi::METH_FASTCALL | ffi::METH_KEYWORDS,
-        ml_doc: c"dumps(obj, /, *, default=None, passthrough=0)\n--\n\nSerialize a Python object to compact UTF-8 JSON bytes (like orjson.dumps). Also serializes datetime/date/time, uuid.UUID, dataclasses and Enum members.\n\ndefault: called with each object that cannot be serialized; its return value is serialized instead.\npassthrough: rjson.PASSTHROUGH_* flags; those types go to default instead.".as_ptr(),
+        ml_doc: c"dumps(obj, /, *, default=None, passthrough=0, non_str_keys=False)\n--\n\nSerialize a Python object to compact UTF-8 JSON bytes (like orjson.dumps). Also serializes datetime/date/time, uuid.UUID, dataclasses and Enum members.\n\ndefault: called with each object that cannot be serialized; its return value is serialized instead.\npassthrough: rjson.PASSTHROUGH_* flags; those types go to default instead.\nnon_str_keys: allow int, float, bool, None, Enum, datetime/date/time and UUID dict keys (as json.dumps writes them for int/float/bool/None).".as_ptr(),
     },
     ffi::PyMethodDef {
         ml_name: c"dumps_str".as_ptr(),
         ml_meth: ffi::PyMethodDefPointer { PyCFunctionFastWithKeywords: dumps_str },
         ml_flags: ffi::METH_FASTCALL | ffi::METH_KEYWORDS,
-        ml_doc: c"dumps_str(obj, /, *, default=None, passthrough=0)\n--\n\nSerialize a Python object to a compact JSON str (non-ASCII kept as-is).\n\ndefault, passthrough: as in dumps.".as_ptr(),
+        ml_doc: c"dumps_str(obj, /, *, default=None, passthrough=0, non_str_keys=False)\n--\n\nSerialize a Python object to a compact JSON str (non-ASCII kept as-is).\n\ndefault, passthrough, non_str_keys: as in dumps.".as_ptr(),
     },
     ffi::PyMethodDef {
         ml_name: c"dumps_bytes".as_ptr(),
         ml_meth: ffi::PyMethodDefPointer { PyCFunctionFastWithKeywords: dumps },
         ml_flags: ffi::METH_FASTCALL | ffi::METH_KEYWORDS,
-        ml_doc: c"dumps_bytes(obj, /, *, default=None, passthrough=0)\n--\n\nAlias of dumps (returns bytes); kept for compatibility.".as_ptr(),
+        ml_doc: c"dumps_bytes(obj, /, *, default=None, passthrough=0, non_str_keys=False)\n--\n\nAlias of dumps (returns bytes); kept for compatibility.".as_ptr(),
     },
 ]);
 

@@ -375,6 +375,127 @@ pub fn fmt_uuid(b: &mut [u8; 36], v: u128) {
     }
 }
 
+/// Python's `repr(float)` text for a finite `v` (what `json.dumps` writes for
+/// a float key), without calling into Python. The digits come from zmij, the
+/// serializer's float formatter: shortest round-trip, closest to the exact
+/// value, the same digits CPython's `repr` picks (checked on 10^6 random
+/// doubles; Rust's own `{:e}` differs when two shortest strings exist). Only
+/// the layout differs from zmij's (orjson's): CPython uses exponent notation
+/// when the decimal point position `decpt` is <= -4 or > 16, with at least
+/// two exponent digits (`1e-07`, `1e+16`), else fixed notation with `.0` for
+/// integral values. Returns the length written to `out`.
+pub fn fmt_float_repr(v: f64, out: &mut [u8; 32]) -> usize {
+    let sign = v.is_sign_negative() as usize;
+    out[0] = b'-';
+    if v == 0.0 {
+        out[sign..sign + 3].copy_from_slice(b"0.0");
+        return sign + 3;
+    }
+    let mut zb = zmij::Buffer::new();
+    let text = zb.format_finite(v.abs()).as_bytes();
+    // Common case: zmij's fixed layout is already repr's (`123.456`, `1.0`):
+    // no exponent, at most 16 integer digits (decpt <= 16) and not below 1e-3
+    // (a "0.000" prefix may mean decpt <= -4). Everything else is re-laid out.
+    if !text.contains(&b'e') && !text.starts_with(b"0.000") {
+        if let Some(dot) = text.iter().position(|&b| b == b'.') {
+            if dot <= 16 && sign + text.len() <= out.len() {
+                out[sign..sign + text.len()].copy_from_slice(text);
+                return sign + text.len();
+            }
+        }
+    }
+    let mut o = sign;
+    let mut put = |b: u8, out: &mut [u8; 32]| {
+        out[o] = b;
+        o += 1;
+    };
+    // zmij's text: digits with an optional '.', then an optional exponent.
+    let e_at = text.iter().position(|&b| b == b'e').unwrap_or(text.len());
+    let mut exp: i32 = 0;
+    let mut exp_neg = false;
+    for &b in &text[(e_at + 1).min(text.len())..] {
+        match b {
+            b'-' => exp_neg = true,
+            b'+' => {}
+            _ => exp = exp * 10 + (b - b'0') as i32,
+        }
+    }
+    if exp_neg {
+        exp = -exp;
+    }
+    // Significant digits and the decimal point position relative to them.
+    let mut digits = [0u8; 24];
+    let mut nd = 0usize;
+    let mut int_digits: i32 = 0; // digits before '.', leading zeros excluded
+    let mut lead_frac_zeros: i32 = 0; // zeros after '.' before the first digit
+    let mut seen_dot = false;
+    for &b in &text[..e_at] {
+        if b == b'.' {
+            seen_dot = true;
+        } else if nd == 0 && b == b'0' {
+            if seen_dot {
+                lead_frac_zeros += 1;
+            }
+        } else {
+            digits[nd] = b;
+            nd += 1;
+            if !seen_dot {
+                int_digits += 1;
+            }
+        }
+    }
+    while nd > 1 && digits[nd - 1] == b'0' {
+        nd -= 1;
+    }
+    let decpt = if int_digits > 0 {
+        int_digits + exp
+    } else {
+        exp - lead_frac_zeros
+    };
+    if decpt <= -4 || decpt > 16 {
+        let e = decpt - 1;
+        put(digits[0], out);
+        if nd > 1 {
+            put(b'.', out);
+            for &d in &digits[1..nd] {
+                put(d, out);
+            }
+        }
+        put(b'e', out);
+        put(if e < 0 { b'-' } else { b'+' }, out);
+        let a = e.unsigned_abs();
+        if a >= 100 {
+            put(b'0' + (a / 100) as u8, out);
+        }
+        put(b'0' + (a / 10 % 10) as u8, out);
+        put(b'0' + (a % 10) as u8, out);
+    } else if decpt <= 0 {
+        put(b'0', out);
+        put(b'.', out);
+        for _ in 0..(-decpt) {
+            put(b'0', out);
+        }
+        for &d in &digits[..nd] {
+            put(d, out);
+        }
+    } else {
+        let dp = decpt as usize;
+        // Digits, zero-padded to the decimal point, with the point inserted.
+        let padded = digits[..nd].iter().copied().chain(std::iter::repeat(b'0'));
+        for (i, d) in padded.take(dp.max(nd)).enumerate() {
+            if i == dp {
+                put(b'.', out);
+            }
+            put(d, out);
+        }
+        if dp >= nd {
+            put(b'.', out);
+            put(b'0', out);
+        }
+    }
+    o
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,6 +516,43 @@ mod tests {
         assert_eq!(off(1172), "+00:20");
         assert_eq!(off(3599), "+01:00");
         assert_eq!(off(86399), "+23:59");
+    }
+
+    fn repr(v: f64) -> String {
+        let mut b = [0u8; 32];
+        let n = fmt_float_repr(v, &mut b);
+        String::from_utf8(b[..n].to_vec()).unwrap()
+    }
+
+    #[test]
+    fn float_repr() {
+        for (v, want) in [
+            (0.0, "0.0"),
+            (-0.0, "-0.0"),
+            (1.0, "1.0"),
+            (1.5, "1.5"),
+            (0.1, "0.1"),
+            (1e-4, "0.0001"),
+            (1e-5, "1e-05"),
+            (1e-7, "1e-07"),
+            (1.5e-7, "1.5e-07"),
+            (1e15, "1000000000000000.0"),
+            (1e16, "1e+16"),
+            (1.2345e16, "1.2345e+16"),
+            (123456789.0, "123456789.0"),
+            (1e22, "1e+22"),
+            (5e-324, "5e-324"),
+            (1.7976931348623157e308, "1.7976931348623157e+308"),
+            (-2.5e-300, "-2.5e-300"),
+            (0.3333333333333333, "0.3333333333333333"),
+            (9999999999999998.0, "9999999999999998.0"),
+            (87829832555702.12, "87829832555702.12"),
+            (1e100, "1e+100"),
+            (123.456, "123.456"),
+            (0.001234, "0.001234"),
+        ] {
+            assert_eq!(repr(v), want, "{v:e}");
+        }
     }
 
     #[test]

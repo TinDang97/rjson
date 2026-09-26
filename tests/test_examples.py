@@ -494,6 +494,13 @@ class TestJSONFormatter:
         (line,) = lines()
         assert {k: line[k] for k in extras} == expected
 
+    def test_non_str_keys_skip_the_python_fallback(self, json_logger, monkeypatch):
+        monkeypatch.setattr(logging_mod, "_jsonable", None)
+        logger, lines = json_logger
+        logger.info("x", extra={"counts": {7: 2, 2.5: 3, None: 4, False: 5}})
+        (line,) = lines()
+        assert line["counts"] == {"7": 2, "2.5": 3, "null": 4, "false": 5}
+
     def test_default_hook_never_raises(self):
         class BadMapping(Mapping):
             def __getitem__(self, key):
