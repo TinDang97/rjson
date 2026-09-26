@@ -81,6 +81,7 @@ aarch64), macOS and Windows.
 
 ```python
 from datetime import datetime
+from decimal import Decimal
 from uuid import uuid4
 
 import rjson
@@ -89,15 +90,17 @@ data = rjson.loads('{"name": "rjson", "tags": ["fast", "safe"], "stars": 1e3}')
 payload = rjson.dumps(data)        # b'{"name":"rjson","tags":["fast","safe"],"stars":1000.0}'
 text = rjson.dumps_str(data)       # the same JSON as a str
 
-rjson.dumps({"at": datetime.now(), "id": uuid4()}, default=str)  # convert what rjson can't
+rjson.dumps({"at": datetime(2024, 5, 1, 9, 30), "id": uuid4()})  # datetime, UUID, dataclass, Enum: native
+rjson.dumps({"price": Decimal("9.99")}, default=str)             # convert the rest with default=
 ```
 
 | name | kind | notes |
 |---|---|---|
 | `loads(data)` | function → object | `data`: `str`, `bytes`, `bytearray` or `memoryview` (any layout) |
-| `dumps(obj, *, default=None)` | function → `bytes` | compact UTF-8 JSON, like `orjson.dumps` |
-| `dumps_str(obj, *, default=None)` | function → `str` | like `json.dumps(obj, ensure_ascii=False, separators=(",", ":"))` |
-| `dumps_bytes(obj, *, default=None)` | function → `bytes` | alias of `dumps`, kept for compatibility |
+| `dumps(obj, *, default=None, passthrough=0)` | function → `bytes` | compact UTF-8 JSON, like `orjson.dumps` |
+| `dumps_str(obj, *, default=None, passthrough=0)` | function → `str` | like `json.dumps(obj, ensure_ascii=False, separators=(",", ":"))` |
+| `dumps_bytes(obj, *, default=None, passthrough=0)` | function → `bytes` | alias of `dumps`, kept for compatibility |
+| `PASSTHROUGH_DATETIME`, `_UUID`, `_DATACLASS`, `_ENUM` | `int` flags | for `passthrough=`, combine with `\|` |
 | `JSONDecodeError` | exception | `json.JSONDecodeError` itself (a `ValueError`) |
 | `JSONEncodeError` | exception | subclass of **both** `TypeError` and `ValueError`, like `orjson.JSONEncodeError` |
 | `__version__` | `str` | package version |
@@ -106,6 +109,18 @@ The wheel ships type stubs (`py.typed`), so mypy and pyright check calls to rjso
 
 - **Types:** `dict` (str keys), `list`, `tuple`, `str`, `int` (any size), `float`, `bool`,
   `None`, and their subclasses (`IntEnum`, `str` enums, `OrderedDict`, `namedtuple`, …).
+- **Native types, byte-identical to orjson:** `datetime` (RFC 3339: `2024-05-01T09:30:00`,
+  `.ffffff` only when non-zero, `+HH:MM` when aware), `date`, `time`, `uuid.UUID`
+  (lowercase, hyphenated), dataclasses (as objects; `_`-prefixed names skipped, as in
+  orjson) and `Enum` members (their value). Subclasses of `datetime`/`date`/`time`/`UUID`
+  go to `default=`. Three orjson bugs are not copied: a `tzinfo` whose `utcoffset()`
+  raises, or a deleted `__slots__` field, raise the Python error (orjson crashes);
+  `utcoffset()` returning `None` gives no offset, as in `isoformat()` (orjson writes
+  `+00:00`); an offset whose seconds round up to a whole hour carries into the hour
+  (orjson writes `+00:60`).
+- **`passthrough=`:** `rjson.PASSTHROUGH_*` flags send those kinds to `default=` (or make
+  them raise) instead, e.g. to tag them for an exact round trip
+  ([`examples/codec.py`](examples/codec.py)), like orjson's `OPT_PASSTHROUGH_*`.
 - **`default=`:** called with each value rjson cannot serialize; its return value is
   serialized in its place (and passed to `default` again if still unsupported), as in
   `json.dumps` and orjson. Exceptions it raises propagate unchanged. It is not called for
@@ -132,12 +147,14 @@ Most code migrates with a find-and-replace:
 | `except json.JSONDecodeError` / `orjson.JSONDecodeError` | `except rjson.JSONDecodeError` |
 | `except TypeError` / `orjson.JSONEncodeError` around `dumps` | `except rjson.JSONEncodeError` (`TypeError` keeps working) |
 | `json.dumps(obj, default=f)` / `orjson.dumps(obj, default=f)` | `rjson.dumps(obj, default=f)` |
+| `orjson.dumps(datetime/UUID/dataclass/Enum)` | the same bytes |
+| `orjson.dumps(obj, option=OPT_PASSTHROUGH_DATETIME)` | `rjson.dumps(obj, passthrough=rjson.PASSTHROUGH_DATETIME)` (also `_UUID`, `_DATACLASS`, `_ENUM`) |
+| `json.dumps(obj, default=lambda o: o.isoformat())` for datetimes | `rjson.dumps(obj)` (the same text, except UTC offsets with a seconds part, which are rounded to the minute) |
 
 What does **not** carry over yet, and how to handle it:
 
 | feature | status | workaround |
 |---|---|---|
-| datetime, UUID, dataclass, plain `Enum` | [#5](https://github.com/TinDang97/rjson/issues/5) | `default=` (e.g. `default=str`, or a converter like `_encode_default` in [`examples/json_logging.py`](examples/json_logging.py)) |
 | non-str dict keys | [#6](https://github.com/TinDang97/rjson/issues/6) | convert keys first (`json` coerces them, orjson needs `OPT_NON_STR_KEYS`) |
 | NaN / Infinity | by design | `dumps` raises (`json` writes `NaN`, orjson `null`) |
 | lenient `loads` (BOM, `NaN`, lone `"\ud800"`) | [#7](https://github.com/TinDang97/rjson/issues/7) | rejected, like orjson; `json` accepts them |
@@ -165,7 +182,7 @@ def items() -> RJSONResponse:
 Return `RJSONResponse(...)` directly for native data. Don't set it as
 `default_response_class`: that bypasses Pydantic's fast `dump_json` for endpoints with a
 response model, for no gain. [`examples/fastapi_app.py`](examples/fastapi_app.py) adds a
-fallback for datetime/UUID/models and rjson-parsed request bodies.
+fallback for Decimal, Pydantic models and dataclasses, and rjson-parsed request bodies.
 
 ### Logging, NDJSON, Redis and Kafka
 
@@ -194,7 +211,7 @@ bodies, NDJSON logs, 100 MB files, cache blobs) rjson is faster on most shapes (
 
 **Is it safe?**
 It checks the exact type of every value, reserves the worst-case output size before
-writing, and version-gates every CPython internal it uses, with self-tests at import. 856
+writing, and version-gates every CPython internal it uses, with self-tests at import. 921
 tests, fuzzing against `json`, and 0 mismatches against orjson on all benchmark workloads.
 It is still 0.x: pin the version.
 
@@ -286,7 +303,6 @@ maturin develop --release && python -m pytest tests -q
 
 ## Roadmap
 
-- Native datetime/UUID/dataclass/Enum ([#5](https://github.com/TinDang97/rjson/issues/5))
 - Options: non-str keys ([#6](https://github.com/TinDang97/rjson/issues/6)), lenient `loads` ([#7](https://github.com/TinDang97/rjson/issues/7)), `indent`, `sort_keys`
 - Streaming decoder/encoder for async I/O; free-threading and subinterpreter support ([docs/ASYNC.md](docs/ASYNC.md#roadmap))
 - Performance: NEON kernels for aarch64

@@ -1079,6 +1079,10 @@ REPO_ROOT = __import__("pathlib").Path(__file__).resolve().parent.parent
 PUBLIC_NAMES = {
     "JSONDecodeError",
     "JSONEncodeError",
+    "PASSTHROUGH_DATACLASS",
+    "PASSTHROUGH_DATETIME",
+    "PASSTHROUGH_ENUM",
+    "PASSTHROUGH_UUID",
     "__version__",
     "dumps",
     "dumps_bytes",

@@ -51,9 +51,12 @@ class RJSONResponse(JSONResponse):
     use orjson's shortest form (``1e-7``, ``0.00001``) instead of Python's ``repr``
     (``1e-07``, ``1e-05``). Values are identical; body hashes/ETags/snapshots are not.
 
-    Values rjson cannot encode (datetime, UUID, Decimal, Enum, Pydantic models,
-    dataclasses, sets, non-str dict keys) take a fallback: the whole content is converted
-    with :attr:`fallback_encoder` and serialized again. (rjson's ``default=`` hook is not
+    rjson serializes datetime, UUID and Enum values itself, in the same form
+    ``jsonable_encoder`` gives them. Values it cannot encode (Decimal, Pydantic models,
+    sets, non-str dict keys) and dataclasses (passed through, because
+    ``jsonable_encoder`` keeps ``_``-prefixed fields that rjson, like orjson, leaves out)
+    take a fallback: the whole content is converted with :attr:`fallback_encoder` and
+    serialized again. (rjson's ``default=`` hook is not
     used here: it sees single values, while ``jsonable_encoder`` also rewrites containers,
     e.g. non-str keys, and must give the same response FastAPI would.) The fallback
     runs only after the fast path fails, so native data pays nothing for it.
@@ -72,7 +75,7 @@ class RJSONResponse(JSONResponse):
     def render(self, content: Any) -> bytes:
         """Serialize ``content``; see the class docstring for the fallback."""
         try:
-            return rjson.dumps(content)
+            return rjson.dumps(content, passthrough=rjson.PASSTHROUGH_DATACLASS)
         except UnicodeEncodeError:
             raise  # lone surrogate: no encoder can fix this; let it surface as a 500
         except (TypeError, ValueError):

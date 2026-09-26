@@ -70,6 +70,16 @@ __all__ = [
 
 #: Key that marks a tagged value, e.g. ``{"$rjson": "uuid", "v": "..."}``.
 TAG = "$rjson"
+#: rjson serializes datetime/UUID/dataclass/Enum natively, as strings or objects that
+#: decode as plain JSON. The codec needs exact round trips, so it passes them through:
+#: they raise, and are tagged by the type hooks (or rejected without them).
+_PASSTHROUGH = (
+    rjson.PASSTHROUGH_DATETIME
+    | rjson.PASSTHROUGH_UUID
+    | rjson.PASSTHROUGH_DATACLASS
+    | rjson.PASSTHROUGH_ENUM
+)
+
 #: Same nesting limit as ``rjson.dumps``; also stops circular references in the walk.
 MAX_DEPTH = 254
 
@@ -209,7 +219,7 @@ class Codec:
             return _dumps(obj)
         try:
             # Fast path: plain JSON data needs no walk.
-            return rjson.dumps(self._wrap(obj, tagged=False))
+            return rjson.dumps(self._wrap(obj, tagged=False), passthrough=_PASSTHROUGH)
         except ValueError as exc:
             if not self.type_hooks or isinstance(exc, UnicodeEncodeError):
                 raise EncodeError(str(exc)) from exc
@@ -407,7 +417,7 @@ def _hashable(key: Any) -> Any:
 
 def _dumps(obj: Any) -> bytes:
     try:
-        return rjson.dumps(obj)
+        return rjson.dumps(obj, passthrough=_PASSTHROUGH)
     except (TypeError, ValueError) as exc:  # JSONEncodeError, or UnicodeEncodeError
         raise EncodeError(str(exc)) from exc
 

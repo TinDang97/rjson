@@ -199,7 +199,8 @@ Numbers: [docs/PRODUCTION_READINESS.md](PRODUCTION_READINESS.md#performance-fixe
 - **CI.** `.github/workflows/ci.yml`: clippy, then build + pytest on 3.10–3.14 (ubuntu x86_64), a no-AVX-512 variant, ubuntu-24.04-arm (3.10, 3.13), macos-14 and Windows (3.13). `cargo fmt --check` is not enforced yet (`entry.rs` and `parser.rs` are not rustfmt-clean) and clippy warnings are not fatal (one in `ser.rs`; five more dead-code/unused warnings only on aarch64).
 - **Performance regression gate.** `.github/workflows/perf.yml` (PRs labelled `perf`, or manual): builds base and head in one job, runs `corpus_benchmark.py --output-json` for both, interleaved ×5 on 3.11 and 3.13, and `benches/perf_gate.py` fails if any geomean is more than 5% worse. Corpora come from `benches/fetch_corpus.sh` (sha256-pinned). On this dev host, two runs of the same build differ by 1–3% in geomean, so 5% with 5 rounds is about the floor. Still to add: per-call time on tiny documents, `.so` size, import time and peak memory.
 - **Fuzzing.** Both review rounds ran differential fuzzers against stdlib `json` (≈150k `dumps` cases, plus `loads` value/error/float fuzzing), but the scripts live outside the repo. Next: check them in under `tests/fuzz/` and run a random-structure fuzzer under ASan in CI.
-- **Feature parity.** `default=` is done (entry is `METH_FASTCALL|METH_KEYWORDS`; per-call cost unchanged, containers +~8 instructions for the mode check). orjson also offers indent, sorted keys, and serialization of datetime, UUID, dataclasses and numpy. Add them as further hand-parsed keyword names, resolving those types lazily so import time stays low.
+- **Feature parity.** `default=` is done (entry is `METH_FASTCALL|METH_KEYWORDS`; per-call cost unchanged, containers +~8 instructions for the mode check). Native datetime/date/time, UUID, dataclass and Enum are done (issue #5, `src/native.rs`), resolved lazily from `sys.modules` (no import cost), with no change in instructions for documents without them. orjson also offers indent, sorted keys and numpy. Add them as further hand-parsed keyword names.
+- **Native types vs orjson** (CPython 3.13, rjson time ÷ orjson time, same process, 1,000 values unless noted): naive datetimes 0.92, UTC datetimes 0.29 (one-entry offset cache for `datetime.timezone`), `ZoneInfo` datetimes 0.45 (its C `utcoffset` called through the method descriptor), dates 0.97, UUIDs 1.04 (slot read with `PyMember_GetOne`, digits read inline, table hex), Enums 0.41, 500 API rows with UUID/datetime/Enum 0.75–0.80, 500 dataclasses 0.70. The FastAPI example's `RJSONResponse` on 100 such rows went from ~700 µs (fallback through `jsonable_encoder`) to 14 µs.
 
 ## 5. Decisions (resolved)
 
@@ -215,7 +216,7 @@ Numbers: [docs/PRODUCTION_READINESS.md](PRODUCTION_READINESS.md#performance-fixe
 uv venv .venv -p 3.11 && . .venv/bin/activate
 uv pip install maturin orjson pytest
 maturin develop --release
-python -m pytest tests -q                      # 856 tests
+python -m pytest tests -q                      # 921 tests
 benches/fetch_corpus.sh                        # corpora -> benches/data/ (sha256-pinned)
 python benches/corpus_benchmark.py [--json] [--output-json results.json]
 python benches/make_charts.py results.json     # README charts -> docs/img/

@@ -2,9 +2,10 @@
 
 * :class:`JSONFormatter` turns each ``logging.LogRecord`` into one JSON object per line
   (timestamp, level, logger, message, exception, ``extra=`` fields). It never raises:
-  values rjson cannot encode (datetime, UUID, Decimal, Enum, dataclasses, arbitrary
-  objects) are converted by a ``default=`` hook inside the same ``dumps_str`` call; NaN
-  and non-str keys, which ``default=`` does not cover, take a slower Python fallback.
+  rjson serializes datetime, UUID, Enum and dataclass values itself; the rest (Decimal,
+  timedelta, sets, subclasses of those types, arbitrary objects) is converted by a
+  ``default=`` hook inside the same ``dumps_str`` call; NaN, non-str keys and a
+  ``time`` with tzinfo, which ``default=`` does not cover, take a slower Python fallback.
 * :func:`write_ndjson` / :func:`read_ndjson` stream newline-delimited JSON to and from a
   file object, skipping blank lines and reporting bad lines with their line number.
 
@@ -143,9 +144,10 @@ def _to_json_line(payload: dict[str, Any]) -> str:
 def _encode_default(value: Any) -> Any:
     """``default=`` hook: one JSON-compatible replacement for a value rjson cannot encode.
 
-    Converts like :func:`_jsonable` and never raises (logging must not). rjson calls it
-    again on anything it returns that is still unsupported (a dataclass field, an Enum's
-    value).
+    Converts like :func:`_jsonable` and never raises (logging must not). rjson handles
+    exact datetime/date/time, UUID, Enum and dataclass values itself; they get here only
+    as subclasses (e.g. a ``datetime`` subclass from a date library). rjson calls the hook
+    again on anything it returns that is still unsupported.
     """
     try:
         if isinstance(value, enum.Enum):

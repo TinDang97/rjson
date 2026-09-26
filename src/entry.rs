@@ -2,7 +2,7 @@
 //!
 //! `loads` is a plain `METH_O` builtin; `dumps`/`dumps_str` are
 //! `METH_FASTCALL | METH_KEYWORDS` with hand-parsed `kwnames` (for the
-//! keyword-only `default=`): the common one-positional-argument call is one
+//! keyword-only `default=` and `passthrough=`): the common one-positional-argument call is one
 //! compare, everything else goes to a cold path. Neither uses PyO3
 //! `#[pyfunction]`s. A `#[pyfunction]` is `METH_FASTCALL|METH_KEYWORDS`
 //! and runs PyO3's generic argument extraction (`FunctionDescription`,
@@ -53,8 +53,8 @@ unsafe fn dumps_body(
     nargs: ffi::Py_ssize_t,
     kwnames: *mut ffi::PyObject,
 ) -> PyResult<*mut ffi::PyObject> {
-    let (obj, default) = dumps_args(py, "dumps", args, nargs, kwnames)?;
-    crate::ser::dumps_raw(py, obj, false, default)
+    let (obj, default, passthrough) = dumps_args(py, "dumps", args, nargs, kwnames)?;
+    crate::ser::dumps_raw(py, obj, false, default, passthrough)
 }
 
 unsafe fn dumps_str_body(
@@ -64,13 +64,14 @@ unsafe fn dumps_str_body(
     nargs: ffi::Py_ssize_t,
     kwnames: *mut ffi::PyObject,
 ) -> PyResult<*mut ffi::PyObject> {
-    let (obj, default) = dumps_args(py, "dumps_str", args, nargs, kwnames)?;
-    crate::ser::dumps_raw(py, obj, true, default)
+    let (obj, default, passthrough) = dumps_args(py, "dumps_str", args, nargs, kwnames)?;
+    crate::ser::dumps_raw(py, obj, true, default, passthrough)
 }
 
-/// Parses `(obj, /, *, default=None)` from a vectorcall: returns `obj` and
-/// the `default` callable (null when absent or None), both borrowed from the
-/// call's arguments, which the caller keeps alive for the whole call.
+/// Parses `(obj, /, *, default=None, passthrough=0)` from a vectorcall:
+/// returns `obj`, the `default` callable (null when absent or None), both
+/// borrowed from the call's arguments (which the caller keeps alive for the
+/// whole call), and the `passthrough` flags.
 ///
 /// The common call, one positional argument and no keywords, is a single
 /// compare. Errors follow CPython's argument-clinic wording.
@@ -81,11 +82,11 @@ unsafe fn dumps_args(
     args: *const *mut ffi::PyObject,
     nargs: ffi::Py_ssize_t,
     kwnames: *mut ffi::PyObject,
-) -> PyResult<(*mut ffi::PyObject, *mut ffi::PyObject)> {
+) -> PyResult<(*mut ffi::PyObject, *mut ffi::PyObject, u32)> {
     // PY_VECTORCALL_ARGUMENTS_OFFSET may be set in nargs.
     let n = ffi::PyVectorcall_NARGS(nargs as usize);
     if n == 1 && kwnames.is_null() {
-        return Ok((*args, ptr::null_mut()));
+        return Ok((*args, ptr::null_mut(), 0));
     }
     dumps_args_slow(py, name, args, n, kwnames)
 }
@@ -98,7 +99,7 @@ unsafe fn dumps_args_slow(
     args: *const *mut ffi::PyObject,
     n: ffi::Py_ssize_t,
     kwnames: *mut ffi::PyObject,
-) -> PyResult<(*mut ffi::PyObject, *mut ffi::PyObject)> {
+) -> PyResult<(*mut ffi::PyObject, *mut ffi::PyObject, u32)> {
     use pyo3::exceptions::PyTypeError;
     if n != 1 {
         return Err(PyTypeError::new_err(format!(
@@ -106,6 +107,7 @@ unsafe fn dumps_args_slow(
         )));
     }
     let mut default: *mut ffi::PyObject = ptr::null_mut();
+    let mut passthrough: u32 = 0;
     let nkw = if kwnames.is_null() {
         0
     } else {
@@ -117,6 +119,8 @@ unsafe fn dumps_args_slow(
         let value = *args.offset(n + i);
         if ffi::PyUnicode_CompareWithASCIIString(kw, c"default".as_ptr()) == 0 {
             default = value;
+        } else if ffi::PyUnicode_CompareWithASCIIString(kw, c"passthrough".as_ptr()) == 0 {
+            passthrough = passthrough_flags(py, name, value)?;
         } else {
             let kw_str = pyo3::Bound::from_borrowed_ptr(py, kw).to_string();
             return Err(PyTypeError::new_err(format!(
@@ -134,7 +138,32 @@ unsafe fn dumps_args_slow(
             "rjson.{name}() default must be callable, not {tn}"
         )));
     }
-    Ok((*args, default))
+    Ok((*args, default, passthrough))
+}
+
+/// `passthrough=`: None or an int made of `rjson.PASSTHROUGH_*` flags.
+unsafe fn passthrough_flags(py: Python<'_>, name: &str, value: *mut ffi::PyObject) -> PyResult<u32> {
+    use crate::native::PT_ALL;
+    use pyo3::exceptions::{PyTypeError, PyValueError};
+    if value == ffi::Py_None() {
+        return Ok(0);
+    }
+    if ffi::PyLong_Check(value) == 0 || ffi::PyBool_Check(value) != 0 {
+        let ty = pyo3::Bound::from_borrowed_ptr(py, value).get_type();
+        let tn = ty.name().map(|n| n.to_string()).unwrap_or_default();
+        return Err(PyTypeError::new_err(format!(
+            "rjson.{name}() passthrough must be an int of rjson.PASSTHROUGH_* flags, not {tn}"
+        )));
+    }
+    let v = ffi::PyLong_AsLongLong(value);
+    if v == -1 && !ffi::PyErr_Occurred().is_null() {
+        ffi::PyErr_Clear();
+    } else if (0..=PT_ALL as i64).contains(&v) {
+        return Ok(v as u32);
+    }
+    Err(PyValueError::new_err(format!(
+        "rjson.{name}() passthrough has unknown flags (valid: 0..{PT_ALL}, a combination of rjson.PASSTHROUGH_*)"
+    )))
 }
 
 /// `loads(data: str | bytes | bytearray | memoryview) -> Any`
@@ -191,19 +220,19 @@ static METHODS: MethodDefs = MethodDefs([
         ml_name: c"dumps".as_ptr(),
         ml_meth: ffi::PyMethodDefPointer { PyCFunctionFastWithKeywords: dumps },
         ml_flags: ffi::METH_FASTCALL | ffi::METH_KEYWORDS,
-        ml_doc: c"dumps(obj, /, *, default=None)\n--\n\nSerialize a Python object to compact UTF-8 JSON bytes (like orjson.dumps).\n\ndefault: called with each object that cannot be serialized; its return value is serialized instead.".as_ptr(),
+        ml_doc: c"dumps(obj, /, *, default=None, passthrough=0)\n--\n\nSerialize a Python object to compact UTF-8 JSON bytes (like orjson.dumps). Also serializes datetime/date/time, uuid.UUID, dataclasses and Enum members.\n\ndefault: called with each object that cannot be serialized; its return value is serialized instead.\npassthrough: rjson.PASSTHROUGH_* flags; those types go to default instead.".as_ptr(),
     },
     ffi::PyMethodDef {
         ml_name: c"dumps_str".as_ptr(),
         ml_meth: ffi::PyMethodDefPointer { PyCFunctionFastWithKeywords: dumps_str },
         ml_flags: ffi::METH_FASTCALL | ffi::METH_KEYWORDS,
-        ml_doc: c"dumps_str(obj, /, *, default=None)\n--\n\nSerialize a Python object to a compact JSON str (non-ASCII kept as-is).\n\ndefault: as in dumps.".as_ptr(),
+        ml_doc: c"dumps_str(obj, /, *, default=None, passthrough=0)\n--\n\nSerialize a Python object to a compact JSON str (non-ASCII kept as-is).\n\ndefault, passthrough: as in dumps.".as_ptr(),
     },
     ffi::PyMethodDef {
         ml_name: c"dumps_bytes".as_ptr(),
         ml_meth: ffi::PyMethodDefPointer { PyCFunctionFastWithKeywords: dumps },
         ml_flags: ffi::METH_FASTCALL | ffi::METH_KEYWORDS,
-        ml_doc: c"dumps_bytes(obj, /, *, default=None)\n--\n\nAlias of dumps (returns bytes); kept for compatibility.".as_ptr(),
+        ml_doc: c"dumps_bytes(obj, /, *, default=None, passthrough=0)\n--\n\nAlias of dumps (returns bytes); kept for compatibility.".as_ptr(),
     },
 ]);
 
@@ -212,9 +241,13 @@ static METHODS: MethodDefs = MethodDefs([
 /// that does `from .rjson import *` and copies `__all__`, so a name missing
 /// here (notably the underscore-prefixed `__version__`) would not be
 /// reachable as `rjson.<name>`. Keep in sync with `rjson.pyi`.
-const ALL: [&str; 7] = [
+const ALL: [&str; 11] = [
     "JSONDecodeError",
     "JSONEncodeError",
+    "PASSTHROUGH_DATACLASS",
+    "PASSTHROUGH_DATETIME",
+    "PASSTHROUGH_ENUM",
+    "PASSTHROUGH_UUID",
     "__version__",
     "dumps",
     "dumps_bytes",
@@ -246,6 +279,10 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // The very same class as json.JSONDecodeError (what loads raises). Also
     // warms the lookup `loads` would otherwise do on its first error.
     m.add("JSONDecodeError", crate::parser::decode_error_type(py)?.bind(py))?;
+    m.add("PASSTHROUGH_DATETIME", crate::native::PT_DATETIME)?;
+    m.add("PASSTHROUGH_UUID", crate::native::PT_UUID)?;
+    m.add("PASSTHROUGH_DATACLASS", crate::native::PT_DATACLASS)?;
+    m.add("PASSTHROUGH_ENUM", crate::native::PT_ENUM)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("__all__", pyo3::types::PyList::new(py, ALL)?)?;
     Ok(())

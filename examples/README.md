@@ -6,7 +6,7 @@ runnable. `tests/test_examples.py` exercises all of them.
 
 | file | what it shows | run it |
 |---|---|---|
-| [`fastapi_app.py`](fastapi_app.py) | `RJSONResponse` (rjson-rendered `JSONResponse` with a fallback for datetime/UUID/Decimal/models), `RJSONRoute` (request bodies parsed by `rjson.loads`, FastAPI's 422 errors unchanged), `json_body` dependency (400 with position / 415 on wrong content type) | `python examples/fastapi_app.py` (needs `fastapi`, `httpx`) |
+| [`fastapi_app.py`](fastapi_app.py) | `RJSONResponse` (rjson-rendered `JSONResponse`; datetime/UUID/Enum native, a fallback for Decimal/models/dataclasses), `RJSONRoute` (request bodies parsed by `rjson.loads`, FastAPI's 422 errors unchanged), `json_body` dependency (400 with position / 415 on wrong content type) | `python examples/fastapi_app.py` (needs `fastapi`, `httpx`) |
 | [`json_logging.py`](json_logging.py) | `JSONFormatter` for `logging` (one JSON object per line, never raises, stringifies unsupported extras, replaces lone surrogates), `write_ndjson` / `read_ndjson` with blank-line handling and per-line errors | `python examples/json_logging.py` |
 | [`codec.py`](codec.py) | bytes codec for Redis/Kafka: schema/version envelope with migrations, round-tripping datetime/UUID/Decimal/set/bytes/Enum/dataclass via registered types, Kafka serializer/deserializer callables (tombstone-safe), optional zstd compression above 1 KB (`compress="zstd"`) | `python examples/codec.py` |
 
@@ -17,8 +17,10 @@ Copy the file you need into your project; nothing here is installed with rjson.
 rjson's API is `loads`, `dumps` (bytes), `dumps_str` (str). The only keyword option is
 `default=`:
 
-- **No `option=`, `indent`, `sort_keys`, `ensure_ascii`.** datetime, UUID, Decimal,
-  dataclasses and plain `Enum` raise unless `default=` converts them (`json_logging.py`
+- **No `option=`, `indent`, `sort_keys`, `ensure_ascii`.** datetime, date, time, UUID,
+  dataclasses and `Enum` members are serialized natively, byte for byte like orjson;
+  `passthrough=` sends them to `default=` instead (`codec.py` does, to tag them). Decimal,
+  sets, bytes and other types raise unless `default=` converts them (`json_logging.py`
   does). `default` is not called for NaN or non-str keys, so the examples keep a second
   tier: call rjson first, and only when it raises, convert the data in Python and call it
   again. Data that is already JSON-native pays nothing.

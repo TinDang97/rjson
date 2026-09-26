@@ -264,12 +264,12 @@ class TestDefaultHook:
         assert rjson.dumps_str(obj, default=self.conv) == want
 
     def test_default_none_or_absent(self):
-        import datetime
+        import decimal
 
         assert rjson.dumps({"a": 1}, default=None) == b'{"a":1}'
         for kw in ({}, {"default": None}):
             with pytest.raises(rjson.JSONEncodeError, match="not JSON serializable"):
-                rjson.dumps(datetime.date(2024, 1, 1), **kw)
+                rjson.dumps(decimal.Decimal("1.5"), **kw)
 
     def test_not_called_for_supported_types(self):
         calls = []
@@ -346,9 +346,9 @@ class TestDefaultHook:
         raise TypeError("unsupported")
 
     def test_no_reference_leaks(self):
-        import datetime
+        import decimal
 
-        d = datetime.date(2024, 1, 1)
+        d = decimal.Decimal("1.5")
         conv = self.conv
         obj = {"a": [d, d], "b": d}
         for f in (rjson.dumps, rjson.dumps_str):

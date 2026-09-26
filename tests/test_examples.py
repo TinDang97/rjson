@@ -693,6 +693,36 @@ class TestFastAPIResponse:
             "model": {"name": "n", "price": "2", "tags": []},
         }
 
+    def test_native_types_skip_the_fallback(self, api, monkeypatch):
+        mod, _ = api
+        from fastapi.encoders import jsonable_encoder
+
+        content = {
+            "when": dt.datetime(2024, 1, 2, 3, 4, 5, 6, tzinfo=dt.timezone.utc),
+            "day": dt.date(2024, 1, 2),
+            "id": uuid.UUID(int=1),
+            "color": Color.GREEN,
+        }
+        want = json.loads(rjson.dumps(jsonable_encoder(content)))
+
+        class NoFallback(mod.RJSONResponse):
+            fallback_encoder = staticmethod(lambda c: pytest.fail("fallback used"))
+
+        assert json.loads(NoFallback(content).body) == want
+
+    def test_dataclasses_keep_fastapi_semantics(self, api):
+        mod, _ = api
+
+        @dataclasses.dataclass
+        class Rec:
+            _internal: int
+            name: str
+
+        # jsonable_encoder keeps "_" fields (dataclasses.asdict); rjson/orjson drop them.
+        assert json.loads(mod.RJSONResponse({"r": Rec(1, "n")}).body) == {
+            "r": {"_internal": 1, "name": "n"}
+        }
+
     def test_to_jsonable_fallback_keeps_decimal_precision(self, api):
         mod, _ = api
 
