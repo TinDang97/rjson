@@ -98,10 +98,11 @@ class TestDatetime:
         )
 
     def test_offsets_with_seconds_round_like_orjson(self):
-        # Historical local mean time: Amsterdam was +00:19:32 in 1900.
-        ams = zoneinfo.ZoneInfo("Europe/Amsterdam")
-        assert both(dt.datetime(1900, 1, 1, tzinfo=ams)) == b'"1900-01-01T00:00:00+00:20"'
+        # Seconds offsets come from historical local mean time (e.g. +00:19:32 in
+        # some tzdata builds of Europe/Amsterdam for 1900; the exact history
+        # depends on the platform's tzdata, so fixed offsets are used here).
         for secs, want in [
+            (1172, "+00:20"),
             (29, "+00:00"),
             (30, "+00:01"),
             (-29, "-00:00"),
