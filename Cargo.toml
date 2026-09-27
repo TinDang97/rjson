@@ -17,6 +17,9 @@ zmij = "1.0"         # shortest round-trip float formatting, same output as orjs
 simdutf8 = "0.1"     # SIMD UTF-8 validation for bytes input to loads
 fast-float = "0.2"   # correctly rounded fallback for >19-digit floats in loads
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"         # thread stack bounds (stack.rs); already a dependency of pyo3
+
 [build-dependencies]
 pyo3-build-config = "0.29"
 

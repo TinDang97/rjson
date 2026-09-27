@@ -66,6 +66,8 @@ pub enum SerError {
     /// `err_obj` is the offending key (a strong reference).
     KeyNotStr,
     Recursion,
+    /// Nesting deeper would overflow this thread's stack (see stack.rs).
+    Stack,
     /// `datetime.time` with a `tzinfo` (orjson rejects it too: a time of day
     /// has no well-defined UTC offset).
     TimeTz,
@@ -1554,6 +1556,35 @@ impl Serializer {
         }
     }
 
+    /// Whether entering one more container is not allowed: the nesting limit,
+    /// or (checked every `stack::CHECK_EVERY` levels) too little stack left.
+    #[inline(always)]
+    fn nest_error(&self) -> Option<SerError> {
+        // One comparison on the hot path; the limits are checked past it.
+        if self.depth >= crate::stack::CHECK_FROM {
+            return self.deep_nest_error();
+        }
+        None
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn deep_nest_error(&self) -> Option<SerError> {
+        if self.depth >= RECURSION_LIMIT {
+            return Some(SerError::Recursion);
+        }
+        // Guarded mode may run Python code below this level (see stack.rs).
+        let reserve = if self.guard {
+            crate::stack::RESERVE_PYCALL
+        } else {
+            crate::stack::RESERVE
+        };
+        if self.depth.is_multiple_of(crate::stack::CHECK_EVERY) && crate::stack::exhausted(reserve) {
+            return Some(SerError::Stack);
+        }
+        None
+    }
+
     #[cold]
     #[inline(never)]
     fn fail(&mut self, e: SerError) -> Cur {
@@ -1956,8 +1987,8 @@ impl Serializer {
 
     #[inline(always)]
     unsafe fn ser_list_inner(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
-        if self.depth >= RECURSION_LIMIT {
-            return self.fail(SerError::Recursion);
+        if let Some(e) = self.nest_error() {
+            return self.fail(e);
         }
         let n = ffi::PyList_GET_SIZE(obj);
         if n == 0 {
@@ -2059,8 +2090,8 @@ impl Serializer {
 
     #[inline(always)]
     unsafe fn ser_tuple_inner(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
-        if self.depth >= RECURSION_LIMIT {
-            return self.fail(SerError::Recursion);
+        if let Some(e) = self.nest_error() {
+            return self.fail(e);
         }
         let n = ffi::PyTuple_GET_SIZE(obj);
         if n == 0 {
@@ -2107,8 +2138,8 @@ impl Serializer {
     /// by resizing the dict; and CPython's "dictionary changed size during
     /// iteration" error if `default` adds or removes items.
     unsafe fn ser_dict_checked(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
-        if self.depth >= RECURSION_LIMIT {
-            return self.fail(SerError::Recursion);
+        if let Some(e) = self.nest_error() {
+            return self.fail(e);
         }
         let size = ffi::PyDict_Size(obj);
         if size == 0 {
@@ -2133,8 +2164,8 @@ impl Serializer {
 
     #[inline(always)]
     unsafe fn ser_dict_inner(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
-        if self.depth >= RECURSION_LIMIT {
-            return self.fail(SerError::Recursion);
+        if let Some(e) = self.nest_error() {
+            return self.fail(e);
         }
         if (*(obj as *mut ffi::PyDictObject)).ma_used == 0 {
             return self.put2(p, b"{}");
@@ -2491,8 +2522,8 @@ impl Serializer {
         obj: *mut ffi::PyObject,
         ty: *mut ffi::PyTypeObject,
     ) -> CurResult {
-        if self.depth >= RECURSION_LIMIT {
-            return self.fail(SerError::Recursion);
+        if let Some(e) = self.nest_error() {
+            return self.fail(e);
         }
         if !self.guard && !enum_value_plain(ty) {
             return self.fail(SerError::NeedGuard);
@@ -2526,8 +2557,8 @@ impl Serializer {
         if !self.guard {
             return self.fail(SerError::NeedGuard);
         }
-        if self.depth >= RECURSION_LIMIT {
-            return self.fail(SerError::Recursion);
+        if let Some(e) = self.nest_error() {
+            return self.fail(e);
         }
         self.depth += 1;
         ffi::Py_INCREF(obj);
@@ -2662,8 +2693,8 @@ impl Serializer {
     #[cold]
     #[inline(never)]
     unsafe fn call_default(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
-        if self.depth >= RECURSION_LIMIT {
-            return self.fail(SerError::Recursion);
+        if let Some(e) = self.nest_error() {
+            return self.fail(e);
         }
         // The call's caller must own its argument: `obj` is borrowed from a
         // container that `default` itself could modify.
@@ -3187,6 +3218,14 @@ fn to_pyerr(py: Python<'_>, ser: &Serializer, e: SerError) -> PyErr {
             "Maximum nesting depth ({}) exceeded during JSON serialization (circular reference?)",
             RECURSION_LIMIT
         ),
+        SerError::Stack => {
+            // Like json.dumps (RecursionError), not a JSONEncodeError: the
+            // value is fine, the thread's stack is too small for it.
+            return pyo3::exceptions::PyRecursionError::new_err(
+                "object nested too deep for this thread's stack (serialize it in a thread with a \
+                 larger stack, see threading.stack_size)",
+            );
+        }
         SerError::TimeTz => "datetime.time must not have tzinfo set".to_string(),
         SerError::NeedGuard => "internal error: unguarded native value".to_string(),
         SerError::PyErrSet => return PyErr::fetch(py),

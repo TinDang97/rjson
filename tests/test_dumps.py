@@ -8,6 +8,7 @@ rjson uses the shortest round-trip representation (like orjson).
 import collections
 import enum
 import json
+import os
 import sys
 
 import pytest
@@ -949,6 +950,7 @@ class TestOutputBuffer:
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="glibc malloc behaviour")
+@pytest.mark.skipif(bool(os.environ.get("RJSON_SANITIZER")), reason="sanitizer allocator, not glibc's")
 def test_large_output_does_not_refault_every_call():
     # Shrinking each result by the capacity headroom made every call free a
     # block smaller than the next request, so glibc kept serving it with a

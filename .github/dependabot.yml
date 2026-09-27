@@ -1,0 +1,24 @@
+# Weekly update PRs. Actions are pinned to commit SHAs; Dependabot bumps the
+# SHA and the version comment together. Grouped to keep the PR count low.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo-minor:
+        update-types: [minor, patch]
+    # PyO3 upgrades touch the doc-hidden trampoline API (src/entry.rs) and
+    # need the version checks in CLAUDE.md; take them deliberately.
+    ignore:
+      - dependency-name: pyo3
+        update-types: [version-update:semver-major, version-update:semver-minor]

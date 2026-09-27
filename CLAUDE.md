@@ -22,12 +22,15 @@ src/
   native.rs   # datetime/date/time, UUID, dataclass, Enum for dumps: lazy type lookup + formatting
   compat.rs   # version-portable str accessors (3.14: own bitfield reader + import self-test)
               # and extern decls of private-but-exported C-API symbols
+  stack.rs    # thread stack bounds (pthread/macOS/Windows) + headroom check for deep nesting
 build.rs      # pyo3_build_config::use_pyo3_cfgs() -> Py_3_10/Py_3_12... cfgs
 rjson.pyi     # type stub (installed as rjson/__init__.pyi + py.typed)
 examples/     # FastAPI, JSON logging/NDJSON, Redis/Kafka codec (tested by tests/test_examples.py)
 tests/        # test_rjson.py (general + regressions), test_dumps.py (serializer), test_lenient.py (loads lenient=), test_native.py
               # (datetime/UUID/dataclass/Enum, differential vs orjson), test_keys.py
-              # (non_str_keys, vs json), test_examples.py
+              # (non_str_keys, vs json), test_examples.py, test_fuzz.py (differential fuzzing vs json;
+              # RJSON_FUZZ_ITERS/RJSON_FUZZ_SEED), test_hardening.py (small-stack nesting in
+              # subprocesses, int digit limit, thread/re-entrancy stress)
 benches/corpus_benchmark.py   # reference benchmark vs orjson (ratio, same process; --output-json)
 benches/production_benchmark.py, prod_workloads.py   # production-shaped workloads (web/logs/big files/codec), time + RSS
 benches/fetch_corpus.sh       # download the corpora (sha256-pinned) into benches/data/
@@ -35,7 +38,8 @@ benches/examples_benchmark.py # examples/ as written vs the same code on json/or
 benches/perf_gate.py          # compare base/head benchmark runs, fail on >5% geomean regression
 benches/make_charts.py        # README charts (docs/img/*.svg) + table from a --json --output-json run
 scripts/build_pgo.sh, scripts/pgo_train.py   # PGO wheel build; training is synthetic, disjoint from the benchmark
-.github/workflows/            # ci.yml (clippy + tests), wheels.yml (PGO wheels), perf.yml (perf gate, label `perf`)
+.github/workflows/            # ci.yml (clippy + tests + ASan job), wheels.yml (PGO wheels; on a v* tag: provenance + PyPI trusted publishing), perf.yml (perf gate, label `perf`)
+                              # actions pinned to commit SHAs (Dependabot bumps them); SECURITY.md, CHANGELOG.md at the root
 docs/PERFORMANCE_REVIEW.md    # review findings, results, ranked roadmap
 docs/PRODUCTION_READINESS.md  # production workloads report, migration, adoption blockers
 docs/ASYNC.md                 # asyncio/threads guidance, free-threading/subinterpreter roadmap
@@ -51,6 +55,7 @@ docs/ASYNC.md                 # asyncio/threads guidance, free-threading/subinte
 - Own UTF-8 decoder writing into the final str; bytes input validated once with simdutf8. UCS2 results go through `decode_ucs2` (SSSE3, cfg-gated): 8/16-byte ASCII widening, 5×3-byte blocks via one u64 pattern pre-check + masked compare + shuffles, otherwise two chars per trip. Vector paths only for whole blocks with a constant advance (a data-dependent advance serialized the loop); wide stores only when that many units are left (`nchars`).
 - Cyclic GC paused during parsing on CPython 3.10/3.11 only (`pause_gc`/`resume_gc`).
 - `lenient=True` (issue #7): accepts exactly what `json.loads` accepts. `NaN`/`Infinity`/`-Infinity` (`parse_other`, `nonfinite_literal`), overflow to `inf` (`infinite_number`) and a UTF-8 BOM on bytes (skipped in `entry::loads_impl`) are native, checked only on paths that are errors in strict mode; anything else rejected goes to `json.loads` (`entry::loads_fallback`: lone surrogates, UTF-16/32, depth > 1024). If both reject, rjson's error is raised unless json's `JSONDecodeError.pos` is later; non-ValueError/RecursionError exceptions from the fallback propagate.
+- Stack headroom (`stack.rs`): `enter()` keeps one comparison on the hot path (depth > `stack::CHECK_FROM` = 16); past it, cold `enter_deep` checks the 1024 limit and, every 8 levels, the thread's stack bounds (cached per thread), raising `RecursionError` when < 12 KiB would be left (`dumps` in guarded mode on 3.14: 44 KiB, `stack::RESERVE_PYCALL`, because 3.14's own C-stack check aborts the process when Python code starts with < ~16 KiB left). Tiny stacks (64-128 KiB: musl, `threading.stack_size`) used to SIGSEGV. The lenient fallback never runs for that error, and for depth > 1024 only on 3.14, on Windows (CPython's USE_STACKCHECK) or with >= 4 MiB of stack left (3.12/3.13's `json` needs ~2 MiB for its ~10,000 levels and crashes instead of raising). Big ints over `sys.get_int_max_str_digits()` get a message naming the limit.
 - Errors: `json.JSONDecodeError` (exported as `rjson.JSONDecodeError`); `.msg` is the bare reason; positions match json (trailing comma at the comma); depth limit 1024; trailing content rejected.
 - Input: the parser needs a readable NUL after the document. memoryview: parsed in place when C-contiguous, >= 4 KiB and ending exactly where its `bytes`/`bytearray` ends (found via `memoryview.obj`; export held in `Input::held`), else copied in C order (any layout). Non-ASCII `str` >= 4096 chars without a cached UTF-8 copy: temporary `bytes` via `PyUnicode_AsUTF8String` (`Input::temp`), so no copy stays attached to the caller's string.
 
@@ -64,7 +69,7 @@ docs/ASYNC.md                 # asyncio/threads guidance, free-threading/subinte
 - Escaping: AVX-512VL / AVX2 (runtime detected) / SSE2 kernels; every write reserves its worst case first. 256-bit loads/stores go through `load256`/`store256` (inline asm), because x86-64-v2 tuning makes LLVM split them. Test the fallbacks with `RUSTFLAGS="-C target-cpu=x86-64-v2 --cfg rjson_no_avx512 --cfg rjson_no_avx2"`.
 - Output buffer headroom (1/16) must stay below the shrink threshold (1/8): shrinking every call makes glibc mmap and page-fault every large result.
 - Capacity: initial = min of the last two output sizes per thread and mode (`SizeHistory`); growth jumps to the peak of the last 64 calls once the output needs max(peak/64, 4 KiB) (`jump_threshold`; earlier, worst-case reservations of small results jumped too, issue #13); growth past 1 MiB reserves ≥ 32 MiB + 64 KiB (always mmapped, shrunk back in `into_object`). Keep a result from ever holding the reservation.
-- Recursion limit 254 (also catches circular references); each `default` call counts as a level, so a non-converging `default` ends there.
+- Recursion limit 254 (also catches circular references); each `default` call counts as a level, so a non-converging `default` ends there. Every container/`default`/Enum/dataclass level goes through `nest_error()` (one comparison below depth 16; cold `deep_nest_error` checks the limit and the stack headroom, `SerError::Stack` -> `RecursionError`).
 - Guarded mode (`Serializer::guard`): Python code run mid-serialization may mutate or free what we iterate. In guarded mode every list/tuple/dict is held by a strong ref while serialized (`guarded`), dicts use `PyDict_Next` plus a size check (CPython's "changed size during iteration" RuntimeError), never the direct entry walk; `call_default` and the native writers incref their object; `err_obj` is a strong ref. `default=` sets it. Otherwise no Python code may run: a native value that would run some (dataclass, a tzinfo other than `timezone`/C `ZoneInfo`, an Enum with custom attribute access, a UUID type whose `int` is not a plain slot) returns `SerError::NeedGuard` *before* running any, and `dumps_raw` restarts the whole call in guarded mode. Any new code path that can run Python code must do the same; the tests mutate containers from such code under `PYTHONMALLOC=debug`.
 - `non_str_keys=True` (issue #6): `dict_item`'s non-str branch calls cold `key_text`; bool/None/int/float keys get exactly `json.dumps`'s text (float `repr` rebuilt from zmij's digits in `native::fmt_float_repr`, which equal CPython's `repr` digits; Rust's `{:e}` does not), Enum/datetime/date/time/UUID keys follow orjson's `OPT_NON_STR_KEYS`. Str keys never reach it, so the option costs nothing when off. Options travel in `ser::DumpsOpts`.
 - Native types (`native.rs`, issue #5): exact `datetime`/`date`/`time`/`uuid.UUID` types, any `Enum` (metaclass check; int/str/float mix-ins are caught earlier as subclasses), dataclasses (`__dataclass_fields__` in the type's own dict). Output is orjson's byte for byte (differential test in `test_native.py`) except orjson's crashes/invalid output (documented there). Types come from `sys.modules` lazily; rjson never imports a module. Checked only after all builtin checks (`ser_other`, cold), so JSON-native documents pay nothing.
@@ -86,6 +91,7 @@ docs/ASYNC.md                 # asyncio/threads guidance, free-threading/subinte
 - **Never set `target-cpu=native`** or global `+avx2`: use `#[target_feature]` + runtime detection.
 - **Never pass extra flags via `RUSTFLAGS`**: it silently replaces `.cargo/config.toml`'s rustflags (x86-64-v2). Use `CARGO_TARGET_<TRIPLE>_RUSTFLAGS`, which cargo merges (the old PGO script built x86-64 v1 wheels this way).
 - **Private CPython symbols/layouts are version-gated and listed here**: `_PyBytes_Resize`, `_PyDict_NewPresized` (compat.rs), `_PyDict_FromItems` (parser.rs, 3.13 only), dict keys layout (ser.rs, `rjson_dict_direct`, 3.11-3.13), str state bitfield (compat.rs, 3.14). Public-header structs read directly (re-check on a new version): int digits (`LongHeader`, self-tested; also used for `UUID.int`), `PyMemberDescrObject.d_member` (native.rs, checked by member name), datetime fields via pyo3-ffi's `PyDateTime_*` accessors. Re-verify each against the new version's headers before widening a gate. They must be `PyAPI_FUNC` (exported on Windows); build.rs links the full `python3XY.lib` there because pyo3-ffi's `raw-dylib` imports only its own declarations.
+- **Any new recursion must go through the depth/stack checks** (`Parser::enter`, `Serializer::nest_error`): a recursion step without them can overflow a small thread stack (SIGSEGV). tests/test_hardening.py runs every nesting kind in 32-128 KiB threads.
 - Keep the module GIL-only (no free-threading declaration) until borrowed list/dict iteration is audited.
 - `panic = "abort"` is set: a panic kills the interpreter, so do not `unwrap` on Python-derived data.
 
@@ -106,6 +112,8 @@ cargo clippy --release
 - Test other Python versions: `maturin build --release -i python3.12 -i python3.13 -o <dir>` and install each wheel into a matching venv.
 - Benchmarks: always compare against orjson in the same process (ratio); the dev host is noisy (±10%), so trust geomeans and repeat before believing <10% changes.
 - Performance changes: measure each change separately, keep output byte-identical unless intended, update `docs/PERFORMANCE_REVIEW.md` and the README table.
+- ASan locally (as the CI `sanitize` job): `RUSTUP_TOOLCHAIN=nightly CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-Zsanitizer=address maturin build --release --target x86_64-unknown-linux-gnu`, install, then `ASAN_OPTIONS=detect_leaks=0 PYTHONMALLOC=malloc RJSON_SANITIZER=asan LD_PRELOAD=$(gcc -print-file-name=libasan.so) python -m pytest tests`.
+- Releasing: bump `version` in Cargo.toml and pyproject.toml (a test checks they agree), move CHANGELOG's Unreleased section under the version, push tag `vX.Y.Z`; wheels.yml builds, attests and publishes (needs the PyPI trusted publisher + `pypi` environment, see its header).
 
 ## Code Conventions
 

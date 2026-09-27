@@ -62,7 +62,35 @@ The full list, with the bugs behind each rule, is in [`CLAUDE.md`](CLAUDE.md). I
 - **Version-gate private CPython symbols** and list them in `CLAUDE.md`. Re-verify each one
   against the new version's headers before widening a gate.
 - **No `target-cpu=native` or global `+avx2`.** Use `#[target_feature]` with runtime detection.
+- **Recurse only through the depth checks** (`Parser::enter`, `Serializer::nest_error`), which
+  also check the thread's stack headroom. An unchecked recursion step can overflow a small
+  thread stack and crash the process.
 - Comment every `unsafe` block with the invariant it relies on.
+
+## Fuzzing and sanitizers
+
+`tests/test_fuzz.py` compares rjson with `json` on random documents, random objects and
+corrupted input. It runs 1,000 cases per test by default; scale it up locally:
+
+```bash
+RJSON_FUZZ_ITERS=50000 RJSON_FUZZ_SEED=$RANDOM python -m pytest tests/test_fuzz.py -q
+```
+
+A failure names its seed, so it reproduces with `RJSON_FUZZ_SEED`. The CI `sanitize` job
+runs the whole suite on an AddressSanitizer build; `CLAUDE.md` has the commands to do the
+same locally (nightly Rust, `LD_PRELOAD` of the ASan runtime).
+
+## Reporting security issues
+
+Privately, as described in [SECURITY.md](SECURITY.md), not in a public issue.
+
+## Releasing
+
+1. Set the same `version` in `Cargo.toml` and `pyproject.toml` (a test checks they agree).
+2. Move the `Unreleased` entries in `CHANGELOG.md` under the new version.
+3. Push a tag `vX.Y.Z`. `.github/workflows/wheels.yml` builds and tests the PGO wheels and
+   the sdist, attests their provenance and publishes them to PyPI with trusted publishing
+   (one-time setup is described at the top of that file).
 
 ## Benchmarks
 

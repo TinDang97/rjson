@@ -29,11 +29,11 @@ each is tracked as an issue.
 |---|---|
 | Faster than `json`? | Yes: 2.9–29× on `dumps`, 1.7–5.8× on `loads` (28× on tiny documents). |
 | Faster than orjson? | Yes on most shapes: geomean `dumps` 0.67×, `loads` 0.83×, round trip 0.78× (rjson ÷ orjson time). CJK text (0.59–0.91×) and full-precision float arrays (0.89–0.95×) now load faster than orjson; see [Performance](#performance). |
-| Correct? | 0 mismatches. 1056 tests, fuzzing against `json`, and output byte-identical to orjson. |
+| Correct? | 0 mismatches. 1119 tests, fuzzing against `json`, and output byte-identical to orjson. |
 | Memory? | Better on large `loads`: peak RSS 30–37% below orjson. Retained small results cost ~400 B instead of ~8 KB each. |
 | Safe for async services? | Yes, but each call blocks the event loop, and `to_thread` doesn't help. See [ASYNC.md](ASYNC.md). |
 | Compress / go binary? | Compress at the transport, and only payloads of a few KB and up. Use Arrow/Polars only for columnar data. See [Transfer size](#transfer-size-compression-and-binary-formats). |
-| Installable? | Not on PyPI yet. The planned distribution name is `pyrjson`; CI builds PGO wheels for Linux, macOS and Windows. |
+| Installable? | Not on PyPI yet. The distribution name is `pyrjson`; CI builds PGO wheels for Linux (glibc and musl), macOS and Windows, and a `v*` tag publishes them with trusted publishing and provenance attestations once the PyPI side is configured. |
 | Stable API? | No: 0.x, experimental. |
 
 ## Workload results
@@ -349,17 +349,28 @@ The full migration guide with code is in the [README](../README.md#migrating-fro
 
 ## Operational notes
 
-- **Threads:** safe (20k concurrent `loads`+`dumps` calls on 8 threads, 0 mismatches), but
-  calls serialize on the GIL, so there is no parallel speedup.
+- **Threads:** safe (20k concurrent `loads`+`dumps` calls on 8 threads, 0 mismatches; the
+  test suite also re-enters rjson from `default=` and switches threads mid-call), but calls
+  serialize on the GIL, so there is no parallel speedup.
 - **asyncio / uvloop:** works. A call blocks the loop for its duration (~0.7 ms per 100 KB
   in `loads`); for large payloads, stream NDJSON or use a process pool. See
   [ASYNC.md](ASYNC.md).
 - **Free-threaded CPython (3.13t/3.14t) and subinterpreters:** not supported yet (the
   build refuses free-threaded Python; subinterpreter import raises `ImportError`).
-- **Limits:** `dumps` nesting 254 (like orjson), `loads` nesting 1024.
-- **Crash safety:** `panic = "abort"`, so a Rust panic kills the process. The code avoids
-  `unwrap` on Python-derived data, and no crash or memory error came up in any test,
-  fuzzing or benchmark run.
+- **Limits:** `dumps` nesting 254 (like orjson), `loads` nesting 1024, and on top of that
+  the thread's stack: in small-stack threads (musl/Alpine's 128 KiB default,
+  `threading.stack_size`) deep documents raise `RecursionError` (about 975 nested arrays
+  or 620 nested objects fit in 128 KiB; the full 1024 levels in 256 KiB). Integers are
+  limited by `sys.set_int_max_str_digits` (4300 digits by default), as in `json`.
+- **Crash safety:** `panic = "abort"`, so a Rust panic kills the process; the code avoids
+  `unwrap` on Python-derived data. Production hardening found one crash: deeply nested
+  input segfaulted `loads`/`dumps` in threads with 64-128 KiB stacks (stdlib `json` does
+  too). It now raises `RecursionError`, verified by sweeping every stack size, depth and
+  operation on 3.10-3.14 (0 crashes in 13,195 runs; on 3.14 the sweep also caught CPython's
+  own stack check aborting the process when `default=` ran near the end of the stack, now
+  avoided by keeping 44 KiB free before Python code runs there). CI runs the tests, differential
+  fuzzing and thread stress tests on an AddressSanitizer build; none reported an error.
+  Vulnerability reports: [SECURITY.md](../SECURITY.md).
 - **Platforms:** CPython 3.10–3.14 on Linux x86_64/aarch64, macOS arm64 and Windows (CI).
   x86_64 builds target x86-64-v2 and select AVX2/AVX-512 at runtime. PyPy and GraalPy are
   not supported.
@@ -368,7 +379,7 @@ The full migration guide with code is in the [README](../README.md#migrating-fro
 
 | blocker | impact | issue |
 |---|---|---|
-| not on PyPI | high: needs a Rust toolchain to install | publish `pyrjson` |
+| not on PyPI | high: needs a Rust toolchain to install | release workflow ready (`wheels.yml`); needs the PyPI trusted publisher + a `v0.1.0` tag |
 | no free-threading / subinterpreter support | medium, growing with 3.14t adoption | [ASYNC.md roadmap](ASYNC.md#roadmap) |
 | no `indent` / `sort_keys` | low for services, high for config/debug output | planned |
 
@@ -390,5 +401,5 @@ benches/fetch_corpus.sh
 python benches/production_benchmark.py --quick                 # ~30 s smoke run
 python benches/production_benchmark.py --output-json prod.json # full run, ~6 min
 python benches/production_benchmark.py --big-only              # large-file time + RSS
-python -m pytest tests -q                                      # 1056 tests
+python -m pytest tests -q                                      # 1119 tests
 ```

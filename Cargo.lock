@@ -119,6 +119,7 @@ version = "0.1.0"
 dependencies = [
  "fast-float",
  "itoap",
+ "libc",
  "pyo3",
  "pyo3-build-config",
  "simdutf8",
