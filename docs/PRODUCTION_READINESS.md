@@ -59,7 +59,15 @@ Return `RJSONResponse(...)` directly for native data
 ([`examples/fastapi_app.py`](../examples/fastapi_app.py)). That includes rows with UUIDs,
 datetimes and Enums, which rjson now serializes itself: 100 such rows render in 14 µs
 (orjson 27 µs), against ~700 µs when they had to go through `jsonable_encoder`. Endpoints
-with a response model already use Pydantic's fast `dump_json`, so leave those alone.
+that return Pydantic models through a response model already use Pydantic's fast
+`dump_json`, so leave those alone.
+
+Whole requests through the app (`benches/examples_benchmark.py`, PGO wheel, FastAPI 0.141),
+against stock FastAPI endpoints with a return type (Pydantic `dump_json`): the example's
+`RJSONResponse` makes a 50-row page 1.25–1.38× faster, a 50-row page with UUID/datetime/Enum
+fields 1.80–1.92×, and a 1,000-row export 3.00–3.19×. Request bodies gain 3–8% (routing
+dominates). Details and the logging/NDJSON/codec results:
+[examples/README.md](../examples/README.md#measured-gains).
 
 ### Logs, NDJSON, events
 

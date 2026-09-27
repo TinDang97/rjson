@@ -893,3 +893,27 @@ class TestFastAPIJsonBodyDependency:
         out = run_demo("fastapi_app")
         assert "GET /items -> 200 application/json" in out
         assert "POST /events -> 400" in out and "POST /events -> 415" in out
+
+
+# ---------------------------------------------------------------------------------------
+# benches/examples_benchmark.py: the recorded gains compare equivalent work
+# ---------------------------------------------------------------------------------------
+
+
+def test_examples_benchmark_variants_are_equivalent():
+    """The benchmark runs each example on rjson, json and orjson; every variant must give
+    the same responses, log lines, NDJSON records and codec round trips as the baseline,
+    or the numbers in examples/README.md would compare different work."""
+    pytest.importorskip("fastapi")
+    pytest.importorskip("orjson")
+    script = Path(__file__).resolve().parent.parent / "benches" / "examples_benchmark.py"
+    proc = subprocess.run(
+        [sys.executable, str(script), "--check", "--quick"],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "outputs equivalent" in proc.stdout
+    assert "n/a" not in proc.stdout  # every backend did every job

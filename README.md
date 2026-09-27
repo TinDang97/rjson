@@ -202,17 +202,24 @@ def items() -> RJSONResponse:
     return RJSONResponse([{"id": 1, "name": "widget"}])
 ```
 
-Return `RJSONResponse(...)` directly for native data. Don't set it as
-`default_response_class`: that bypasses Pydantic's fast `dump_json` for endpoints with a
-response model, for no gain. [`examples/fastapi_app.py`](examples/fastapi_app.py) adds a
-fallback for Decimal, Pydantic models and dataclasses, and rjson-parsed request bodies.
+Return `RJSONResponse(...)` directly for dicts and lists. Measured on whole requests
+through the app, against stock FastAPI's own fast path (a return type, serialized by
+Pydantic's `dump_json`): a 50-row page is 1.25–1.4× faster, 1.8–1.9× with UUID/datetime/Enum
+fields, and a 1,000-row export 3.0–3.2× faster; against an endpoint without a return type,
+9–74× ([numbers](examples/README.md#measured-gains)). Don't set it as
+`default_response_class`: endpoints that return Pydantic models already go through
+`dump_json`. [`examples/fastapi_app.py`](examples/fastapi_app.py) adds a fallback for
+Decimal, Pydantic models and dataclasses, and rjson-parsed request bodies.
 
 ### Logging, NDJSON, Redis and Kafka
 
 - [`examples/json_logging.py`](examples/json_logging.py): a `logging.Formatter` writing one
-  JSON object per line (2.4 µs per record vs 5.2 µs with `json`), plus NDJSON read/write.
+  JSON object per line (2.2–2.5 µs per record, 2.4–2.7× faster than the same formatter on
+  `json`), plus NDJSON read/write (writing 12.5× faster, reading 2.5–2.8×).
 - [`examples/codec.py`](examples/codec.py): a versioned bytes codec for Redis/Kafka with
-  typed round trips, and `value_serializer`/`value_deserializer` callables.
+  typed round trips, and `value_serializer`/`value_deserializer` callables. Round trips of
+  JSON-native payloads are 4.1–4.6× faster than the same codec on `json`, and faster than
+  `pickle`.
 - [`docs/ASYNC.md`](docs/ASYNC.md): aiohttp, httpx, asyncpg, `redis.asyncio` and aiokafka
   one-liners.
 
@@ -311,7 +318,7 @@ maturin develop --release && python -m pytest tests -q
 | `rjson.pyi` | type stubs |
 | `tests/` | pytest suites |
 | `examples/` | FastAPI, logging/NDJSON and Redis/Kafka integrations (tested) |
-| `benches/` | `corpus_benchmark.py` (reference), `production_benchmark.py` (production workloads), `perf_gate.py`, `make_charts.py` |
+| `benches/` | `corpus_benchmark.py` (reference), `production_benchmark.py` (production workloads), `examples_benchmark.py` (the examples on rjson vs json vs orjson), `perf_gate.py`, `make_charts.py` |
 | `docs/` | performance review, production readiness report, async guide |
 
 <details>
