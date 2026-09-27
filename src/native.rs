@@ -51,6 +51,12 @@ pub struct Types {
     /// `dataclasses._FIELD`: the field kind of real fields (not ClassVar or
     /// InitVar pseudo-fields).
     pub dc_field: *mut ffi::PyObject,
+    /// Every type above is resolved (or checked, for `zoneinfo`): `types()`
+    /// has nothing left to look up.
+    complete: bool,
+    /// `len(sys.modules)` at the last lookup; while it is unchanged no
+    /// missing module can have been imported (see `types`).
+    modules_len: ffi::Py_ssize_t,
 }
 
 pub struct Names {
@@ -78,6 +84,8 @@ static mut TYPES: Types = Types {
     uuid_int: ptr::null_mut(),
     enum_meta: ptr::null_mut(),
     dc_field: ptr::null_mut(),
+    complete: false,
+    modules_len: -1,
 };
 
 static mut NAMES: Names = Names {
@@ -118,6 +126,9 @@ pub fn init() -> bool {
         n.utcoffset = ffi::PyUnicode_InternFromString(c"utcoffset".as_ptr());
         n.field_type = ffi::PyUnicode_InternFromString(c"_field_type".as_ptr());
         n.sixty_four = ffi::PyLong_FromLong(64);
+        if !n.dict.is_null() {
+            init_subtype_dict_get();
+        }
         !(n.dataclass_fields.is_null()
             || n.slots.is_null()
             || n.dict.is_null()
@@ -181,6 +192,186 @@ pub unsafe fn own_attr(ty: *mut ffi::PyTypeObject, name: *mut ffi::PyObject) -> 
     v
 }
 
+/// Facts about a user type that `dumps` needs per value, cached per type so
+/// a list of 10,000 dataclass instances or Enum members looks them up once.
+#[derive(Clone, Copy)]
+pub struct TypeFacts {
+    /// `__dataclass_fields__` in the type's own dict.
+    pub dataclass: bool,
+    /// `__slots__` in the type's own dict.
+    pub slots: bool,
+    /// Reading `_value_` runs no Python code (`enum_value_plain`); only
+    /// computed for types whose metaclass is an `EnumMeta`.
+    pub enum_plain: bool,
+    /// Dataclass without `__slots__` whose `instance.__dict__` runs no Python
+    /// code: generic attribute lookup finding the `__dict__` descriptor every
+    /// Python class gets (`dict_descr_plain`). CPython 3.12+ only: reading
+    /// `__dict__` may create the dict, and before 3.12 a GC-tracked
+    /// allocation could run the collector (finalizers: Python code) on the
+    /// spot; since 3.12 it only schedules it for the eval loop.
+    pub dict_plain: bool,
+    /// `dict_plain`, and no builtin base has its own instance dict: the
+    /// `__dict__` getter then is `PyObject_GenericGetDict`, called directly.
+    pub dict_generic: bool,
+}
+
+const FACTS_SLOTS: usize = 16;
+
+#[derive(Clone, Copy)]
+struct FactsEntry {
+    ty: *mut ffi::PyTypeObject,
+    version: u32,
+    facts: TypeFacts,
+}
+
+const NO_FACTS: FactsEntry = FactsEntry {
+    ty: ptr::null_mut(),
+    version: 0,
+    facts: TypeFacts {
+        dataclass: false,
+        slots: false,
+        enum_plain: false,
+        dict_plain: false,
+        dict_generic: false,
+    },
+};
+
+/// Direct-mapped by type address. An entry is valid while the type's
+/// `tp_version_tag` is unchanged: CPython resets the tag whenever the type
+/// or one of its bases is modified (`PyType_Modified`: setting or deleting a
+/// class attribute, `__bases__`, ...) and never hands the same tag to two
+/// types, so a type freed and replaced at the same address misses too. With
+/// no tag (0: not assigned yet, or tags exhausted) nothing is cached.
+static mut FACTS: [FactsEntry; FACTS_SLOTS] = [NO_FACTS; FACTS_SLOTS];
+
+/// The cached facts of `ty` (a heap type or not), computing them on a miss.
+/// Runs no Python code: only `tp_dict` lookups with interned str keys.
+#[inline]
+pub unsafe fn type_facts(ty: *mut ffi::PyTypeObject, is_enum: bool) -> TypeFacts {
+    let version = (*ty).tp_version_tag;
+    let slot = (ty as usize >> 6) % FACTS_SLOTS;
+    let e = &mut (*ptr::addr_of_mut!(FACTS))[slot];
+    if version != 0 && e.ty == ty && e.version == version {
+        return e.facts;
+    }
+    compute_facts(ty, is_enum, version, slot)
+}
+
+#[cold]
+#[inline(never)]
+unsafe fn compute_facts(
+    ty: *mut ffi::PyTypeObject,
+    is_enum: bool,
+    version: u32,
+    slot: usize,
+) -> TypeFacts {
+    let n = names();
+    let dataclass = !own_attr(ty, n.dataclass_fields).is_null();
+    let slots = !own_attr(ty, n.slots).is_null();
+    let dict_plain =
+        cfg!(Py_3_12) && dataclass && !slots && generic_getattr(ty) && dict_descr_plain(ty);
+    let facts = TypeFacts {
+        dataclass,
+        slots,
+        enum_plain: is_enum && enum_value_plain(ty),
+        dict_plain,
+        dict_generic: dict_plain && !builtin_base_with_dict(ty),
+    };
+    // `is_enum` is the same for every call with a given type (Enum types
+    // take the Enum branch before any other check); were it not, a cached
+    // `enum_plain: false` would only mean guarded mode.
+    if version != 0 && (*ty).tp_version_tag == version {
+        (*ptr::addr_of_mut!(FACTS))[slot] = FactsEntry { ty, version, facts };
+    }
+    facts
+}
+
+/// `getter` of the `__dict__` descriptor CPython gives every Python class
+/// with an instance dict (`subtype_dict`), taken from a class made at init;
+/// 0 if unknown (then no type is `dict_plain`).
+static mut SUBTYPE_DICT_GET: usize = 0;
+
+/// The getter of `descr` if it is a getset descriptor, else 0.
+unsafe fn getset_getter(descr: *mut ffi::PyObject) -> usize {
+    if descr.is_null() || ffi::Py_TYPE(descr) != ptr::addr_of_mut!(ffi::PyGetSetDescr_Type) {
+        return 0;
+    }
+    let def = (*(descr as *mut ffi::PyGetSetDescrObject)).d_getset;
+    if def.is_null() {
+        return 0;
+    }
+    (*def).get.map_or(0, |f| f as usize)
+}
+
+/// Instances of `ty` get `__dict__` from the standard descriptor: the first
+/// class in the MRO defining `__dict__` defines the plain one.
+unsafe fn dict_descr_plain(ty: *mut ffi::PyTypeObject) -> bool {
+    let want = *ptr::addr_of!(SUBTYPE_DICT_GET);
+    let mro = (*ty).tp_mro;
+    if want == 0 || mro.is_null() || ffi::PyTuple_Check(mro) == 0 {
+        return false;
+    }
+    for i in 0..ffi::PyTuple_GET_SIZE(mro) {
+        let base = ffi::PyTuple_GET_ITEM(mro, i) as *mut ffi::PyTypeObject;
+        let d = own_attr(base, names().dict);
+        if !d.is_null() {
+            return getset_getter(d) == want;
+        }
+    }
+    false
+}
+
+/// A static base of `ty` has an instance dict of its own (CPython's
+/// `get_builtin_base_with_dict`): `subtype_dict` then defers to that base's
+/// `__dict__` getter instead of `PyObject_GenericGetDict`.
+unsafe fn builtin_base_with_dict(ty: *mut ffi::PyTypeObject) -> bool {
+    let mut t = ty;
+    while !(*t).tp_base.is_null() {
+        if (*t).tp_dictoffset != 0 && (*t).tp_flags & ffi::Py_TPFLAGS_HEAPTYPE == 0 {
+            return true;
+        }
+        t = (*t).tp_base;
+    }
+    false
+}
+
+/// Sets `SUBTYPE_DICT_GET` from a throwaway class (`type("_", (), {})`).
+unsafe fn init_subtype_dict_get() {
+    let cls = ffi::PyObject_CallFunction(
+        ptr::addr_of_mut!(ffi::PyType_Type) as *mut ffi::PyObject,
+        c"s()N".as_ptr(),
+        c"_rjson_probe".as_ptr(),
+        ffi::PyDict_New(),
+    );
+    if cls.is_null() {
+        ffi::PyErr_Clear();
+        return;
+    }
+    *ptr::addr_of_mut!(SUBTYPE_DICT_GET) =
+        getset_getter(own_attr(cls as *mut ffi::PyTypeObject, names().dict));
+    ffi::Py_DECREF(cls);
+}
+
+/// Reading `_value_` on an Enum member of `ty` runs no Python code: plain
+/// attribute lookup, and no class in the MRO defines `_value_` (a property
+/// there would run code; normally it lives in each member's `__dict__`).
+unsafe fn enum_value_plain(ty: *mut ffi::PyTypeObject) -> bool {
+    if !generic_getattr(ty) {
+        return false;
+    }
+    let mro = (*ty).tp_mro;
+    if mro.is_null() || ffi::PyTuple_Check(mro) == 0 {
+        return false;
+    }
+    for i in 0..ffi::PyTuple_GET_SIZE(mro) {
+        let base = ffi::PyTuple_GET_ITEM(mro, i) as *mut ffi::PyTypeObject;
+        if !own_attr(base, names().value).is_null() {
+            return false;
+        }
+    }
+    true
+}
+
 /// `ty.name` looked up on the class (new reference), or null (error cleared).
 /// Only for types whose metaclass is `type`, so no Python code runs; used at
 /// resolve time to check how a type implements an attribute.
@@ -195,11 +386,56 @@ unsafe fn class_attr(ty: *mut ffi::PyTypeObject, name: *mut ffi::PyObject) -> *m
     v
 }
 
-/// Resolves the types whose modules are imported by now and returns them.
+/// The native types whose modules are imported by now.
+///
+/// Called for every non-builtin value, so the lookups of modules that are not
+/// imported (typically `zoneinfo`) must not run every time: that cost ~80 ns
+/// per value (a temporary str per `sys.modules` lookup). They run again only
+/// when `len(sys.modules)` changed. A module imported while another one was
+/// removed keeps the length; `refresh` covers that before a value is
+/// reported unsupported.
+#[inline]
+pub unsafe fn types() -> &'static Types {
+    let t = &*ptr::addr_of!(TYPES);
+    if t.complete {
+        return t;
+    }
+    resolve(false)
+}
+
+impl Types {
+    /// Some native type is still unresolved (its module not imported).
+    #[inline]
+    pub fn incomplete(&self) -> bool {
+        !self.complete
+    }
+}
+
+/// Looks the missing types up regardless of `len(sys.modules)`; true if it
+/// resolved one that was missing. For values that would otherwise be
+/// unsupported, so the length check can never make rjson reject a value.
 #[cold]
 #[inline(never)]
-pub unsafe fn types() -> &'static Types {
+pub unsafe fn refresh() -> bool {
+    let t = &*ptr::addr_of!(TYPES);
+    let before = (t.datetime, t.uuid, t.enum_meta);
+    let t = resolve(true);
+    before != (t.datetime, t.uuid, t.enum_meta)
+}
+
+#[cold]
+#[inline(never)]
+unsafe fn resolve(force: bool) -> &'static Types {
     let t = &mut *ptr::addr_of_mut!(TYPES);
+    let modules = ffi::PyImport_GetModuleDict();
+    if modules.is_null() {
+        return t;
+    }
+    let len = ffi::PyDict_Size(modules);
+    if !force && len == t.modules_len {
+        return t;
+    }
+    t.modules_len = len;
     if t.datetime.is_null() && !loaded_module(c"datetime").is_null() {
         // Imports nothing: `datetime` is in sys.modules.
         ffi::PyDateTime_IMPORT();
@@ -279,6 +515,11 @@ pub unsafe fn types() -> &'static Types {
             t.dc_field = module_attr(m, c"_FIELD");
         }
     }
+    t.complete = !t.datetime.is_null()
+        && t.zoneinfo_checked
+        && !t.uuid.is_null()
+        && !t.enum_meta.is_null()
+        && !t.dc_field.is_null();
     t
 }
 

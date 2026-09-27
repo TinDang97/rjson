@@ -2250,38 +2250,57 @@ impl Serializer {
         if ffi::PyUnicode_Check(key) != 0 {
             return self.write_str_slow(p, key); // an Enum's str value
         }
-        let t = native::types();
+        if let Some(q) = self.key_native(p, key, level, native::types()) {
+            return q;
+        }
+        if native::types().incomplete() && native::refresh() {
+            if let Some(q) = self.key_native(p, key, level, native::types()) {
+                return q;
+            }
+        }
+        self.fail_obj(SerError::KeyNotStr, key)
+    }
+
+    /// `key_text` for the native key types; None if `key` is none of them.
+    unsafe fn key_native(
+        &mut self,
+        p: Cur,
+        key: *mut ffi::PyObject,
+        level: u32,
+        t: &native::Types,
+    ) -> Option<CurResult> {
+        let ty = ffi::Py_TYPE(key);
         if self.passthrough & native::PT_DATETIME == 0 && !t.datetime.is_null() {
             if ty == t.datetime {
-                return self.write_datetime(p, key, t);
+                return Some(self.write_datetime(p, key, t));
             } else if ty == t.date {
-                return self.write_date(p, key);
+                return Some(self.write_date(p, key));
             } else if ty == t.time {
-                return self.write_time(p, key);
+                return Some(self.write_time(p, key));
             }
         }
         if self.passthrough & native::PT_UUID == 0 && ty == t.uuid && !ty.is_null() {
-            return self.write_uuid(p, key, t);
+            return Some(self.write_uuid(p, key, t));
         }
         if level == 0
             && self.passthrough & native::PT_ENUM == 0
             && !t.enum_meta.is_null()
             && ffi::PyType_IsSubtype(ffi::Py_TYPE(ty as *mut ffi::PyObject), t.enum_meta) != 0
         {
-            if !self.guard && !enum_value_plain(ty) {
-                return self.fail(SerError::NeedGuard);
+            if !self.guard && !native::type_facts(ty, true).enum_plain {
+                return Some(self.fail(SerError::NeedGuard));
             }
             ffi::Py_INCREF(key);
             let v = ffi::PyObject_GetAttr(key, native::names().value);
             ffi::Py_DECREF(key);
             if v.is_null() {
-                return self.fail(SerError::PyErrSet);
+                return Some(self.fail(SerError::PyErrSet));
             }
             let q = self.key_text(p, v, level + 1);
             ffi::Py_DECREF(v);
-            return q;
+            return Some(q);
         }
-        self.fail_obj(SerError::KeyNotStr, key)
+        None
     }
 
     /// Float key text as `json.dumps` writes it: `float.__repr__`, or
@@ -2364,37 +2383,57 @@ impl Serializer {
     #[cold]
     #[inline(never)]
     unsafe fn ser_other(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
-        let t = native::types();
-        let ty = ffi::Py_TYPE(obj);
-        let pt = self.passthrough;
-        if pt & native::PT_DATETIME == 0 && !t.datetime.is_null() {
-            if ty == t.datetime {
-                return self.write_datetime(p, obj, t);
-            } else if ty == t.date {
-                return self.write_date(p, obj);
-            } else if ty == t.time {
-                return self.write_time(p, obj);
+        if let Some(q) = self.ser_native(p, obj, native::types()) {
+            return q;
+        }
+        if native::types().incomplete() && native::refresh() {
+            if let Some(q) = self.ser_native(p, obj, native::types()) {
+                return q;
             }
-        }
-        if pt & native::PT_UUID == 0 && ty == t.uuid && !ty.is_null() {
-            return self.write_uuid(p, obj, t);
-        }
-        if pt & native::PT_ENUM == 0
-            && !t.enum_meta.is_null()
-            && ffi::PyType_IsSubtype(ffi::Py_TYPE(ty as *mut ffi::PyObject), t.enum_meta) != 0
-        {
-            return self.ser_enum(p, obj, ty);
-        }
-        if pt & native::PT_DATACLASS == 0
-            && !native::own_attr(ty, native::names().dataclass_fields).is_null()
-        {
-            return self.ser_dataclass(p, obj, ty, t);
         }
         if !self.default.is_null() {
             self.call_default(p, obj)
         } else {
             self.fail_obj(SerError::Unsupported, obj)
         }
+    }
+
+    /// The native types (unless passed through); None if `obj` is none of
+    /// them.
+    #[inline(always)]
+    unsafe fn ser_native(
+        &mut self,
+        p: Cur,
+        obj: *mut ffi::PyObject,
+        t: &native::Types,
+    ) -> Option<CurResult> {
+        let ty = ffi::Py_TYPE(obj);
+        let pt = self.passthrough;
+        if pt & native::PT_DATETIME == 0 && !t.datetime.is_null() {
+            if ty == t.datetime {
+                return Some(self.write_datetime(p, obj, t));
+            } else if ty == t.date {
+                return Some(self.write_date(p, obj));
+            } else if ty == t.time {
+                return Some(self.write_time(p, obj));
+            }
+        }
+        if pt & native::PT_UUID == 0 && ty == t.uuid && !ty.is_null() {
+            return Some(self.write_uuid(p, obj, t));
+        }
+        if pt & native::PT_ENUM == 0
+            && !t.enum_meta.is_null()
+            && ffi::PyType_IsSubtype(ffi::Py_TYPE(ty as *mut ffi::PyObject), t.enum_meta) != 0
+        {
+            return Some(self.ser_enum(p, obj, ty));
+        }
+        if pt & native::PT_DATACLASS == 0 {
+            let facts = native::type_facts(ty, false);
+            if facts.dataclass {
+                return Some(self.ser_dataclass(p, obj, ty, facts, t));
+            }
+        }
+        None
     }
 
     /// Writes `"` + `b[..n]` (ASCII) + `"`.
@@ -2525,7 +2564,7 @@ impl Serializer {
         if let Some(e) = self.nest_error() {
             return self.fail(e);
         }
-        if !self.guard && !enum_value_plain(ty) {
+        if !self.guard && !native::type_facts(ty, true).enum_plain {
             return self.fail(SerError::NeedGuard);
         }
         ffi::Py_INCREF(obj);
@@ -2546,15 +2585,19 @@ impl Serializer {
     /// `__slots__` in the type, the instance `__dict__` in order; else the
     /// fields in definition order (ClassVar/InitVar excluded). Either way,
     /// names starting with `_` are skipped. Reading attributes may run
-    /// Python code, so this always runs in guarded mode.
+    /// Python code, so this runs in guarded mode, except for the instance
+    /// `__dict__` of a type whose `__dict__` read runs none
+    /// (`TypeFacts::dict_plain`): a list of dataclasses then keeps the
+    /// unguarded fast paths for everything else in the document.
     unsafe fn ser_dataclass(
         &mut self,
         p: Cur,
         obj: *mut ffi::PyObject,
         ty: *mut ffi::PyTypeObject,
+        facts: native::TypeFacts,
         t: &native::Types,
     ) -> CurResult {
-        if !self.guard {
+        if !self.guard && !facts.dict_plain {
             return self.fail(SerError::NeedGuard);
         }
         if let Some(e) = self.nest_error() {
@@ -2562,7 +2605,7 @@ impl Serializer {
         }
         self.depth += 1;
         ffi::Py_INCREF(obj);
-        let q = self.ser_dataclass_inner(p, obj, ty, t);
+        let q = self.ser_dataclass_inner(p, obj, ty, facts, t);
         ffi::Py_DECREF(obj);
         self.depth -= 1;
         q
@@ -2573,11 +2616,17 @@ impl Serializer {
         p: Cur,
         obj: *mut ffi::PyObject,
         ty: *mut ffi::PyTypeObject,
+        facts: native::TypeFacts,
         t: &native::Types,
     ) -> CurResult {
         let names = native::names();
-        if native::own_attr(ty, names.slots).is_null() {
-            let d = ffi::PyObject_GetAttr(obj, names.dict);
+        if !facts.slots {
+            let d = if facts.dict_generic {
+                // What `obj.__dict__` calls for this type, minus the lookup.
+                ffi::PyObject_GenericGetDict(obj, ptr::null_mut())
+            } else {
+                ffi::PyObject_GetAttr(obj, names.dict)
+            };
             if d.is_null() {
                 if ffi::PyErr_ExceptionMatches(ffi::PyExc_AttributeError) == 0 {
                     return self.fail(SerError::PyErrSet);
@@ -2591,7 +2640,11 @@ impl Serializer {
                 ffi::Py_DECREF(d);
             }
         }
-        // Fields: re-read, since `__dict__` access may have run Python code.
+        // Fields, read with getattr: Python code may run.
+        if !self.guard {
+            return self.fail(SerError::NeedGuard);
+        }
+        // Re-read, since `__dict__` access may have run Python code.
         let fields = native::own_attr(ty, names.dataclass_fields);
         if fields.is_null() || ffi::PyDict_Check(fields) == 0 {
             return self.fail_obj(SerError::Unsupported, obj);
@@ -2612,6 +2665,12 @@ impl Serializer {
         let mut value: *mut ffi::PyObject = ptr::null_mut();
         while ffi::PyDict_Next(d, &mut pos, &mut key, &mut value) != 0 {
             if underscore_name(key) {
+                continue;
+            }
+            if !self.guard {
+                // No Python code runs: `d` cannot change.
+                p = tri!(self.dict_item(p, key, value, ns));
+                ns = 1;
                 continue;
             }
             // `value` is borrowed from `d`, which Python code run while
@@ -3146,31 +3205,21 @@ unsafe fn uuid_value(v: *mut ffi::PyObject) -> Option<u128> {
     Some(((hi as u128) << 64) | lo as u128)
 }
 
-/// Reading an Enum member's `_value_` runs no Python code: generic attribute
-/// lookup, and no class in the MRO defines `_value_` (which could be a
-/// descriptor), so it comes from the instance dict.
-unsafe fn enum_value_plain(ty: *mut ffi::PyTypeObject) -> bool {
-    if !native::generic_getattr(ty) {
-        return false;
-    }
-    let mro = (*ty).tp_mro;
-    if mro.is_null() || ffi::PyTuple_Check(mro) == 0 {
-        return false;
-    }
-    for i in 0..ffi::PyTuple_GET_SIZE(mro) {
-        let base = ffi::PyTuple_GET_ITEM(mro, i) as *mut ffi::PyTypeObject;
-        if !native::own_attr(base, native::names().value).is_null() {
-            return false;
-        }
-    }
-    true
-}
-
 /// `key` is a str starting with `_` (dataclass names orjson leaves out).
 unsafe fn underscore_name(key: *mut ffi::PyObject) -> bool {
-    ffi::PyUnicode_Check(key) != 0
-        && ffi::PyUnicode_GetLength(key) > 0
-        && ffi::PyUnicode_ReadChar(key, 0) == b'_' as u32
+    use crate::compat::{PyUnicode_DATA, PyUnicode_KIND};
+    if ffi::PyUnicode_Check(key) == 0 || ffi::PyUnicode_GET_LENGTH(key) == 0 {
+        return false;
+    }
+    // The first code unit, read in place (a str's data ends with a NUL, so
+    // one unit is readable even for "" -- excluded above anyway).
+    let d = PyUnicode_DATA(key);
+    let first = match PyUnicode_KIND(key) {
+        1 => *(d as *const u8) as u32,
+        2 => *(d as *const u16) as u32,
+        _ => *(d as *const u32),
+    };
+    first == b'_' as u32
 }
 
 fn type_name(py: Python<'_>, obj: *mut ffi::PyObject) -> String {

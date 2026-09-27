@@ -529,6 +529,100 @@ class TestGuardedMode:
             assert [sys.getrefcount(o) for o in objs] == before
 
 
+class TestTypeFactsCache:
+    """Per-type facts (dataclass, __slots__, plain Enum _value_, plain
+    __dict__) are cached by tp_version_tag; changing the class must be seen."""
+
+    def test_dataclass_fields_removed_later(self):
+        @dataclasses.dataclass
+        class D:
+            a: int
+
+        assert both([D(1)] * 3) == b'[{"a":1},{"a":1},{"a":1}]'
+        del D.__dataclass_fields__  # modifies the type: new version tag
+        with pytest.raises(rjson.JSONEncodeError, match="not JSON serializable"):
+            rjson.dumps(D(1))
+
+    def test_enum_value_property_added_later(self):
+        class E(enum.Enum):
+            A = 1
+
+        assert both([E.A, {"k": E.A}]) == b'[1,{"k":1}]'
+        type.__setattr__(E, "_value_", property(lambda self: "patched"))
+        assert both([E.A, {"k": E.A}]) == b'["patched",{"k":"patched"}]'
+
+    def test_dict_property_is_not_read_unguarded(self):
+        # Unguarded instance __dict__ read only for the standard descriptor.
+        @dataclasses.dataclass
+        class D:
+            a: int
+
+        @dataclasses.dataclass
+        class Sub(D):
+            __dict__ = property(lambda self: {"b": 2, "_hidden": 3})
+
+        assert both([D(1), Sub(1)]) == b'[{"a":1},{"b":2}]'
+
+    def test_getattribute_added_later_runs_guarded(self):
+        parent = {}
+
+        @dataclasses.dataclass
+        class D:
+            a: int
+
+        parent["x"] = D(1)
+        parent["y"] = 2
+        assert both({"p": parent}) == b'{"p":{"x":{"a":1},"y":2}}'
+
+        def grow(self, name):
+            if name == "__dict__":
+                parent.update({f"k{i}": i for i in range(100)})
+            return object.__getattribute__(self, name)
+
+        D.__getattribute__ = grow
+        with pytest.raises(RuntimeError, match="changed size"):
+            rjson.dumps({"p": parent})
+
+    def test_builtin_base_with_dict(self):
+        # A dataclass over a C type with its own instance dict (functions
+        # keep theirs in func_dict): __dict__ comes from that base's getter.
+        @dataclasses.dataclass
+        class E(Exception):
+            code: int
+
+        e = E(5)
+        assert both(e) == b'{"code":5}'
+
+    def test_many_types_share_the_cache(self):
+        classes = [dataclasses.make_dataclass(f"C{i}", [("v", int)]) for i in range(64)]
+        objs = [c(i) for i, c in enumerate(classes)] * 3
+        assert rjson.loads(rjson.dumps(objs)) == [{"v": i % 64} for i in range(192)]
+
+
+def test_modules_imported_with_equal_sys_modules_length_are_found():
+    # Missing types are looked up again only when len(sys.modules) changes;
+    # an import that keeps the length (another module removed) must still
+    # be found before a value is reported unsupported.
+    code = (
+        "import sys, uuid, datetime, rjson\n"
+        "u = sys.modules.pop('uuid')\n"
+        "rjson.dumps(datetime.date(2024, 1, 2))  # resolves datetime, not uuid\n"
+        "n = len(sys.modules)\n"
+        "sys.modules.pop('rjson.rjson', None) or sys.modules.pop('json')\n"
+        "sys.modules['uuid'] = u\n"
+        "assert len(sys.modules) == n\n"
+        "print(rjson.dumps(uuid.UUID(int=1)).decode())\n"
+        "print(rjson.dumps({uuid.UUID(int=2): 1}, non_str_keys=True).decode())"
+    )
+    out = subprocess.run(
+        [sys.executable, "-I", "-c", code], capture_output=True, text=True, check=True
+    )
+    assert out.stdout.split() == [
+        '"00000000-0000-0000-0000-000000000001"',
+        '{"00000000-0000-0000-0000-000000000002":1}',
+    ]
+
+
 def test_modules_are_not_imported_by_rjson():
     # Types are looked up in sys.modules, never imported by rjson.
     code = (
