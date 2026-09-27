@@ -17,7 +17,7 @@ Copy the file you need into your project; nothing here is installed with rjson.
 rjson's API is `loads`, `dumps` (bytes), `dumps_str` (str). The keyword options are
 `default=`, `passthrough=` and `non_str_keys=`:
 
-- **No `option=`, `indent`, `sort_keys`, `ensure_ascii`.** datetime, date, time, UUID,
+- **No `option=` or `ensure_ascii`; `indent=`/`sort_keys=` exist** (orjson's layout and order). datetime, date, time, UUID,
   dataclasses and `Enum` members are serialized natively, byte for byte like orjson;
   `passthrough=` sends them to `default=` instead (`codec.py` does, to tag them). Decimal,
   sets, bytes and other types raise unless `default=` converts them (`json_logging.py`

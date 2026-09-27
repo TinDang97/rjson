@@ -282,6 +282,8 @@ unsafe fn dumps_args_slow(
     let mut default: *mut ffi::PyObject = ptr::null_mut();
     let mut passthrough: u32 = 0;
     let mut non_str_keys = false;
+    let mut indent: i32 = -1;
+    let mut sort_keys = false;
     let nkw = if kwnames.is_null() {
         0
     } else {
@@ -300,6 +302,13 @@ unsafe fn dumps_args_slow(
             match ffi::PyObject_IsTrue(value) {
                 -1 => return Err(PyErr::fetch(py)),
                 v => non_str_keys = v == 1,
+            }
+        } else if ffi::PyUnicode_CompareWithASCIIString(kw, c"indent".as_ptr()) == 0 {
+            indent = indent_width(py, name, value)?;
+        } else if ffi::PyUnicode_CompareWithASCIIString(kw, c"sort_keys".as_ptr()) == 0 {
+            match ffi::PyObject_IsTrue(value) {
+                -1 => return Err(PyErr::fetch(py)),
+                v => sort_keys = v == 1,
             }
         } else {
             let kw_str = pyo3::Bound::from_borrowed_ptr(py, kw).to_string();
@@ -324,8 +333,35 @@ unsafe fn dumps_args_slow(
             default,
             passthrough,
             non_str_keys,
+            indent,
+            sort_keys,
         },
     ))
+}
+
+/// `indent=`: None (compact) or an int from 0 to 1024 (spaces per level,
+/// as `json.dumps`; 2 gives orjson's `OPT_INDENT_2` layout).
+unsafe fn indent_width(py: Python<'_>, name: &str, value: *mut ffi::PyObject) -> PyResult<i32> {
+    use pyo3::exceptions::{PyTypeError, PyValueError};
+    if value == ffi::Py_None() {
+        return Ok(-1);
+    }
+    if ffi::PyLong_Check(value) == 0 || ffi::PyBool_Check(value) != 0 {
+        let ty = pyo3::Bound::from_borrowed_ptr(py, value).get_type();
+        let tn = ty.name().map(|n| n.to_string()).unwrap_or_default();
+        return Err(PyTypeError::new_err(format!(
+            "rjson.{name}() indent must be None or an int, not {tn}"
+        )));
+    }
+    let v = ffi::PyLong_AsLongLong(value);
+    if v == -1 && !ffi::PyErr_Occurred().is_null() {
+        ffi::PyErr_Clear();
+    } else if (0..=1024).contains(&v) {
+        return Ok(v as i32);
+    }
+    Err(PyValueError::new_err(format!(
+        "rjson.{name}() indent must be between 0 and 1024"
+    )))
 }
 
 /// `passthrough=`: None or an int made of `rjson.PASSTHROUGH_*` flags.
