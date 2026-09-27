@@ -5,7 +5,11 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
 [Semantic Versioning](https://semver.org/), with breaking changes allowed in
 0.x minor releases.
 
-## [Unreleased] (0.1.0, first PyPI release)
+## [Unreleased]
+
+## [0.1.0] - 2026-09-27
+
+First PyPI release, as `pyrjson`.
 
 ### Added
 - `dumps(obj, default=...)` hook for unsupported types (#4).
@@ -47,3 +51,6 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
 - CJK/UCS-2 text `loads` (#8), full-precision float arrays `loads` (#9),
   output buffer sizing, and fewer UTF-8 copies attached to strings (#10).
   Current numbers: [docs/PERFORMANCE_REVIEW.md](docs/PERFORMANCE_REVIEW.md).
+
+[Unreleased]: https://github.com/TinDang97/rjson/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/TinDang97/rjson/releases/tag/v0.1.0

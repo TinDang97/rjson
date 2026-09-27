@@ -33,7 +33,7 @@ each is tracked as an issue.
 | Memory? | Better on large `loads`: peak RSS 30–37% below orjson. Retained small results cost ~400 B instead of ~8 KB each. |
 | Safe for async services? | Yes, but each call blocks the event loop, and `to_thread` doesn't help. See [ASYNC.md](ASYNC.md). |
 | Compress / go binary? | Compress at the transport, and only payloads of a few KB and up. Use Arrow/Polars only for columnar data. See [Transfer size](#transfer-size-compression-and-binary-formats). |
-| Installable? | Not on PyPI yet. The distribution name is `pyrjson`; CI builds PGO wheels for Linux (glibc and musl), macOS and Windows, and a `v*` tag publishes them with trusted publishing and provenance attestations once the PyPI side is configured. |
+| Installable? | Yes: `pip install pyrjson` (0.1.0), PGO wheels for CPython 3.10–3.14 on Linux (glibc and musl, x86_64 and aarch64), macOS and Windows, published with trusted publishing and provenance attestations. |
 | Stable API? | No: 0.x, experimental. |
 
 ## Workload results
@@ -379,7 +379,6 @@ The full migration guide with code is in the [README](../README.md#migrating-fro
 
 | blocker | impact | issue |
 |---|---|---|
-| not on PyPI | high: needs a Rust toolchain to install | release workflow ready (`wheels.yml`); needs the PyPI trusted publisher + a `v0.1.0` tag |
 | no free-threading / subinterpreter support | medium, growing with 3.14t adoption | [ASYNC.md roadmap](ASYNC.md#roadmap) |
 | no `indent` / `sort_keys` | low for services, high for config/debug output | planned |
 
@@ -391,7 +390,7 @@ The full migration guide with code is in the [README](../README.md#migrating-fro
 2. **orjson users:** `default=`, native datetime/UUID/dataclass/Enum and `passthrough=`
    work as in orjson, and `non_str_keys=True` covers `OPT_NON_STR_KEYS`. Check the
    remaining `option=` flags you use (indent, sort keys) against the table above.
-3. **Before 1.0:** publish `pyrjson` wheels and add free-threading support. Services that
+3. **Before 1.0:** add free-threading support. Services that
    must accept everything `json.loads` did can pass `lenient=True` to `loads`.
 
 ## Reproducing

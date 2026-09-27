@@ -161,8 +161,7 @@ All of these work with uvloop too (`uvloop.run(main())` or `uvicorn --loop uvloo
 The PyPI distribution is `pyrjson`; the import name is `rjson`:
 
 ```bash
-uv add pyrjson             # once published; until then:
-uv pip install "git+https://github.com/TinDang97/rjson"   # needs a Rust toolchain
+uv add pyrjson
 ```
 
 ## Current limits
