@@ -21,7 +21,11 @@ CHILD = textwrap.dedent(
     import rjson
 
     stack, what, depth = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
-    threading.stack_size(stack)
+    try:
+        threading.stack_size(stack)
+    except ValueError:  # below this interpreter's minimum (3.14: 52 KiB)
+        print("unsupported stack size")
+        sys.exit(0)
 
     class Opaque:
         pass
@@ -78,7 +82,10 @@ def run_child(stack, what, depth):
         timeout=60,
     )
     assert proc.returncode == 0, f"crashed (exit {proc.returncode}): {proc.stderr[-400:]}"
-    return proc.stdout.strip()
+    out = proc.stdout.strip()
+    if out == "unsupported stack size":
+        pytest.skip(f"this Python refuses {stack // 1024} KiB thread stacks")
+    return out
 
 
 SMALL_STACKS = [
@@ -127,11 +134,16 @@ def test_deep_nesting_still_works_with_a_normal_stack(what, depth):
     assert run_child(256 * 1024, what, depth) == "ok"
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="threading.stack_size sets the committed, not the reserved, stack on Windows")
 def test_stack_error_is_a_recursion_error_with_advice():
     code = CHILD.replace('out.append(type(exc).__name__)', 'out.append(f"{type(exc).__name__}: {exc}")')
-    proc = subprocess.run([sys.executable, "-c", code, str(64 * 1024), "loads_list", "1024"],
+    stack = 128 * 1024 if sys.platform == "linux" and os.uname().machine == "aarch64" else 64 * 1024
+    proc = subprocess.run([sys.executable, "-c", code, str(stack), "loads_dict", "1024"],
                           capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr
+    if proc.stdout.strip() == "unsupported stack size":
+        pytest.skip(f"this Python refuses {stack // 1024} KiB thread stacks")
     assert proc.stdout.startswith("RecursionError:") and "stack_size" in proc.stdout
 
 

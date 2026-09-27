@@ -93,15 +93,18 @@ unsafe fn loads_impl(
 /// stack RecursionError (json would overflow the same stack). For nesting
 /// beyond rjson's 1024 levels, json's C scanner on 3.12/3.13 recurses to
 /// ~10,000 levels, needing up to ~2 MiB of stack, and segfaults on smaller
-/// thread stacks instead of raising: fall back only with 4 MiB left (3.14's
-/// json checks the real stack itself; 3.10/3.11's stops at ~1,000 levels).
+/// thread stacks instead of raising: fall back only with 4 MiB left. No
+/// limit on 3.14 (json checks the real stack itself) or on Windows (CPython
+/// checks the stack there too, USE_STACKCHECK, and its own tests parse
+/// 100,000-deep JSON on the 2 MB main thread); 3.10/3.11's json stops at
+/// ~1,000 levels anyway.
 #[cold]
 #[inline(never)]
 unsafe fn fallback_is_safe(py: Python<'_>, err: &PyErr) -> bool {
     if err.is_instance_of::<pyo3::exceptions::PyRecursionError>(py) {
         return false;
     }
-    if cfg!(Py_3_14) || !is_depth_error(py, err) {
+    if cfg!(Py_3_14) || cfg!(windows) || !is_depth_error(py, err) {
         return true;
     }
     crate::stack::remaining().is_none_or(|left| left >= 4 << 20)
