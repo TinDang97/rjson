@@ -41,6 +41,12 @@ use pyo3::types::PyType;
 use std::ptr;
 
 const MAX_DEPTH: u32 = 1024;
+/// Error message for nesting beyond `MAX_DEPTH` (a JSONDecodeError).
+pub(crate) const DEPTH_MSG: &str = "depth limit exceeded";
+/// Error message when the thread's stack would not hold more nesting (see
+/// stack.rs); raised as RecursionError, like `json` does for deep nesting.
+const STACK_MSG: &str = "JSON nesting too deep for this thread's stack (run loads in a thread \
+                         with a larger stack, see threading.stack_size)";
 
 // ============================================================================
 // Key cache
@@ -349,8 +355,23 @@ impl<'a> Parser<'a> {
     #[inline(always)]
     fn enter(&mut self) -> PResult<()> {
         self.depth += 1;
+        // One comparison on the hot path; the limits are checked past it.
+        if self.depth > crate::stack::CHECK_FROM {
+            return self.enter_deep();
+        }
+        Ok(())
+    }
+
+    /// `enter` past `stack::CHECK_FROM` levels: the depth limit, and every
+    /// `stack::CHECK_EVERY` levels the thread's stack headroom.
+    #[cold]
+    #[inline(never)]
+    fn enter_deep(&mut self) -> PResult<()> {
         if self.depth > MAX_DEPTH {
-            return self.err("depth limit exceeded", self.pos);
+            return self.err(DEPTH_MSG, self.pos);
+        }
+        if self.depth.is_multiple_of(crate::stack::CHECK_EVERY) && crate::stack::exhausted(crate::stack::RESERVE) {
+            return self.err(STACK_MSG, self.pos);
         }
         Ok(())
     }
@@ -1096,8 +1117,18 @@ impl<'a> Parser<'a> {
         unsafe {
             let r = ffi::PyLong_FromString(tmp.as_ptr() as *const std::os::raw::c_char, ptr::null_mut(), 10);
             if r.is_null() {
+                // The digits are valid, so this is MemoryError or CPython's
+                // integer string conversion limit (CVE-2020-10735 guard,
+                // sys.set_int_max_str_digits; json.loads raises it too).
+                if ffi::PyErr_ExceptionMatches(ffi::PyExc_MemoryError) != 0 {
+                    return self.err_oom();
+                }
                 ffi::PyErr_Clear();
-                return self.err("invalid number", start);
+                return self.err(
+                    "integer has more digits than sys.get_int_max_str_digits() allows \
+                     (the limit is set with sys.set_int_max_str_digits)",
+                    start,
+                );
             }
             Ok(r)
         }
@@ -2179,6 +2210,9 @@ pub(crate) unsafe fn parse(
         Ok(v) => Ok(v),
         Err(Fail) => {
             let (emsg, epos) = p.error.get();
+            if emsg == STACK_MSG {
+                return Err(pyo3::exceptions::PyRecursionError::new_err(STACK_MSG));
+            }
             let msg = if buf.is_empty() || buf.iter().all(|&b| is_ws(b)) {
                 "input data is empty"
             } else if epos == 0 && buf.starts_with(b"\xEF\xBB\xBF") {

@@ -7,6 +7,7 @@
 //!   straight into the result `str`/`bytes` object.
 //! - `native.rs`: datetime/UUID/dataclass/Enum support for `dumps` (type lookup, formatting).
 //! - `entry.rs`: raw entry points and module registration.
+//! - `stack.rs`: thread stack headroom checks for deep nesting.
 
 use pyo3::prelude::*;
 
@@ -16,6 +17,7 @@ mod lemire;
 mod native;
 mod parser;
 mod ser;
+mod stack;
 
 /// Python module definition for rjson.
 #[pymodule]

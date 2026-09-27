@@ -81,12 +81,39 @@ unsafe fn loads_impl(
         buf = &buf[3..];
     }
     match crate::parser::parse(py, buf, input.utf8_valid, lenient) {
-        Err(e) if lenient => {
+        Err(e) if lenient && fallback_is_safe(py, &e) => {
             drop(input); // release a held buffer export before running Python code
             loads_fallback(py, arg, e)
         }
         r => r,
     }
+}
+
+/// Whether the lenient `json.loads` fallback may run for `err`. Never for a
+/// stack RecursionError (json would overflow the same stack). For nesting
+/// beyond rjson's 1024 levels, json's C scanner on 3.12/3.13 recurses to
+/// ~10,000 levels, needing up to ~2 MiB of stack, and segfaults on smaller
+/// thread stacks instead of raising: fall back only with 4 MiB left (3.14's
+/// json checks the real stack itself; 3.10/3.11's stops at ~1,000 levels).
+#[cold]
+#[inline(never)]
+unsafe fn fallback_is_safe(py: Python<'_>, err: &PyErr) -> bool {
+    if err.is_instance_of::<pyo3::exceptions::PyRecursionError>(py) {
+        return false;
+    }
+    if cfg!(Py_3_14) || !is_depth_error(py, err) {
+        return true;
+    }
+    crate::stack::remaining().is_none_or(|left| left >= 4 << 20)
+}
+
+#[cold]
+#[inline(never)]
+fn is_depth_error(py: Python<'_>, err: &PyErr) -> bool {
+    err.value(py)
+        .getattr("msg")
+        .and_then(|m| m.extract::<String>())
+        .is_ok_and(|m| m == crate::parser::DEPTH_MSG)
 }
 
 #[cold]
