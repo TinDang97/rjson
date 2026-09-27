@@ -20,6 +20,8 @@ mostly a find-and-replace ([migration guide](#migrating-from-json-or-orjson)).
   AddressSanitizer CI build, and stack checks for deeply nested documents.
 - CPython 3.10–3.14 wheels for Linux (glibc and musl), macOS and Windows. MIT licensed.
 
+<img alt="Terminal: python benches/demo.py. rjson vs orjson with the same output: twitter.json loads 1.16x faster, twitter.json dumps 1.84x, github.json dumps 1.89x, 2k events with datetime and UUID 2.04x, twitter.json as str 1.77x." src="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/demo.svg" width="820">
+
 If rjson saves you CPU time, a ⭐ on [GitHub](https://github.com/TinDang97/rjson) helps
 other people find it.
 
@@ -356,7 +358,7 @@ maturin develop --release && python -m pytest tests -q
 | `rjson.pyi` | type stubs |
 | `tests/` | pytest suites |
 | `examples/` | FastAPI, logging/NDJSON and Redis/Kafka integrations (tested) |
-| `benches/` | `corpus_benchmark.py` (reference), `showcase.py` (vs orjson on production shapes), `production_benchmark.py` (production workloads), `examples_benchmark.py` (the examples on rjson vs json vs orjson), `perf_gate.py`, `make_charts.py` / `make_showcase_charts.py` (README charts) |
+| `benches/` | `corpus_benchmark.py` (reference), `showcase.py` (vs orjson on production shapes), `production_benchmark.py` (production workloads), `examples_benchmark.py` (the examples on rjson vs json vs orjson), `perf_gate.py`, `make_charts.py` / `make_showcase_charts.py` / `make_demo_svg.py` (README charts, demo), `demo.py` |
 | `docs/` | showcase, performance review, production readiness report, async guide |
 
 <details>
