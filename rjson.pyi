@@ -45,8 +45,13 @@ def dumps(
     default: Callable[[Any], Any] | None = None,
     passthrough: int | None = 0,
     non_str_keys: bool = False,
+    indent: int | None = None,
+    sort_keys: bool = False,
 ) -> bytes:
-    """Serialize to compact UTF-8 JSON bytes; raises JSONEncodeError.
+    """Serialize to UTF-8 JSON bytes (compact unless indent is given); raises JSONEncodeError.
+
+    indent=2 and sort_keys=True give the same bytes as orjson's OPT_INDENT_2 and
+    OPT_SORT_KEYS; other indent widths follow json.dumps(indent=n).
 
     Besides JSON types, serializes datetime/date/time (RFC 3339), uuid.UUID,
     dataclasses and Enum members, like orjson.
@@ -65,8 +70,10 @@ def dumps_str(
     default: Callable[[Any], Any] | None = None,
     passthrough: int | None = 0,
     non_str_keys: bool = False,
+    indent: int | None = None,
+    sort_keys: bool = False,
 ) -> str:
-    """Serialize to a compact JSON str (non-ASCII kept as-is); raises JSONEncodeError."""
+    """Serialize to a JSON str (non-ASCII kept as-is; compact unless indent is given); raises JSONEncodeError."""
 
 def dumps_bytes(
     obj: Any,
@@ -75,5 +82,7 @@ def dumps_bytes(
     default: Callable[[Any], Any] | None = None,
     passthrough: int | None = 0,
     non_str_keys: bool = False,
+    indent: int | None = None,
+    sort_keys: bool = False,
 ) -> bytes:
     """Alias of dumps."""

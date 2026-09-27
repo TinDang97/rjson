@@ -222,6 +222,7 @@ rjson ÷ orjson time before the fix (plain build, CPython 3.13; below 1.00 is fa
 | 15 | dataclasses 1.64: every dataclass restarted the whole document in guarded mode; two `tp_dict` lookups per instance; `PyUnicode_ReadChar` per key | **fixed**: unguarded standard `__dict__` on 3.12+ via `PyObject_GenericGetDict`, cached facts. Now 0.92 (`slots=True`: 0.47) |
 | 16 | one `dumps` per ~600 B record with many escapes, streamed: 1.09 (the same records as one document: 0.64) | open: per-call fixed cost. Output-buffer hint variants (largest reservation made; max of last two sizes when small) cut regrowth 60% with no measurable change (A/B 0.86–1.01 both), not kept |
 | 17 | fresh process, per-record results kept: orjson takes one page fault per call (glibc trims/regrows around its buffers) | not rjson's gap: 0.24 (1–4 faults vs 1,976); gone once any output > ~128 KiB was freed |
+| 18 | `indent=2` 0.48×, `sort_keys=True` 0.78× on twitter.json (PGO-less build, vs orjson's options) | open: `indent` is a second pass over the compact output (~9 instructions per input byte: a structural byte every few characters); matching orjson means writing the indentation in the serializer, i.e. multi-byte separators in every writer. `sort_keys` sorts each dict's items by key object before writing (`cmp_str`, memcmp for Latin-1 keys); the rest is the per-dict `Vec` |
 
 ### Threading and I/O (researched, mostly not applicable)
 

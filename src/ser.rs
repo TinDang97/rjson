@@ -1523,6 +1523,12 @@ pub struct Serializer {
     /// mode. Unguarded, no Python code runs, so the fast paths iterate
     /// borrowed references.
     guard: bool,
+    /// `sort_keys=True`: every dict's items are reordered by key after it
+    /// is written (`sort_object`). Bytes mode only (`dumps_formatted`).
+    sort: bool,
+    /// `guard || sort`: dicts take the cold `ser_dict_slow`, so the fast
+    /// path keeps a single check.
+    slow_dicts: bool,
 }
 
 impl Drop for Serializer {
@@ -1553,6 +1559,8 @@ impl Serializer {
             non_str_keys: opts.non_str_keys,
             guard: guard || !default.is_null(),
             err_float: 0.0,
+            sort: opts.sort_keys,
+            slow_dicts: guard || !default.is_null() || opts.sort_keys,
         }
     }
 
@@ -2108,10 +2116,94 @@ impl Serializer {
 
     #[inline(never)]
     unsafe fn ser_dict(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
-        if self.guard {
-            return self.guarded(p, obj, Self::ser_dict_checked);
+        if self.slow_dicts {
+            return self.ser_dict_slow(p, obj);
         }
         self.ser_dict_inner(p, obj)
+    }
+
+    /// Dicts in guarded mode and/or with `sort_keys=True`.
+    #[cold]
+    #[inline(never)]
+    unsafe fn ser_dict_slow(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        if self.sort {
+            if let Some(q) = self.ser_dict_sorted(p, obj) {
+                return q;
+            }
+        }
+        let start = self.offset(p);
+        let q = if self.guard {
+            self.guarded(p, obj, Self::ser_dict_checked)
+        } else {
+            self.ser_dict_inner(p, obj)
+        };
+        if self.sort && !q.is_null() {
+            // The dict's text is `buf[start..q]` (bytes mode: no segments).
+            let end = self.offset(q);
+            sort_object(std::slice::from_raw_parts_mut(self.buf.as_mut_ptr().add(start), end - start));
+        }
+        q
+    }
+
+    /// `sort_keys=True`, all keys `str`: the items are sorted by key before
+    /// they are written (code point order, orjson's). None, with nothing
+    /// written, if a key is not a `str` (`non_str_keys=True`): then the dict
+    /// is written as usual and its text sorted by `sort_object`.
+    #[cold]
+    #[inline(never)]
+    unsafe fn ser_dict_sorted(&mut self, p: Cur, obj: *mut ffi::PyObject) -> Option<CurResult> {
+        if let Some(e) = self.nest_error() {
+            return Some(self.fail(e));
+        }
+        let size = ffi::PyDict_Size(obj);
+        if size == 0 {
+            return Some(self.put2(p, b"{}"));
+        }
+        let mut items: Vec<(*mut ffi::PyObject, *mut ffi::PyObject)> = Vec::with_capacity(size as usize);
+        let mut pos: ffi::Py_ssize_t = 0;
+        let mut key: *mut ffi::PyObject = ptr::null_mut();
+        let mut value: *mut ffi::PyObject = ptr::null_mut();
+        // PyDict_Next runs no Python code: the pointers stay valid until
+        // something does (guarded mode takes references below).
+        while ffi::PyDict_Next(obj, &mut pos, &mut key, &mut value) != 0 {
+            if ffi::PyUnicode_Check(key) == 0 {
+                return None;
+            }
+            items.push((key, value));
+        }
+        items.sort_unstable_by(|a, b| unsafe { cmp_str(a.0, b.0) });
+        let guard = self.guard;
+        if guard {
+            for &(k, v) in &items {
+                ffi::Py_INCREF(k);
+                ffi::Py_INCREF(v);
+            }
+        }
+        self.depth += 1;
+        let mut q = self.put(p, b'{');
+        let mut ns = 0;
+        for &(k, v) in &items {
+            q = self.dict_item(q, k, v, ns);
+            if q.is_null() {
+                break;
+            }
+            if guard && ffi::PyDict_Size(obj) != size {
+                q = self.dict_changed();
+                break;
+            }
+            ns = 1;
+        }
+        if guard {
+            for &(k, v) in &items {
+                ffi::Py_DECREF(k);
+                ffi::Py_DECREF(v);
+            }
+        }
+        if q.is_null() {
+            return Some(q);
+        }
+        self.depth -= 1;
+        Some(self.put(q, b'}'))
     }
 
     /// Guarded mode: `container` is kept alive by a strong reference while
@@ -3160,6 +3252,10 @@ pub struct DumpsOpts {
     pub passthrough: u32,
     /// `non_str_keys=`.
     pub non_str_keys: bool,
+    /// `indent=`: spaces per level, or -1 for compact output.
+    pub indent: i32,
+    /// `sort_keys=`.
+    pub sort_keys: bool,
 }
 
 impl DumpsOpts {
@@ -3167,7 +3263,15 @@ impl DumpsOpts {
         default: ptr::null_mut(),
         passthrough: 0,
         non_str_keys: false,
+        indent: -1,
+        sort_keys: false,
     };
+
+    /// `indent=` or `sort_keys=` given: output goes through `dumps_formatted`.
+    #[inline(always)]
+    fn formatted(&self) -> bool {
+        self.indent >= 0 || self.sort_keys
+    }
 }
 
 /// 128-bit value of a UUID's `int` (None with an exception set).
@@ -3298,6 +3402,56 @@ pub unsafe fn dumps_raw(
     as_str: bool,
     opts: &DumpsOpts,
 ) -> PyResult<*mut ffi::PyObject> {
+    if opts.formatted() {
+        return dumps_formatted(py, obj, as_str, opts);
+    }
+    dumps_compact(py, obj, as_str, opts)
+}
+
+/// `indent=` / `sort_keys=`: serialized as bytes (keys sorted in place per
+/// dict), then indented, then decoded for `dumps_str`. Output equals
+/// orjson's `OPT_INDENT_2` / `OPT_SORT_KEYS`, and `json.dumps(obj,
+/// indent=n, sort_keys=..., ensure_ascii=False)` for other indent widths
+/// (numbers aside, as in compact output). A lone surrogate raises
+/// `UnicodeEncodeError` here also in `dumps_str`.
+#[cold]
+#[inline(never)]
+unsafe fn dumps_formatted(
+    py: Python<'_>,
+    obj: *mut ffi::PyObject,
+    as_str: bool,
+    opts: &DumpsOpts,
+) -> PyResult<*mut ffi::PyObject> {
+    let compact = dumps_compact(py, obj, false, opts)?;
+    let data = ffi::PyBytes_AsString(compact) as *const u8;
+    let len = ffi::PyBytes_Size(compact) as usize;
+    let src = std::slice::from_raw_parts(data, len);
+    let out = if opts.indent >= 0 {
+        let pretty = indent_json(src, opts.indent as usize);
+        if as_str {
+            ffi::PyUnicode_DecodeUTF8(pretty.as_ptr().cast(), pretty.len() as ffi::Py_ssize_t, ptr::null())
+        } else {
+            ffi::PyBytes_FromStringAndSize(pretty.as_ptr().cast(), pretty.len() as ffi::Py_ssize_t)
+        }
+    } else if as_str {
+        ffi::PyUnicode_DecodeUTF8(data.cast(), len as ffi::Py_ssize_t, ptr::null())
+    } else {
+        return Ok(compact);
+    };
+    ffi::Py_DECREF(compact);
+    if out.is_null() {
+        return Err(PyErr::fetch(py));
+    }
+    Ok(out)
+}
+
+#[inline(always)]
+unsafe fn dumps_compact(
+    py: Python<'_>,
+    obj: *mut ffi::PyObject,
+    as_str: bool,
+    opts: &DumpsOpts,
+) -> PyResult<*mut ffi::PyObject> {
     let mut ser = Serializer::new(as_str, opts, false);
     let start = ser.start();
     let mut end = ser.ser(start, obj, 0, 0);
@@ -3321,4 +3475,287 @@ pub unsafe fn dumps_raw(
         return Err(PyErr::fetch(py));
     }
     Ok(out)
+}
+
+/// End of the JSON string starting at `b[i]` (the opening quote): the index
+/// just past its closing quote. `b` is rjson's own output, so it is valid.
+fn string_end(b: &[u8], mut i: usize) -> usize {
+    i += 1;
+    while b[i] != b'"' {
+        i += if b[i] == b'\\' { 2 } else { 1 };
+    }
+    i + 1
+}
+
+/// Unescaped UTF-8 bytes of the JSON string `s` (with its quotes). Byte
+/// order of UTF-8 is code point order, which is how orjson sorts keys.
+fn unescape_key(s: &[u8]) -> Vec<u8> {
+    let s = &s[1..s.len() - 1];
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if s[i] != b'\\' {
+            out.push(s[i]);
+            i += 1;
+            continue;
+        }
+        let c = match s[i + 1] {
+            b'n' => b'\n',
+            b't' => b'\t',
+            b'r' => b'\r',
+            b'b' => 0x08,
+            b'f' => 0x0c,
+            b'u' => {
+                // rjson writes \u00XX only for control characters.
+                let hex = std::str::from_utf8(&s[i + 2..i + 6]).unwrap_or("0");
+                let v = u32::from_str_radix(hex, 16).unwrap_or(0);
+                i += 6;
+                let mut tmp = [0u8; 4];
+                let ch = char::from_u32(v).unwrap_or('\u{fffd}');
+                out.extend_from_slice(ch.encode_utf8(&mut tmp).as_bytes());
+                continue;
+            }
+            other => other, // \" \\ \/
+        };
+        out.push(c);
+        i += 2;
+    }
+    out
+}
+
+/// Reorders the items of the JSON object `obj` (rjson's compact output, a
+/// whole `{...}`) by key, in place. Nested objects were sorted when they
+/// were written; moving an item moves its value's text unchanged.
+fn sort_object(obj: &mut [u8]) {
+    let n = obj.len();
+    if n <= 2 {
+        return; // {}
+    }
+    // Top-level items of the object: (start, end) of `"key":value`.
+    let mut items: Vec<(usize, usize)> = Vec::new();
+    let (mut i, mut depth, mut item_start) = (1usize, 0usize, 1usize);
+    while i < n - 1 {
+        match obj[i] {
+            b'"' => {
+                i = string_end(obj, i);
+                continue;
+            }
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth -= 1,
+            b',' if depth == 0 => {
+                items.push((item_start, i));
+                item_start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    items.push((item_start, n - 1));
+    if items.len() < 2 {
+        return;
+    }
+    let mut keyed: Vec<(Vec<u8>, usize, usize)> = items
+        .into_iter()
+        .map(|(a, b)| (unescape_key(&obj[a..string_end(obj, a)]), a, b))
+        .collect();
+    // Stable: keys that coerce to the same text keep their dict order.
+    keyed.sort_by(|x, y| x.0.cmp(&y.0));
+    let mut out = Vec::with_capacity(n);
+    out.push(b'{');
+    for (k, (_, a, b)) in keyed.iter().enumerate() {
+        if k > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(&obj[*a..*b]);
+    }
+    out.push(b'}');
+    obj.copy_from_slice(&out);
+}
+
+/// Code point order of two `str` objects (UTF-8 byte order, orjson's key
+/// order), read in place from their native representation.
+unsafe fn cmp_str(a: *mut ffi::PyObject, b: *mut ffi::PyObject) -> std::cmp::Ordering {
+    use crate::compat::{PyUnicode_DATA, PyUnicode_KIND};
+    let (la, lb) = (ffi::PyUnicode_GET_LENGTH(a) as usize, ffi::PyUnicode_GET_LENGTH(b) as usize);
+    let (ka, kb) = (PyUnicode_KIND(a), PyUnicode_KIND(b));
+    let (da, db) = (PyUnicode_DATA(a), PyUnicode_DATA(b));
+    if ka == 1 && kb == 1 {
+        // Latin-1 bytes compare in code point order.
+        let x = std::slice::from_raw_parts(da as *const u8, la);
+        let y = std::slice::from_raw_parts(db as *const u8, lb);
+        return x.cmp(y);
+    }
+    let unit = |d: *mut std::os::raw::c_void, k: u32, i: usize| -> u32 {
+        match k {
+            1 => *(d as *const u8).add(i) as u32,
+            2 => *(d as *const u16).add(i) as u32,
+            _ => *(d as *const u32).add(i),
+        }
+    };
+    for i in 0..la.min(lb) {
+        let (x, y) = (unit(da, ka, i), unit(db, kb, i));
+        if x != y {
+            return x.cmp(&y);
+        }
+    }
+    la.cmp(&lb)
+}
+
+/// Structural bytes the indenter stops at.
+static STRUCTURAL: [bool; 256] = {
+    let mut t = [false; 256];
+    t[b'"' as usize] = true;
+    t[b'{' as usize] = true;
+    t[b'}' as usize] = true;
+    t[b'[' as usize] = true;
+    t[b']' as usize] = true;
+    t[b',' as usize] = true;
+    t[b':' as usize] = true;
+    t
+};
+
+/// Index just past the closing quote of the JSON string starting at `b[i]`,
+/// skipping 16 bytes at a time (8 without SSE2) while none is `"` or a
+/// backslash. `b` is rjson's own output, so every string is terminated.
+fn string_end_fast(b: &[u8], i: usize) -> usize {
+    let mut j = i + 1;
+    loop {
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: SSE2 is part of x86_64; loads stay within `b` (j + 16 <= len).
+        unsafe {
+            use std::arch::x86_64::*;
+            let q = _mm_set1_epi8(b'"' as i8);
+            let bs = _mm_set1_epi8(b'\\' as i8);
+            while j + 16 <= b.len() {
+                let v = _mm_loadu_si128(b.as_ptr().add(j) as *const __m128i);
+                let m = _mm_movemask_epi8(_mm_or_si128(_mm_cmpeq_epi8(v, q), _mm_cmpeq_epi8(v, bs)));
+                if m != 0 {
+                    j += m.trailing_zeros() as usize;
+                    break;
+                }
+                j += 16;
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            const LO: u64 = 0x0101_0101_0101_0101;
+            const HI: u64 = 0x8080_8080_8080_8080;
+            let has = |w: u64, c: u8| (w ^ (LO * c as u64)).wrapping_sub(LO) & !(w ^ (LO * c as u64)) & HI;
+            while j + 8 <= b.len() {
+                let w = u64::from_le_bytes(b[j..j + 8].try_into().unwrap_or([0; 8]));
+                if has(w, b'"') | has(w, b'\\') != 0 {
+                    break;
+                }
+                j += 8;
+            }
+        }
+        match b[j] {
+            b'"' => return j + 1,
+            b'\\' => j += 2,
+            _ => j += 1,
+        }
+    }
+}
+
+/// Output buffer for `indent_json`: raw writes after one capacity check
+/// per token (`need`).
+struct IndentOut {
+    v: Vec<u8>,
+}
+
+impl IndentOut {
+    #[inline(always)]
+    fn need(&mut self, n: usize) {
+        if self.v.capacity() - self.v.len() < n {
+            self.v.reserve(n.max(self.v.capacity() / 2));
+        }
+    }
+    /// SAFETY: `need` reserved at least `src.len()` more bytes.
+    #[inline(always)]
+    unsafe fn copy(&mut self, src: &[u8]) {
+        let len = self.v.len();
+        ptr::copy_nonoverlapping(src.as_ptr(), self.v.as_mut_ptr().add(len), src.len());
+        self.v.set_len(len + src.len());
+    }
+    /// SAFETY: `need` reserved the byte.
+    #[inline(always)]
+    unsafe fn byte(&mut self, c: u8) {
+        let len = self.v.len();
+        *self.v.as_mut_ptr().add(len) = c;
+        self.v.set_len(len + 1);
+    }
+    /// SAFETY: `need` reserved `1 + n` bytes.
+    #[inline(always)]
+    unsafe fn newline(&mut self, n: usize) {
+        let len = self.v.len();
+        let p = self.v.as_mut_ptr().add(len);
+        *p = b'\n';
+        ptr::write_bytes(p.add(1), b' ', n);
+        self.v.set_len(len + 1 + n);
+    }
+}
+
+/// `src` (rjson's compact output) indented by `width` spaces per level, the
+/// layout of orjson's `OPT_INDENT_2` and `json.dumps(indent=...)`: one item
+/// per line, `": "` after keys, empty containers as `{}` / `[]`, no
+/// trailing newline. Runs between structural bytes are copied in bulk.
+fn indent_json(src: &[u8], width: usize) -> Vec<u8> {
+    let mut out = IndentOut { v: Vec::with_capacity(src.len() + src.len() / 2 + 64) };
+    let mut level = 0usize;
+    let (mut i, mut run) = (0usize, 0usize);
+    let n = src.len();
+    // SAFETY (all writes below): each is preceded by `need` for its size.
+    unsafe {
+        while i < n {
+            let c = src[i];
+            if !STRUCTURAL[c as usize] {
+                i += 1;
+                continue;
+            }
+            match c {
+                b'"' => {
+                    let e = string_end_fast(src, i);
+                    out.need(e - run);
+                    out.copy(&src[run..e]);
+                    i = e;
+                    run = i;
+                    continue;
+                }
+                b'{' | b'[' => {
+                    let close = if c == b'{' { b'}' } else { b']' };
+                    if i + 1 < n && src[i + 1] == close {
+                        i += 2;
+                        continue; // "{}" / "[]" stay in the run
+                    }
+                    level += 1;
+                    out.need(i + 1 - run + 1 + level * width);
+                    out.copy(&src[run..=i]);
+                    out.newline(level * width);
+                }
+                b'}' | b']' => {
+                    level -= 1;
+                    out.need(i - run + 2 + level * width);
+                    out.copy(&src[run..i]);
+                    out.newline(level * width);
+                    out.byte(c);
+                }
+                b',' => {
+                    out.need(i + 1 - run + 1 + level * width);
+                    out.copy(&src[run..=i]);
+                    out.newline(level * width);
+                }
+                _ => {
+                    out.need(i - run + 2);
+                    out.copy(&src[run..i]);
+                    out.byte(b':');
+                    out.byte(b' ');
+                }
+            }
+            i += 1;
+            run = i;
+        }
+        out.need(n - run);
+        out.copy(&src[run..]);
+    }
+    out.v
 }

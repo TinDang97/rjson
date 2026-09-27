@@ -22,7 +22,7 @@ documents, and produced **0 mismatches** against orjson and `json` across all wo
 datetime, date, time, UUID, dataclasses and Enum members serialize natively with
 orjson's exact output (differential-tested), and `passthrough=` replaces
 `OPT_PASSTHROUGH_*`, and `non_str_keys=True` replaces `OPT_NON_STR_KEYS` (with `json`'s key
-text). Still missing: `indent`/`sort_keys` and the other `option=` flags. You can work around these today (see [`examples/`](../examples/)), and
+text), and `indent=`/`sort_keys=` give orjson's `OPT_INDENT_2`/`OPT_SORT_KEYS` output. Still missing: the other `option=` flags. You can work around these today (see [`examples/`](../examples/)), and
 each is tracked as an issue.
 
 | question | answer |
@@ -343,7 +343,8 @@ message: 0.01 ms).
 | `NaN` / BOM / `"\ud800"` in `loads` | `JSONDecodeError`; accepted with `lenient=True` | `JSONDecodeError` | accepted |
 | ints ≥ 2^64 | exact | float on `loads`, error on `dumps` | exact |
 | floats < 1e-4 | `1e-7` (same as orjson) | `1e-7` | `1e-07` |
-| `indent`, `sort_keys`, `option=` | not supported | options | kwargs |
+| `indent`, `sort_keys` | `indent=`, `sort_keys=` (orjson's bytes for `indent=2`) | `OPT_INDENT_2`, `OPT_SORT_KEYS` | kwargs |
+| other `option=` flags | not supported | options | n/a |
 
 The full migration guide with code is in the [README](../README.md#migrating-from-json-or-orjson).
 
@@ -380,7 +381,6 @@ The full migration guide with code is in the [README](../README.md#migrating-fro
 | blocker | impact | issue |
 |---|---|---|
 | no free-threading / subinterpreter support | medium, growing with 3.14t adoption | [ASYNC.md roadmap](ASYNC.md#roadmap) |
-| no `indent` / `sort_keys` | low for services, high for config/debug output | planned |
 
 ## Recommendation
 
@@ -388,8 +388,8 @@ The full migration guide with code is in the [README](../README.md#migrating-fro
    pipelines, cache codecs. Use the patterns in [`examples/`](../examples/), pin the
    version, and keep a fallback path for unsupported types.
 2. **orjson users:** `default=`, native datetime/UUID/dataclass/Enum and `passthrough=`
-   work as in orjson, and `non_str_keys=True` covers `OPT_NON_STR_KEYS`. Check the
-   remaining `option=` flags you use (indent, sort keys) against the table above.
+   work as in orjson, and `non_str_keys=True` covers `OPT_NON_STR_KEYS`. `indent=2`/`sort_keys=True` match `OPT_INDENT_2`/`OPT_SORT_KEYS`.
+   Check the remaining `option=` flags you use against the table above.
 3. **Before 1.0:** add free-threading support. Services that
    must accept everything `json.loads` did can pass `lenient=True` to `loads`.
 

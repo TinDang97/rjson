@@ -20,6 +20,8 @@ mostly a find-and-replace ([migration guide](#migrating-from-json-or-orjson)).
   AddressSanitizer CI build, and stack checks for deeply nested documents.
 - CPython 3.10–3.14 wheels for Linux (glibc and musl), macOS and Windows. MIT licensed.
 
+<img alt="Terminal: python benches/demo.py. rjson vs orjson with the same output: twitter.json loads 1.16x faster, twitter.json dumps 1.84x, github.json dumps 1.89x, 2k events with datetime and UUID 2.04x, twitter.json as str 1.77x." src="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/demo.svg" width="820">
+
 If rjson saves you CPU time, a ⭐ on [GitHub](https://github.com/TinDang97/rjson) helps
 other people find it.
 
@@ -134,8 +136,8 @@ rjson.dumps({"price": Decimal("9.99")}, default=str)             # convert the r
 | name | kind | notes |
 |---|---|---|
 | `loads(data, *, lenient=False)` | function → object | `data`: `str`, `bytes`, `bytearray` or `memoryview` (any layout) |
-| `dumps(obj, *, default=None, passthrough=0, non_str_keys=False)` | function → `bytes` | compact UTF-8 JSON, like `orjson.dumps` |
-| `dumps_str(obj, *, default=None, passthrough=0, non_str_keys=False)` | function → `str` | like `json.dumps(obj, ensure_ascii=False, separators=(",", ":"))` |
+| `dumps(obj, *, default=None, passthrough=0, non_str_keys=False, indent=None, sort_keys=False)` | function → `bytes` | UTF-8 JSON, like `orjson.dumps` |
+| `dumps_str(obj, *, default=None, passthrough=0, non_str_keys=False, indent=None, sort_keys=False)` | function → `str` | like `json.dumps(obj, ensure_ascii=False, separators=(",", ":"))` |
 | `dumps_bytes(...)` | function → `bytes` | alias of `dumps`, kept for compatibility |
 | `PASSTHROUGH_DATETIME`, `_UUID`, `_DATACLASS`, `_ENUM` | `int` flags | for `passthrough=`, combine with `\|` |
 | `JSONDecodeError` | exception | `json.JSONDecodeError` itself (a `ValueError`) |
@@ -169,6 +171,13 @@ The wheel ships type stubs (`py.typed`), so mypy and pyright check calls to rjso
   native text, like orjson's `OPT_NON_STR_KEYS`). Other key types raise; `default=` is not
   called for keys. Like `json` and orjson, a coerced key can duplicate a str key
   (`{1: …, "1": …}` writes `"1"` twice). Off by default: a non-str key raises.
+- **`indent=` / `sort_keys=`:** `indent=2` and `sort_keys=True` give exactly the bytes of
+  orjson's `OPT_INDENT_2` and `OPT_SORT_KEYS` (keys sorted by code point; dataclass fields
+  keep their order); other widths (`indent=4`, `indent=0`) lay out like
+  `json.dumps(indent=n)`. Compact calls pay nothing for them; the options themselves are
+  not yet as fast as orjson's (twitter.json: `sort_keys` 0.78×, `indent=2` 0.48×). With
+  either option, `dumps_str` raises `UnicodeEncodeError` on a lone surrogate, as `dumps`
+  does.
 - **`default=`:** called with each value rjson cannot serialize; its return value is
   serialized in its place (and passed to `default` again if still unsupported), as in
   `json.dumps` and orjson. Exceptions it raises propagate unchanged. It is not called for
@@ -198,6 +207,8 @@ Most code migrates with a find-and-replace:
 | `json.dumps(obj, default=f)` / `orjson.dumps(obj, default=f)` | `rjson.dumps(obj, default=f)` |
 | `orjson.dumps(datetime/UUID/dataclass/Enum)` | the same bytes |
 | `json.dumps({1: "a", None: "b"})` / `orjson.dumps(obj, option=OPT_NON_STR_KEYS)` | `rjson.dumps(obj, non_str_keys=True)` (key text as `json` writes it) |
+| `orjson.dumps(obj, option=OPT_INDENT_2 \| OPT_SORT_KEYS)` | `rjson.dumps(obj, indent=2, sort_keys=True)` (same bytes) |
+| `json.dumps(obj, indent=4, sort_keys=True)` | `rjson.dumps_str(obj, indent=4, sort_keys=True)` (non-ASCII kept, like `ensure_ascii=False`) |
 | `orjson.dumps(obj, option=OPT_PASSTHROUGH_DATETIME)` | `rjson.dumps(obj, passthrough=rjson.PASSTHROUGH_DATETIME)` (also `_UUID`, `_DATACLASS`, `_ENUM`) |
 | `json.dumps(obj, default=lambda o: o.isoformat())` for datetimes | `rjson.dumps(obj)` (the same text, except UTC offsets with a seconds part, which are rounded to the minute) |
 
@@ -206,7 +217,6 @@ What does **not** carry over yet, and how to handle it:
 | feature | status | workaround |
 |---|---|---|
 | NaN / Infinity | by design | `dumps` raises (`json` writes `NaN`, orjson `null`) |
-| `indent`, `sort_keys` | planned | use `json` for human-facing output |
 | floats below 1e-4 | by design | `1e-7`, same as orjson; `json` writes `1e-07` (same value, different bytes) |
 
 ### FastAPI
@@ -348,7 +358,7 @@ maturin develop --release && python -m pytest tests -q
 | `rjson.pyi` | type stubs |
 | `tests/` | pytest suites |
 | `examples/` | FastAPI, logging/NDJSON and Redis/Kafka integrations (tested) |
-| `benches/` | `corpus_benchmark.py` (reference), `showcase.py` (vs orjson on production shapes), `production_benchmark.py` (production workloads), `examples_benchmark.py` (the examples on rjson vs json vs orjson), `perf_gate.py`, `make_charts.py` / `make_showcase_charts.py` (README charts) |
+| `benches/` | `corpus_benchmark.py` (reference), `showcase.py` (vs orjson on production shapes), `production_benchmark.py` (production workloads), `examples_benchmark.py` (the examples on rjson vs json vs orjson), `perf_gate.py`, `make_charts.py` / `make_showcase_charts.py` / `make_demo_svg.py` (README charts, demo), `demo.py` |
 | `docs/` | showcase, performance review, production readiness report, async guide |
 
 <details>
@@ -364,7 +374,6 @@ maturin develop --release && python -m pytest tests -q
 
 ## Roadmap
 
-- Options: `indent`, `sort_keys`
 - Streaming decoder/encoder for async I/O; free-threading and subinterpreter support ([docs/ASYNC.md](https://github.com/TinDang97/rjson/blob/main/docs/ASYNC.md#roadmap))
 - Performance: NEON kernels for aarch64
 

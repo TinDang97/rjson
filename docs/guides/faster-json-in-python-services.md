@@ -96,10 +96,9 @@ Most code switches with a find-and-replace:
 | `json.dumps(x).encode()` | `rjson.dumps(x)` |
 | `orjson.dumps(x, default=f)` | `rjson.dumps(x, default=f)` |
 
-Not supported yet: `indent`/`sort_keys`
-([#23](https://github.com/TinDang97/rjson/issues/23),
-[#24](https://github.com/TinDang97/rjson/issues/24)) and orjson's other `option=` flags.
-Keep `json` or orjson for those calls. `loads` is strict by default, like orjson;
+`orjson.dumps(x, option=OPT_INDENT_2 | OPT_SORT_KEYS)` becomes
+`rjson.dumps(x, indent=2, sort_keys=True)`, with the same bytes. Not supported yet: orjson's
+other `option=` flags; keep orjson for those calls. `loads` is strict by default, like orjson;
 `lenient=True` accepts exactly what `json.loads` accepts. The full migration guide is in the
 [README](https://github.com/TinDang97/rjson#migrating-from-json-or-orjson).
 
