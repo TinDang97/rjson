@@ -5,16 +5,22 @@ build-backend = "maturin"
 [project]
 name = "pyrjson"
 version = "0.1.1"
-description = "Fast JSON for Python, written in Rust against the CPython C API"
+description = "Fast JSON for Python: a faster orjson/json alternative written in Rust against the CPython C API"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Tin Dang", email = "tindang.ht97@gmail.com" }]
-keywords = ["json", "orjson", "fast", "rust", "serialization"]
+keywords = [
+    "json", "fast-json", "orjson", "orjson-alternative", "ujson", "rust", "pyo3",
+    "serialization", "deserialization", "parser", "serializer", "ndjson", "fastapi",
+    "performance", "simd",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "Operating System :: OS Independent",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
@@ -24,6 +30,10 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Rust",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: General",
+    "Typing :: Typed",
 ]
 # CI-tested on CPython 3.10-3.14 (x86_64, aarch64, macOS, Windows); 3.14
 # verified on 3.14.0rc2 (PyO3 0.29). PyPy/GraalPy/free-threaded: unsupported.
@@ -32,6 +42,10 @@ dependencies = [
 ]
 
 [project.urls]
+Homepage = "https://github.com/TinDang97/rjson"
+Documentation = "https://github.com/TinDang97/rjson#usage"
+Benchmarks = "https://github.com/TinDang97/rjson/blob/main/docs/SHOWCASE.md"
+Changelog = "https://github.com/TinDang97/rjson/blob/main/CHANGELOG.md"
 Repository = "https://github.com/TinDang97/rjson"
 Issues = "https://github.com/TinDang97/rjson/issues"
 

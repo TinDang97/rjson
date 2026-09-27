@@ -25,6 +25,7 @@ src/
   stack.rs    # thread stack bounds (pthread/macOS/Windows) + headroom check for deep nesting
 build.rs      # pyo3_build_config::use_pyo3_cfgs() -> Py_3_10/Py_3_12... cfgs
 rjson.pyi     # type stub (installed as rjson/__init__.pyi + py.typed)
+llms.txt      # summary + API + migration map for AI assistants (llmstxt.org); AGENTS.md: short guide for coding agents (points here)
 examples/     # FastAPI, JSON logging/NDJSON, Redis/Kafka codec (tested by tests/test_examples.py)
 tests/        # test_rjson.py (general + regressions), test_dumps.py (serializer), test_lenient.py (loads lenient=), test_native.py
               # (datetime/UUID/dataclass/Enum, differential vs orjson), test_keys.py
@@ -38,7 +39,7 @@ benches/examples_benchmark.py # examples/ as written vs the same code on json/or
 benches/showcase.py           # head-to-head vs orjson on production-shaped workloads (docs/SHOWCASE.md); --fresh: new-process allocator effect
 benches/perf_gate.py          # compare base/head benchmark runs, fail on >5% geomean regression
 benches/make_charts.py        # README charts (docs/img/*.svg) + table from a --json --output-json run
-benches/make_showcase_charts.py # README showcase chart + architecture diagram (docs/img/showcase-*, architecture-*) from docs/showcase-results.json
+benches/make_showcase_charts.py # README showcase chart + architecture diagram (docs/img/showcase-*, architecture-*) + social-preview.svg/.png from docs/showcase-results.json
 scripts/build_pgo.sh, scripts/pgo_train.py   # PGO wheel build; training is synthetic, disjoint from the benchmark
 .github/workflows/            # ci.yml (clippy + tests + ASan job), wheels.yml (PGO wheels; on a v* tag: provenance + PyPI trusted publishing), perf.yml (perf gate, label `perf`)
                               # actions pinned to commit SHAs (Dependabot bumps them); SECURITY.md, CHANGELOG.md at the root
@@ -115,6 +116,7 @@ cargo clippy --release
 - Test other Python versions: `maturin build --release -i python3.12 -i python3.13 -o <dir>` and install each wheel into a matching venv.
 - Benchmarks: always compare against orjson in the same process (ratio); the dev host is noisy (±10%), so trust geomeans and repeat before believing <10% changes.
 - Performance changes: measure each change separately, keep output byte-identical unless intended, update `docs/PERFORMANCE_REVIEW.md` and the README table.
+- README links and images are absolute URLs (github.com / raw.githubusercontent.com) because PyPI renders the same file and cannot resolve relative paths; keep new ones absolute. Keep numbers in README, llms.txt and the charts in sync.
 - ASan locally (as the CI `sanitize` job): `RUSTUP_TOOLCHAIN=nightly CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-Zsanitizer=address maturin build --release --target x86_64-unknown-linux-gnu`, install, then `ASAN_OPTIONS=detect_leaks=0 PYTHONMALLOC=malloc RJSON_SANITIZER=asan LD_PRELOAD=$(gcc -print-file-name=libasan.so) python -m pytest tests`.
 - Releasing: bump `version` in Cargo.toml and pyproject.toml (a test checks they agree), move CHANGELOG's Unreleased section under the version, push tag `vX.Y.Z`; wheels.yml builds, attests and publishes (needs the PyPI trusted publisher + `pypi` environment, see its header).
 

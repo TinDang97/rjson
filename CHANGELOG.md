@@ -7,6 +7,11 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
 
 ## [Unreleased]
 
+### Docs
+- README images and links are absolute, so they render on PyPI; richer PyPI
+  metadata (keywords, classifiers, project links); `llms.txt` and
+  `AGENTS.md` for AI assistants and coding agents; a social preview image.
+
 ## [0.1.1] - 2026-09-27
 
 First PyPI release, as `pyrjson` (0.1.0 was tagged but never published: its

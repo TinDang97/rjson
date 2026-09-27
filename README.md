@@ -2,24 +2,35 @@
 
 [![PyPI](https://img.shields.io/pypi/v/pyrjson.svg)](https://pypi.org/project/pyrjson/)
 [![CI](https://github.com/TinDang97/rjson/actions/workflows/ci.yml/badge.svg)](https://github.com/TinDang97/rjson/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/TinDang97/rjson/blob/main/LICENSE)
 [![Python 3.10–3.14](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg)](#compatibility)
 [![Status: experimental](https://img.shields.io/badge/status-experimental-orange.svg)](#status)
 
-**Fast JSON for Python, written in Rust directly against the CPython C API.**
-It is faster than [orjson](https://github.com/ijl/orjson) on 18 of the 20 cases of our
-reference benchmark (geomean: `loads` 1.17×, `dumps` 1.36×) and on most production
-workloads, and parses 3.5× / serializes 14× faster than the standard library `json`.
-Output is byte-identical to orjson.
+**Fast JSON for Python, written in Rust directly against the CPython C API.** A faster
+alternative to [orjson](https://github.com/ijl/orjson) and the standard library `json` for
+web APIs (FastAPI and others), logging and NDJSON, caches and message queues; switching is
+mostly a find-and-replace ([migration guide](#migrating-from-json-or-orjson)).
+
+- **Faster than orjson** on 18 of the 20 cases of the reference benchmark (geomean `loads`
+  1.17×, `dumps` 1.36×) and on 21 of 22 production-shaped workloads (1.52×); 3.5× / 14×
+  faster than `json`.
+- **Same output as orjson**, byte for byte, including `datetime`, `UUID`, dataclasses and
+  `Enum`; `dumps_str` returns a `str` directly.
+- **Hardened for untrusted input:** differential fuzzing against `json`, an
+  AddressSanitizer CI build, and stack checks for deeply nested documents.
+- CPython 3.10–3.14 wheels for Linux (glibc and musl), macOS and Windows. MIT licensed.
+
+If rjson saves you CPU time, a ⭐ on [GitHub](https://github.com/TinDang97/rjson) helps
+other people find it.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/headline-dark.svg">
-  <img alt="Geometric-mean speedups on CPython 3.13: loads 1.17× faster than orjson, dumps 1.36× faster than orjson, loads 3.53× and dumps 14.2× faster than the standard library json." src="docs/img/headline-light.svg" width="880">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/headline-dark.svg">
+  <img alt="Geometric-mean speedups on CPython 3.13: loads 1.17× faster than orjson, dumps 1.36× faster than orjson, loads 3.53× and dumps 14.2× faster than the standard library json." src="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/headline-light.svg" width="880">
 </picture>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/vs-orjson-dark.svg">
-  <img alt="Per-case speed relative to orjson. loads: 1.09× to 1.33× faster on nine cases, 0.95× on citm_catalog. dumps: 1.03× to 3.19× faster on nine cases, 0.93× on the float array." src="docs/img/vs-orjson-light.svg" width="880">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/vs-orjson-dark.svg">
+  <img alt="Per-case speed relative to orjson. loads: 1.09× to 1.33× faster on nine cases, 0.95× on citm_catalog. dumps: 1.03× to 3.19× faster on nine cases, 0.93× on the float array." src="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/vs-orjson-light.svg" width="880">
 </picture>
 
 <details>
@@ -29,7 +40,7 @@ Speedup = other library's time ÷ rjson's time (**higher is better**). Median ti
 over 5 runs, CPython 3.13.12, orjson 3.12.0, x86_64 (Xeon), PGO build
 (`scripts/build_pgo.sh`, as the published wheels are built). `loads` parses the documents'
 UTF-8 `bytes`; `dumps` returns `bytes` in both rjson and orjson. Raw results, with each
-case's per-run range: [docs/img/benchmark-results.json](docs/img/benchmark-results.json).
+case's per-run range: [docs/img/benchmark-results.json](https://github.com/TinDang97/rjson/blob/main/docs/img/benchmark-results.json).
 
 | case | loads vs orjson | dumps vs orjson | loads vs json | dumps vs json |
 |---|---|---|---|---|
@@ -66,19 +77,19 @@ memory, [#10](https://github.com/TinDang97/rjson/issues/10)); with `bytes` or a 
 call, as a server gets, rjson is faster. In plain (non-PGO) builds single cases move by up
 to 1.5× with code layout (canada `dumps`), which PGO removes.
 Methodology, per-version results and the roadmap:
-[docs/PERFORMANCE_REVIEW.md](docs/PERFORMANCE_REVIEW.md).
+[docs/PERFORMANCE_REVIEW.md](https://github.com/TinDang97/rjson/blob/main/docs/PERFORMANCE_REVIEW.md).
 
 </details>
 
 ### On production-shaped workloads
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/showcase-dark.svg">
-  <img alt="Speed relative to orjson on 22 production-shaped workloads: rjson faster in 21, geomean 1.52×. Application types 1.09× to 3.17× (UTC datetimes), output as str 1.65× to 1.99×, web API 1.24× to 1.78×, escaped strings 1.40× and 1.56× with per-record NDJSON at 0.92×, standard corpora 1.09× to 1.82×." src="docs/img/showcase-light.svg" width="880">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/showcase-dark.svg">
+  <img alt="Speed relative to orjson on 22 production-shaped workloads: rjson faster in 21, geomean 1.52×. Application types 1.09× to 3.17× (UTC datetimes), output as str 1.65× to 1.99×, web API 1.24× to 1.78×, escaped strings 1.40× and 1.56× with per-record NDJSON at 0.92×, standard corpora 1.09× to 1.82×." src="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/showcase-light.svg" width="880">
 </picture>
 
 Identical output is checked before timing. Numbers, method and the one slower case:
-[docs/SHOWCASE.md](docs/SHOWCASE.md) (`python benches/showcase.py`).
+[docs/SHOWCASE.md](https://github.com/TinDang97/rjson/blob/main/docs/SHOWCASE.md) (`python benches/showcase.py`).
 
 ## Installation
 
@@ -148,7 +159,7 @@ The wheel ships type stubs (`py.typed`), so mypy and pyright check calls to rjso
   (orjson writes `+00:60`).
 - **`passthrough=`:** `rjson.PASSTHROUGH_*` flags send those kinds to `default=` (or make
   them raise) instead, e.g. to tag them for an exact round trip
-  ([`examples/codec.py`](examples/codec.py)), like orjson's `OPT_PASSTHROUGH_*`.
+  ([`examples/codec.py`](https://github.com/TinDang97/rjson/blob/main/examples/codec.py)), like orjson's `OPT_PASSTHROUGH_*`.
 - **`non_str_keys=True`:** dict keys may be `int` (any size), `float`, `bool`, `None`
   (written exactly as `json.dumps` writes them: `"1"`, `"1e-07"`, `"NaN"`, `"true"`,
   `"null"`), `Enum` members (their value), and `datetime`/`date`/`time`/`UUID` (their
@@ -217,27 +228,27 @@ Return `RJSONResponse(...)` directly for dicts and lists. Measured on whole requ
 through the app, against stock FastAPI's own fast path (a return type, serialized by
 Pydantic's `dump_json`): a 50-row page is 1.25–1.4× faster, 1.8–1.9× with UUID/datetime/Enum
 fields, and a 1,000-row export 3.0–3.2× faster; against an endpoint without a return type,
-9–74× ([numbers](examples/README.md#measured-gains)). Don't set it as
+9–74× ([numbers](https://github.com/TinDang97/rjson/blob/main/examples/README.md#measured-gains)). Don't set it as
 `default_response_class`: endpoints that return Pydantic models already go through
-`dump_json`. [`examples/fastapi_app.py`](examples/fastapi_app.py) adds a fallback for
+`dump_json`. [`examples/fastapi_app.py`](https://github.com/TinDang97/rjson/blob/main/examples/fastapi_app.py) adds a fallback for
 Decimal, Pydantic models and dataclasses, and rjson-parsed request bodies.
 
 ### Logging, NDJSON, Redis and Kafka
 
-- [`examples/json_logging.py`](examples/json_logging.py): a `logging.Formatter` writing one
+- [`examples/json_logging.py`](https://github.com/TinDang97/rjson/blob/main/examples/json_logging.py): a `logging.Formatter` writing one
   JSON object per line (2.2–2.5 µs per record, 2.4–2.7× faster than the same formatter on
   `json`), plus NDJSON read/write (writing 12.5× faster, reading 2.5–2.8×).
-- [`examples/codec.py`](examples/codec.py): a versioned bytes codec for Redis/Kafka with
+- [`examples/codec.py`](https://github.com/TinDang97/rjson/blob/main/examples/codec.py): a versioned bytes codec for Redis/Kafka with
   typed round trips, and `value_serializer`/`value_deserializer` callables. Round trips of
   JSON-native payloads are 4.1–4.6× faster than the same codec on `json`, and faster than
   `pickle`.
-- [`docs/ASYNC.md`](docs/ASYNC.md): aiohttp, httpx, asyncpg, `redis.asyncio` and aiokafka
+- [`docs/ASYNC.md`](https://github.com/TinDang97/rjson/blob/main/docs/ASYNC.md): aiohttp, httpx, asyncpg, `redis.asyncio` and aiokafka
   one-liners.
 
 ## Production use
 
 The full report, with every number and how it was measured:
-[docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md).
+[docs/PRODUCTION_READINESS.md](https://github.com/TinDang97/rjson/blob/main/docs/PRODUCTION_READINESS.md).
 In short, rjson is ready for services whose payloads are JSON-native (dicts, lists,
 strings, numbers), and not yet a drop-in for code that relies on orjson's options.
 
@@ -257,11 +268,11 @@ Untrusted input is bounded: nesting limits plus a thread-stack check (deep docum
 `RecursionError` instead of overflowing a small thread stack), and CPython's integer digit
 limit. CI runs the tests, differential fuzzing against `json` and thread/re-entrancy
 stress tests, also on an AddressSanitizer build. It is still 0.x: pin the version.
-Report vulnerabilities privately: [SECURITY.md](SECURITY.md).
+Report vulnerabilities privately: [SECURITY.md](https://github.com/TinDang97/rjson/blob/main/SECURITY.md).
 
 **Does it work with asyncio / uvloop?**
 Yes. Calls are synchronous and hold the GIL, so a large payload blocks the event loop, and
-`asyncio.to_thread` does not help. [docs/ASYNC.md](docs/ASYNC.md) shows what to do instead.
+`asyncio.to_thread` does not help. [docs/ASYNC.md](https://github.com/TinDang97/rjson/blob/main/docs/ASYNC.md) shows what to do instead.
 
 **Is it thread-safe?**
 Yes, on regular (GIL) CPython builds, including calls re-entered from `default=` and
@@ -280,7 +291,7 @@ Compress in the transport (HTTP middleware, Kafka `compression.type`), and only 
 of a few KB and up: compression costs as much CPU as serialization. Binary formats aren't
 faster when the result is Python dicts, because creating objects dominates. Arrow and
 Polars win when data stays columnar. Numbers:
-[Transfer size](docs/PRODUCTION_READINESS.md#transfer-size-compression-and-binary-formats).
+[Transfer size](https://github.com/TinDang97/rjson/blob/main/docs/PRODUCTION_READINESS.md#transfer-size-compression-and-binary-formats).
 
 **Why is `dumps_str` sometimes slower than `dumps`?**
 A `str` containing emoji must store every character in 4 bytes, and CJK text in 2, while
@@ -306,19 +317,19 @@ Experimental. The API may change before 1.0; pin the version you test against.
 ## Why it is faster than orjson
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/img/architecture-dark.svg">
-  <img alt="Design differences from orjson 3.12. loads: orjson parses into a yyjson tree, then converts the tree to Python objects in a second pass; rjson builds Python objects in one pass (1.09–1.29× faster, 30–37% less peak memory on large files). dumps: orjson starts from a 4 KiB buffer that doubles, escapes with SSE2 or an AVX-512 build and returns bytes; rjson sizes the buffer from recent calls, escapes with AVX-512, AVX2 or SSE2 and writes bytes or str directly (1.12–1.82× faster, as str 1.65–1.99×). Native types: orjson probes three attributes and calls utcoffset() per aware datetime; rjson caches the timezone offset and per-class facts (UTC datetimes 3.17×, datetime/UUID/Enum records 2.34×, slots dataclasses 2.14×)." src="docs/img/architecture-light.svg" width="880">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/architecture-dark.svg">
+  <img alt="Design differences from orjson 3.12. loads: orjson parses into a yyjson tree, then converts the tree to Python objects in a second pass; rjson builds Python objects in one pass (1.09–1.29× faster, 30–37% less peak memory on large files). dumps: orjson starts from a 4 KiB buffer that doubles, escapes with SSE2 or an AVX-512 build and returns bytes; rjson sizes the buffer from recent calls, escapes with AVX-512, AVX2 or SSE2 and writes bytes or str directly (1.12–1.82× faster, as str 1.65–1.99×). Native types: orjson probes three attributes and calls utcoffset() per aware datetime; rjson caches the timezone offset and per-class facts (UTC datetimes 3.17×, datetime/UUID/Enum records 2.34×, slots dataclasses 2.14×)." src="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/architecture-light.svg" width="880">
 </picture>
 
 Both are Rust on the CPython C API, cache dict keys and format floats with zmij.
 Internals rjson relies on are version-gated and self-tested at import (`CLAUDE.md`);
-details in [docs/PERFORMANCE_REVIEW.md](docs/PERFORMANCE_REVIEW.md).
+details in [docs/PERFORMANCE_REVIEW.md](https://github.com/TinDang97/rjson/blob/main/docs/PERFORMANCE_REVIEW.md).
 
 ## Contributing
 
-Bug reports and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers the
+Bug reports and pull requests are welcome. [CONTRIBUTING.md](https://github.com/TinDang97/rjson/blob/main/CONTRIBUTING.md) covers the
 development setup, the hard rules for code that touches the C API, and how to benchmark.
-Security issues: [SECURITY.md](SECURITY.md). Changes: [CHANGELOG.md](CHANGELOG.md).
+Security issues: [SECURITY.md](https://github.com/TinDang97/rjson/blob/main/SECURITY.md). Changes: [CHANGELOG.md](https://github.com/TinDang97/rjson/blob/main/CHANGELOG.md).
 
 ```bash
 uv venv .venv -p 3.13 && . .venv/bin/activate
@@ -351,10 +362,10 @@ maturin develop --release && python -m pytest tests -q
 ## Roadmap
 
 - Options: `indent`, `sort_keys`
-- Streaming decoder/encoder for async I/O; free-threading and subinterpreter support ([docs/ASYNC.md](docs/ASYNC.md#roadmap))
+- Streaming decoder/encoder for async I/O; free-threading and subinterpreter support ([docs/ASYNC.md](https://github.com/TinDang97/rjson/blob/main/docs/ASYNC.md#roadmap))
 - Performance: NEON kernels for aarch64
 
 ## License
 
-[MIT](LICENSE) © 2025 Tin Dang. `src/lemire.rs` is adapted from
+[MIT](https://github.com/TinDang97/rjson/blob/main/LICENSE) © 2025 Tin Dang. `src/lemire.rs` is adapted from
 [fast-float](https://github.com/aldanor/fast-float-rust) (MIT OR Apache-2.0).
