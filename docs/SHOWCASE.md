@@ -9,6 +9,11 @@ for `loads`), then times them interleaved in one process.
 **Result: rjson is faster in 21 of 22 cases, 1.52× on the geometric mean.** The one case
 where it is not (per-record NDJSON, 0.92×) is listed with the rest.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="img/showcase-dark.svg">
+  <img alt="Speed relative to orjson on 22 workloads: rjson faster in 21, geomean 1.52×." src="img/showcase-light.svg" width="880">
+</picture>
+
 Speedup = orjson's time ÷ rjson's time (higher is better). Median of 3 runs of
 `benches/showcase.py --rounds 15`, each the median of 15 interleaved rounds; in parentheses
 the lowest and highest of the 3 runs. CPython 3.13.12, orjson 3.12.0, x86_64 Xeon (4
@@ -46,23 +51,32 @@ Times are the medians of the 3 runs.
 
 ## Why rjson is ahead
 
-- **Application types.** orjson serializes datetime/UUID/Enum/dataclass natively too, and
-  rjson matches its output byte for byte. rjson reads the values straight from the C
-  structs (datetime fields, the UUID's `int` slot), and caches per type what it learned
-  about the class: whether it is a dataclass, whether it has `__slots__`, whether its Enum
-  `_value_` and instance `__dict__` can be read without running Python code. The cache is
-  keyed by CPython's `tp_version_tag`, which changes whenever the class or a base changes.
-- **Escaping.** AVX-512 / AVX2 / SSE2 kernels chosen at run time, with the worst case
-  reserved up front, so the inner loop has no bounds checks.
-- **`str` output.** `dumps_str` writes the `str` object directly. orjson users who need a
-  `str` (templates, `logging.Formatter.format`, APIs that take text) pay for a `bytes`
-  result and then a decode.
-- **Per-call overhead.** The entry points are raw `METH_FASTCALL` builtins (about 8 ns
-  cheaper than a PyO3 `#[pyfunction]`), and the output buffer is sized from the previous
-  calls.
-- **`loads`.** A dict-key cache that reuses `str` objects together with their hashes,
-  8-digits-at-a-time integers, and correctly rounded floats on a fast path that covers
-  full-precision doubles.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="img/architecture-dark.svg">
+  <img alt="Design differences from orjson 3.12 for loads, dumps and native types, with the measured effect of each." src="img/architecture-light.svg" width="880">
+</picture>
+
+
+Checked against orjson 3.12.0's source:
+
+- **`loads`: one pass.** orjson parses into a yyjson document (a tree of every value),
+  then walks it to create Python objects. rjson creates them while parsing, so it
+  touches the input once and holds no tree (30–37% lower peak memory on large files).
+- **Aware datetimes.** For each `datetime` on `datetime.timezone`, orjson probes three
+  attributes (`convert`, `normalize`, `dst`) and calls `utcoffset()`. rjson reuses the
+  offset of the last `timezone` object and reads the fields from the C struct.
+- **Classes.** rjson caches per type whether it is a dataclass, has `__slots__`, and
+  whether its Enum `_value_` or instance `__dict__` can be read without running Python
+  code, keyed by `tp_version_tag` (reset whenever the class or a base changes).
+- **Escaping.** orjson has SSE2 and an AVX-512 build option; rjson picks AVX-512, AVX2 or
+  SSE2 at run time, so AVX2-only CPUs get 32-byte kernels.
+- **Output buffer and `str`.** orjson starts every call from a 4 KiB buffer that doubles;
+  rjson sizes it from recent calls. `dumps_str` writes the `str` directly, where orjson
+  users decode its `bytes`. For non-ASCII text orjson calls `PyUnicode_AsUTF8AndSize`,
+  which attaches a UTF-8 copy to every string it serializes; rjson does not for long
+  strings.
+
+Both use raw `METH_FASTCALL` entry points, cache dict keys and format floats with zmij.
 
 ## Found and fixed while building this comparison
 

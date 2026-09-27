@@ -72,25 +72,13 @@ Methodology, per-version results and the roadmap:
 
 ### On production-shaped workloads
 
-[docs/SHOWCASE.md](docs/SHOWCASE.md) runs rjson and orjson head to head on API
-payloads, log records, application types and `str` output, with identical output checked
-first. rjson is faster in 21 of 22 cases, 1.52× on the geomean (PGO build, CPython 3.13):
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/showcase-dark.svg">
+  <img alt="Speed relative to orjson on 22 production-shaped workloads: rjson faster in 21, geomean 1.52×. Application types 1.09× to 3.17× (UTC datetimes), output as str 1.65× to 1.99×, web API 1.24× to 1.78×, escaped strings 1.40× and 1.56× with per-record NDJSON at 0.92×, standard corpora 1.09× to 1.82×." src="docs/img/showcase-light.svg" width="880">
+</picture>
 
-| workload | vs orjson |
-|---|---|
-| 5,000 UTC `datetime`s | **3.17×** |
-| events with `datetime`, `UUID`, `Enum` | **2.34×** |
-| dict with int keys (`non_str_keys`) | **2.19×** |
-| `@dataclass(slots=True)` instances | **2.14×** |
-| github.json response / as `str` | **1.78×** / **1.99×** |
-| paginated REST page | **1.64×** |
-| log records with tracebacks | **1.56×** |
-| 1,000 small request bodies / responses, one call each | **1.25×** / **1.24×** |
-| NDJSON, one `dumps` per ~600 B escaped record | 0.92× |
-
-In a fresh process, encoding 2,000 records one call at a time was 4.2× faster than orjson,
-which took 1,976 page faults (glibc malloc behaviour; details in the doc).
-Reproduce with `python benches/showcase.py --fresh`.
+Identical output is checked before timing. Numbers, method and the one slower case:
+[docs/SHOWCASE.md](docs/SHOWCASE.md) (`python benches/showcase.py`).
 
 ## Installation
 
@@ -315,19 +303,16 @@ exactly what `json.loads` accepts.
 
 Experimental. The API may change before 1.0; pin the version you test against.
 
-## How it is fast
+## Why it is faster than orjson
 
-- `loads` is a hand-written single-pass parser that builds Python objects directly. It
-  caches dict keys, sizes lists exactly, parses numbers 8 digits at a time with correctly
-  rounded floats, and uses SIMD for strings, escapes and whitespace.
-- `dumps` writes straight into the final `bytes`/`str` object. It dispatches on exact
-  types with no reference-count traffic, uses AVX-512/AVX2/SSE2 escape kernels, and
-  zmij/itoap number formatting.
-- A few speedups rely on non-public CPython internals. Each is limited to the versions it
-  was checked against, and the layout reads run a self-test at import (listed in
-  `CLAUDE.md`).
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/img/architecture-dark.svg">
+  <img alt="Design differences from orjson 3.12. loads: orjson parses into a yyjson tree, then converts the tree to Python objects in a second pass; rjson builds Python objects in one pass (1.09–1.29× faster, 30–37% less peak memory on large files). dumps: orjson starts from a 4 KiB buffer that doubles, escapes with SSE2 or an AVX-512 build and returns bytes; rjson sizes the buffer from recent calls, escapes with AVX-512, AVX2 or SSE2 and writes bytes or str directly (1.12–1.82× faster, as str 1.65–1.99×). Native types: orjson probes three attributes and calls utcoffset() per aware datetime; rjson caches the timezone offset and per-class facts (UTC datetimes 3.17×, datetime/UUID/Enum records 2.34×, slots dataclasses 2.14×)." src="docs/img/architecture-light.svg" width="880">
+</picture>
 
-Details: [docs/PERFORMANCE_REVIEW.md](docs/PERFORMANCE_REVIEW.md).
+Both are Rust on the CPython C API, cache dict keys and format floats with zmij.
+Internals rjson relies on are version-gated and self-tested at import (`CLAUDE.md`);
+details in [docs/PERFORMANCE_REVIEW.md](docs/PERFORMANCE_REVIEW.md).
 
 ## Contributing
 
@@ -349,8 +334,8 @@ maturin develop --release && python -m pytest tests -q
 | `rjson.pyi` | type stubs |
 | `tests/` | pytest suites |
 | `examples/` | FastAPI, logging/NDJSON and Redis/Kafka integrations (tested) |
-| `benches/` | `corpus_benchmark.py` (reference), `production_benchmark.py` (production workloads), `examples_benchmark.py` (the examples on rjson vs json vs orjson), `perf_gate.py`, `make_charts.py` |
-| `docs/` | performance review, production readiness report, async guide |
+| `benches/` | `corpus_benchmark.py` (reference), `showcase.py` (vs orjson on production shapes), `production_benchmark.py` (production workloads), `examples_benchmark.py` (the examples on rjson vs json vs orjson), `perf_gate.py`, `make_charts.py` / `make_showcase_charts.py` (README charts) |
+| `docs/` | showcase, performance review, production readiness report, async guide |
 
 <details>
 <summary>Troubleshooting source builds</summary>
