@@ -7,6 +7,17 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-27
+
+First PyPI release, as `pyrjson` (0.1.0 was tagged but never published: its
+musllinux wheel builds failed on the bug fixed below).
+
+### Fixed
+- On musl (Alpine), `loads`/`dumps` on the main thread no longer raise
+  `RecursionError` a few hundred levels deep: musl reports only the part of
+  the main thread's stack mapped so far, so the headroom check now takes the
+  bound from `RLIMIT_STACK` there, as glibc does.
+
 ### Performance
 - `dumps` of datetime, UUID, Enum and dataclass values: per-type facts are
   cached (keyed by `tp_version_tag`), and missing native modules (usually
@@ -21,7 +32,7 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
 
 ## [0.1.0] - 2026-09-27
 
-First PyPI release, as `pyrjson`.
+Tagged, not published to PyPI (see 0.1.1); everything below ships in 0.1.1.
 
 ### Added
 - `dumps(obj, default=...)` hook for unsupported types (#4).
@@ -54,10 +65,6 @@ First PyPI release, as `pyrjson`.
   with small stacks (64-128 KiB: musl/Alpine, `threading.stack_size`); they
   raise `RecursionError`. The lenient `json.loads` fallback is skipped where
   it would overflow the stack itself.
-- On musl (Alpine), `loads`/`dumps` on the main thread no longer raise
-  `RecursionError` a few hundred levels deep: musl reports only the part of
-  the main thread's stack mapped so far, so the headroom check now takes the
-  bound from `RLIMIT_STACK` there, as glibc does.
 - `loads` names CPython's integer digit limit (`sys.set_int_max_str_digits`)
   instead of reporting "invalid number".
 - A small `dumps` right after a big one no longer allocates a buffer of the
@@ -68,5 +75,6 @@ First PyPI release, as `pyrjson`.
   output buffer sizing, and fewer UTF-8 copies attached to strings (#10).
   Current numbers: [docs/PERFORMANCE_REVIEW.md](docs/PERFORMANCE_REVIEW.md).
 
-[Unreleased]: https://github.com/TinDang97/rjson/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/TinDang97/rjson/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/TinDang97/rjson/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/TinDang97/rjson/releases/tag/v0.1.0
