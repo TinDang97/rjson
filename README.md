@@ -236,22 +236,29 @@ strings, numbers), and not yet a drop-in for code that relies on orjson's option
 **Is it faster than orjson in real services, not just benchmarks?**
 On our production-shaped suite (`benches/production_benchmark.py`: REST pages, request
 bodies, NDJSON logs, 100 MB files, cache blobs) rjson is faster on most shapes (geomean
-`dumps` 0.76×, `loads` 0.87× of orjson's time) and uses 30–37% less peak memory on large
-`loads`. The report lists the few shapes where it is not.
+`dumps` 0.67×, `loads` 0.83× of orjson's time, PGO wheels) and uses 30–37% less peak
+memory on large `loads`. The report lists the few shapes where it is not.
 
 **Is it safe?**
 It checks the exact type of every value, reserves the worst-case output size before
-writing, and version-gates every CPython internal it uses, with self-tests at import. 1056
-tests, fuzzing against `json`, and 0 mismatches against orjson on all benchmark workloads.
-It is still 0.x: pin the version.
+writing, and version-gates every CPython internal it uses, with self-tests at import.
+Untrusted input is bounded: nesting limits plus a thread-stack check (deep documents raise
+`RecursionError` instead of overflowing a small thread stack), and CPython's integer digit
+limit. CI runs the tests, differential fuzzing against `json` and thread/re-entrancy
+stress tests, also on an AddressSanitizer build. It is still 0.x: pin the version.
+Report vulnerabilities privately: [SECURITY.md](SECURITY.md).
 
 **Does it work with asyncio / uvloop?**
 Yes. Calls are synchronous and hold the GIL, so a large payload blocks the event loop, and
 `asyncio.to_thread` does not help. [docs/ASYNC.md](docs/ASYNC.md) shows what to do instead.
 
 **Is it thread-safe?**
-Yes, on regular (GIL) CPython builds. Threads do not parallelize JSON work. Free-threaded
-builds (3.13t/3.14t) and subinterpreters are not supported yet.
+Yes, on regular (GIL) CPython builds, including calls re-entered from `default=` and
+threads switching mid-call (stress-tested). Threads do not parallelize JSON work.
+Free-threaded builds (3.13t/3.14t) and subinterpreters are not supported yet. In threads
+with small stacks (musl/Alpine's 128 KiB default, `threading.stack_size`), very deep
+documents raise `RecursionError`: about 975 nested arrays or 620 nested objects fit in
+128 KiB, the full 1024 levels in 256 KiB.
 
 **Why does `dumps` return `bytes`?**
 It is what you send over the network or write to a file, and it avoids a copy. Use
@@ -303,6 +310,7 @@ Details: [docs/PERFORMANCE_REVIEW.md](docs/PERFORMANCE_REVIEW.md).
 
 Bug reports and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers the
 development setup, the hard rules for code that touches the C API, and how to benchmark.
+Security issues: [SECURITY.md](SECURITY.md). Changes: [CHANGELOG.md](CHANGELOG.md).
 
 ```bash
 uv venv .venv -p 3.13 && . .venv/bin/activate
