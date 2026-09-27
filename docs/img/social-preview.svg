@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="rjson: fast JSON for Python, written in Rust">
+<rect width="1280" height="640" fill="#1a1a19"/>
+<rect x="0" y="0" width="12" height="640" fill="#3987e5"/>
+<text x="96.0" y="190.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="132" font-weight="700" fill="#ffffff" text-anchor="start">rjson</text>
+<text x="100.0" y="256.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="40" font-weight="500" fill="#c3c2b7" text-anchor="start">Fast JSON for Python, written in Rust</text>
+<text x="100.0" y="400.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="72" font-weight="700" fill="#3987e5" text-anchor="start" style="font-variant-numeric: tabular-nums">1.52×</text>
+<text x="102.0" y="440.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="22" font-weight="400" fill="#c3c2b7" text-anchor="start">vs orjson, 22 workloads</text>
+<text x="480.0" y="400.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="72" font-weight="700" fill="#3987e5" text-anchor="start" style="font-variant-numeric: tabular-nums">3.17×</text>
+<text x="482.0" y="440.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="22" font-weight="400" fill="#c3c2b7" text-anchor="start">UTC timestamps vs orjson</text>
+<text x="860.0" y="400.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="72" font-weight="700" fill="#3987e5" text-anchor="start" style="font-variant-numeric: tabular-nums">14×</text>
+<text x="862.0" y="440.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="22" font-weight="400" fill="#c3c2b7" text-anchor="start">dumps vs stdlib json</text>
+<rect x="100" y="505" width="370" height="58" rx="10" fill="#2c2c2a"/>
+<text x="122" y="543" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="28" font-weight="600" fill="#ffffff">pip install pyrjson</text>
+<text x="1180.0" y="543.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="26" font-weight="400" fill="#9a988f" text-anchor="end">github.com/TinDang97/rjson</text>
+</svg>

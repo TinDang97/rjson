@@ -8,6 +8,8 @@ Writes, each in a light and a dark variant (``<name>-light.svg`` / ``<name>-dark
     showcase       speedup over orjson per workload, grouped, from showcase-results.json
     architecture   where rjson's design differs from orjson's (loads, dumps, native
                    types), annotated with the measured effect from the same results
+and social-preview.svg (1280x640, dark only) for the repository's social preview; GitHub
+wants a PNG: render it with a headless browser at 1280x640 (docs/img/social-preview.png).
 
 Same palette and conventions as ``make_charts.py`` (pure standard library).
 """
@@ -191,6 +193,33 @@ def architecture_svg(t, x, eff):
     return "\n".join(parts)
 
 
+def social_svg(rows):
+    """1280x640 card for the repository's social preview (link unfurls)."""
+    t = THEMES["dark"]
+    w, h = 1280, 640
+    wins = sum(r["speedup"] > 1 for r in rows)
+    geo = math.exp(sum(math.log(r["speedup"]) for r in rows) / len(rows))
+    best = max(rows, key=lambda r: r["speedup"])
+    stats = [(fmt_x(geo), f"vs orjson, {len(rows)} workloads"),
+             (fmt_x(best["speedup"]), f"{best['name']} vs orjson"),
+             ("14×", "dumps vs stdlib json")]
+    parts = [svg_open(w, h, "rjson: fast JSON for Python, written in Rust"),
+             f'<rect width="{w}" height="{h}" fill="{t["surface"]}"/>',
+             f'<rect x="0" y="0" width="12" height="{h}" fill="{t["accent"]}"/>',
+             text(96, 190, "rjson", 132, t["ink"], 700),
+             text(100, 256, "Fast JSON for Python, written in Rust", 40, t["ink2"], 500)]
+    for i, (big, small) in enumerate(stats):
+        x = 100 + i * 380
+        parts.append(text(x, 400, big, 72, t["accent"], 700, extra=NUM))
+        parts.append(text(x + 2, 440, small, 22, t["ink2"]))
+    parts.append(f'<rect x="100" y="505" width="370" height="58" rx="10" fill="{t["grid"]}"/>')
+    parts.append(f'<text x="122" y="543" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" '
+                 f'font-size="28" font-weight="600" fill="{t["ink"]}">pip install pyrjson</text>')
+    parts.append(text(w - 100, 543, "github.com/TinDang97/rjson", 26, t["muted"], anchor="end"))
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
 def effects(rows):
     by = {r["name"]: r["speedup"] for r in rows}
 
@@ -223,6 +252,8 @@ def main():
             f.write(showcase_svg(t, EXTRA[mode], rows, meta))
         with open(os.path.join(args.out, f"architecture-{mode}.svg"), "w") as f:
             f.write(architecture_svg(t, EXTRA[mode], eff))
+    with open(os.path.join(args.out, "social-preview.svg"), "w") as f:
+        f.write(social_svg(rows))
     print("\n".join(f"{k}: {v}" for k, v in eff.items()))
 
 
