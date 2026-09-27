@@ -88,7 +88,10 @@ Methodology, per-version results and the roadmap:
   <img alt="Speed relative to orjson on 22 production-shaped workloads: rjson faster in 21, geomean 1.52×. Application types 1.09× to 3.17× (UTC datetimes), output as str 1.65× to 1.99×, web API 1.24× to 1.78×, escaped strings 1.40× and 1.56× with per-record NDJSON at 0.92×, standard corpora 1.09× to 1.82×." src="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/showcase-light.svg" width="880">
 </picture>
 
-Identical output is checked before timing. Numbers, method and the one slower case:
+Identical output is checked before timing. FastAPI, logging, NDJSON and Redis/Kafka numbers for the
+[examples](https://github.com/TinDang97/rjson/tree/main/examples):
+[Faster JSON in Python services](https://github.com/TinDang97/rjson/blob/main/docs/guides/faster-json-in-python-services.md).
+Numbers, method and the one slower case:
 [docs/SHOWCASE.md](https://github.com/TinDang97/rjson/blob/main/docs/SHOWCASE.md) (`python benches/showcase.py`).
 
 ## Installation
