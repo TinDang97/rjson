@@ -106,7 +106,8 @@ def test_json_lines_skips_blank_lines_and_names_the_bad_line():
 
 def test_beautify_api():
     data = b'{"b": [1, 2.5, "\xc3\xa9"], "a": NaN}'
-    assert beautify(data) == json_tool([], data).stdout
+    # beautify() returns "\n" line ends; json.tool's stdout has os.linesep.
+    assert nl(beautify(data)) == json_tool([], data).stdout
     assert beautify(data.decode(), compact=True, sort_keys=True, ensure_ascii=False) == (
         '{"a":NaN,"b":[1,2.5,"é"]}\n'.encode()
     )
@@ -158,7 +159,7 @@ def test_in_place_check_and_validate(tmp_path):
 
     before = good.stat().st_mtime_ns
     out = run(["-i", str(good), str(ugly)])
-    assert out.returncode == 0 and out.stderr == f"reformatted {ugly}\n".encode()
+    assert out.returncode == 0 and out.stderr == nl(f"reformatted {ugly}\n".encode())
     assert ugly.read_bytes() == b'{\n    "a": 1,\n    "b": [\n        1,\n        2\n    ]\n}\n'
     if os.name != "nt":  # Windows has only a read-only bit
         assert stat.S_IMODE(ugly.stat().st_mode) == 0o640
