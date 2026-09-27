@@ -7,6 +7,8 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-27
+
 ### Added
 - `dumps`/`dumps_str` `indent=` and `sort_keys=` (#23, #24). `indent=2` and
   `sort_keys=True` produce exactly orjson's `OPT_INDENT_2` / `OPT_SORT_KEYS`
@@ -89,6 +91,7 @@ Tagged, not published to PyPI (see 0.1.1); everything below ships in 0.1.1.
   output buffer sizing, and fewer UTF-8 copies attached to strings (#10).
   Current numbers: [docs/PERFORMANCE_REVIEW.md](docs/PERFORMANCE_REVIEW.md).
 
-[Unreleased]: https://github.com/TinDang97/rjson/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/TinDang97/rjson/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/TinDang97/rjson/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/TinDang97/rjson/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/TinDang97/rjson/releases/tag/v0.1.0
