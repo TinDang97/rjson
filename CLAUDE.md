@@ -38,6 +38,7 @@ benches/examples_benchmark.py # examples/ as written vs the same code on json/or
 benches/showcase.py           # head-to-head vs orjson on production-shaped workloads (docs/SHOWCASE.md); --fresh: new-process allocator effect
 benches/perf_gate.py          # compare base/head benchmark runs, fail on >5% geomean regression
 benches/make_charts.py        # README charts (docs/img/*.svg) + table from a --json --output-json run
+benches/make_showcase_charts.py # README showcase chart + architecture diagram (docs/img/showcase-*, architecture-*) from docs/showcase-results.json
 scripts/build_pgo.sh, scripts/pgo_train.py   # PGO wheel build; training is synthetic, disjoint from the benchmark
 .github/workflows/            # ci.yml (clippy + tests + ASan job), wheels.yml (PGO wheels; on a v* tag: provenance + PyPI trusted publishing), perf.yml (perf gate, label `perf`)
                               # actions pinned to commit SHAs (Dependabot bumps them); SECURITY.md, CHANGELOG.md at the root
