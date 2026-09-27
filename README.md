@@ -1,5 +1,6 @@
 # rjson
 
+[![PyPI](https://img.shields.io/pypi/v/pyrjson.svg)](https://pypi.org/project/pyrjson/)
 [![CI](https://github.com/TinDang97/rjson/actions/workflows/ci.yml/badge.svg)](https://github.com/TinDang97/rjson/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.10–3.14](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg)](#compatibility)
@@ -71,23 +72,23 @@ Methodology, per-version results and the roadmap:
 
 ## Installation
 
-The PyPI distribution will be **`pyrjson`** (the name `rjson` on PyPI belongs to an
-unrelated project). You still `import rjson`.
+The PyPI distribution is **`pyrjson`** (the name `rjson` on PyPI belongs to an unrelated
+project). You still `import rjson`.
 
 ```bash
-pip install pyrjson        # or: uv add pyrjson  (once published)
+pip install pyrjson        # or: uv add pyrjson
 ```
 
-Until the first release, install from source (needs a Rust toolchain and CPython 3.10–3.14):
+Wheels are PGO-optimized builds for CPython 3.10–3.14 on Linux (manylinux and musllinux,
+x86_64 and aarch64), macOS (arm64 and x86_64) and Windows (x86_64), with build provenance
+attestations (`gh attestation verify <wheel> --repo TinDang97/rjson`). Elsewhere pip builds
+from the sdist, which needs a Rust toolchain. The development version:
 
 ```bash
 pip install "git+https://github.com/TinDang97/rjson"
 # or, from a checkout:
 pip install maturin && maturin develop --release
 ```
-
-`.github/workflows/wheels.yml` builds PGO-optimized wheels for manylinux/musllinux (x86_64,
-aarch64), macOS and Windows.
 
 ## Usage
 
@@ -345,7 +346,6 @@ maturin develop --release && python -m pytest tests -q
 - Options: `indent`, `sort_keys`
 - Streaming decoder/encoder for async I/O; free-threading and subinterpreter support ([docs/ASYNC.md](docs/ASYNC.md#roadmap))
 - Performance: NEON kernels for aarch64
-- First PyPI release as `pyrjson`
 
 ## License
 
