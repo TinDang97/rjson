@@ -11,6 +11,7 @@ Run ``python examples/flask_json.py`` for a demo through Flask's test client
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import decimal
 import enum
@@ -28,7 +29,8 @@ def to_jsonable(value: Any) -> Any:
     """Convert common non-JSON types to JSON-native values.
 
     datetime/date/time -> ISO 8601 string, UUID/Decimal -> string, Enum -> its
-    value, set/frozenset/tuple -> list, non-str dict keys -> ``str(key)``.
+    value, set/frozenset/tuple -> list, dataclass -> object of its fields,
+    non-str dict keys -> ``str(key)``.
     """
     if isinstance(value, enum.Enum):
         return to_jsonable(value.value)
@@ -45,6 +47,8 @@ def to_jsonable(value: Any) -> Any:
         return value.isoformat()
     if isinstance(value, (uuid.UUID, decimal.Decimal)):
         return str(value)
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {f.name: to_jsonable(getattr(value, f.name)) for f in dataclasses.fields(value)}
     raise TypeError(f"Object of type {type(value).__qualname__} is not JSON serializable")
 
 
