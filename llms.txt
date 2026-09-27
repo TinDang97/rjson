@@ -28,6 +28,7 @@ Migrating code (find-and-replace):
 
 ## Examples
 
+- [Faster JSON in Python services](https://github.com/TinDang97/rjson/blob/main/docs/guides/faster-json-in-python-services.md): FastAPI, logging, NDJSON and Redis/Kafka patterns with measured speedups vs json and orjson
 - [FastAPI response and request integration](https://github.com/TinDang97/rjson/blob/main/examples/fastapi_app.py)
 - [Examples index: logging/NDJSON, Redis/Kafka codec](https://github.com/TinDang97/rjson/blob/main/examples/README.md)
 

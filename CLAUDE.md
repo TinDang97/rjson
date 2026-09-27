@@ -47,6 +47,7 @@ docs/PERFORMANCE_REVIEW.md    # review findings, results, ranked roadmap
 docs/PRODUCTION_READINESS.md  # production workloads report, migration, adoption blockers
 docs/ASYNC.md                 # asyncio/threads guidance, free-threading/subinterpreter roadmap
 docs/SHOWCASE.md              # rjson vs orjson showcase (keep in sync with docs/showcase-results.json)
+docs/guides/                  # user-facing guides (faster-json-in-python-services.md: examples/ numbers from docs/examples-benchmark-results.json)
 .cargo/config.toml            # x86-64-v2 target (never target-cpu=native)
 ```
 
