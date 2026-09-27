@@ -7,6 +7,18 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
 
 ## [Unreleased]
 
+### Performance
+- `dumps` of datetime, UUID, Enum and dataclass values: per-type facts are
+  cached (keyed by `tp_version_tag`), and missing native modules (usually
+  `zoneinfo`) are no longer looked up in `sys.modules` for every value.
+  Dataclasses no longer force guarded mode on CPython 3.12+. Against
+  orjson: datetime/UUID/Enum events 1.05x -> 2.3x faster, dataclasses
+  0.61x -> 1.1x (`slots=True`: 2.1x).
+
+### Added
+- `benches/showcase.py` and [docs/SHOWCASE.md](docs/SHOWCASE.md):
+  head-to-head rjson vs orjson on production-shaped workloads.
+
 ## [0.1.0] - 2026-09-27
 
 First PyPI release, as `pyrjson`.

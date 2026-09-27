@@ -212,6 +212,17 @@ Tried and reverted, because each measured slower: SWAR digit formatting for all 
 
 Numbers: [docs/PRODUCTION_READINESS.md](PRODUCTION_READINESS.md#performance-fixes).
 
+### Found by the showcase (`benches/showcase.py`, [SHOWCASE.md](SHOWCASE.md))
+
+rjson ÷ orjson time before the fix (plain build, CPython 3.13; below 1.00 is faster):
+
+| # | gap | status |
+|---|---|---|
+| 14 | datetime/UUID/Enum values 0.95 (events), 0.73 (UTC datetimes): every non-builtin value re-checked `sys.modules` for modules not imported (`zoneinfo`) with a temporary `str` per lookup (~80 ns/value); every Enum member walked its MRO | **fixed**: lookups only when `len(sys.modules)` changes (+ forced refresh before "unsupported"); per-type facts cached by `tp_version_tag`. Now 0.43 / 0.32 (PGO) |
+| 15 | dataclasses 1.64: every dataclass restarted the whole document in guarded mode; two `tp_dict` lookups per instance; `PyUnicode_ReadChar` per key | **fixed**: unguarded standard `__dict__` on 3.12+ via `PyObject_GenericGetDict`, cached facts. Now 0.92 (`slots=True`: 0.47) |
+| 16 | one `dumps` per ~600 B record with many escapes, streamed: 1.09 (the same records as one document: 0.64) | open: per-call fixed cost. Output-buffer hint variants (largest reservation made; max of last two sizes when small) cut regrowth 60% with no measurable change (A/B 0.86–1.01 both), not kept |
+| 17 | fresh process, per-record results kept: orjson takes one page fault per call (glibc trims/regrows around its buffers) | not rjson's gap: 0.24 (1–4 faults vs 1,976); gone once any output > ~128 KiB was freed |
+
 ### Threading and I/O (researched, mostly not applicable)
 
 - **io_uring: rejected.** `loads`/`dumps` do no I/O. Even reading a file from the page cache is 1–4% of parse time: canada.json takes 0.2 ms to read and 14 ms for orjson to parse. It only matters for a bulk-ingestion CLI.
