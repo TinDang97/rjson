@@ -70,6 +70,28 @@ Methodology, per-version results and the roadmap:
 
 </details>
 
+### On production-shaped workloads
+
+[docs/SHOWCASE.md](docs/SHOWCASE.md) runs rjson and orjson head to head on API
+payloads, log records, application types and `str` output, with identical output checked
+first. rjson is faster in 21 of 22 cases, 1.52× on the geomean (PGO build, CPython 3.13):
+
+| workload | vs orjson |
+|---|---|
+| 5,000 UTC `datetime`s | **3.17×** |
+| events with `datetime`, `UUID`, `Enum` | **2.34×** |
+| dict with int keys (`non_str_keys`) | **2.19×** |
+| `@dataclass(slots=True)` instances | **2.14×** |
+| github.json response / as `str` | **1.78×** / **1.99×** |
+| paginated REST page | **1.64×** |
+| log records with tracebacks | **1.56×** |
+| 1,000 small request bodies / responses, one call each | **1.25×** / **1.24×** |
+| NDJSON, one `dumps` per ~600 B escaped record | 0.92× |
+
+In a fresh process, encoding 2,000 records one call at a time was 4.2× faster than orjson,
+which took 1,976 page faults (glibc malloc behaviour; details in the doc).
+Reproduce with `python benches/showcase.py --fresh`.
+
 ## Installation
 
 The PyPI distribution is **`pyrjson`** (the name `rjson` on PyPI belongs to an unrelated

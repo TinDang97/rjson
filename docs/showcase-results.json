@@ -1,0 +1,271 @@
+{
+ "meta": {
+  "rjson": "0.1.0",
+  "orjson": "3.12.0",
+  "python": "3.13.12",
+  "machine": "x86_64",
+  "rounds": 15,
+  "build": "PGO (scripts/build_pgo.sh)",
+  "runs": 3,
+  "note": "speedup = orjson time / rjson time; median of 3 runs of benches/showcase.py --rounds 15 --fresh"
+ },
+ "geomean_per_run": [
+  1.506,
+  1.512,
+  1.527
+ ],
+ "rows": [
+  {
+   "group": "strings",
+   "name": "log records with tracebacks",
+   "desc": "2,000 records, newlines/quotes/backslashes",
+   "rjson_s": 0.00041227217391916264,
+   "orjson_s": 0.0006417976521689801,
+   "speedup": 1.557,
+   "speedup_min": 1.526,
+   "speedup_max": 1.614
+  },
+  {
+   "group": "strings",
+   "name": "NDJSON log stream, one line per record",
+   "desc": "2,000 dumps calls written to a stream",
+   "rjson_s": 0.000958190999989754,
+   "orjson_s": 0.0008799660952371639,
+   "speedup": 0.923,
+   "speedup_min": 0.918,
+   "speedup_max": 0.939
+  },
+  {
+   "group": "strings",
+   "name": "parse the log stream back",
+   "desc": "the same 2,000 records as one document",
+   "rjson_s": 0.0011913493529337918,
+   "orjson_s": 0.0016685521176548397,
+   "speedup": 1.401,
+   "speedup_min": 1.393,
+   "speedup_max": 1.449
+  },
+  {
+   "group": "web api",
+   "name": "github.json response",
+   "desc": "GitHub API events (55 KB)",
+   "rjson_s": 1.1976737629309865e-05,
+   "orjson_s": 2.1574238780257974e-05,
+   "speedup": 1.778,
+   "speedup_min": 1.775,
+   "speedup_max": 1.801
+  },
+  {
+   "group": "web api",
+   "name": "github.json request",
+   "desc": "GitHub API events (55 KB)",
+   "rjson_s": 7.011529310304844e-05,
+   "orjson_s": 9.347539094706157e-05,
+   "speedup": 1.29,
+   "speedup_min": 1.248,
+   "speedup_max": 1.344
+  },
+  {
+   "group": "web api",
+   "name": "paginated REST page",
+   "desc": "50 users, nested objects, nulls (~45 KB)",
+   "rjson_s": 1.8783484601196204e-05,
+   "orjson_s": 3.080342230705954e-05,
+   "speedup": 1.639,
+   "speedup_min": 1.603,
+   "speedup_max": 1.676
+  },
+  {
+   "group": "web api",
+   "name": "1,000 small responses",
+   "desc": "one dumps call per response (~150 B each)",
+   "rjson_s": 0.00014955399999976973,
+   "orjson_s": 0.00018655058729997282,
+   "speedup": 1.235,
+   "speedup_min": 1.2,
+   "speedup_max": 1.253
+  },
+  {
+   "group": "web api",
+   "name": "1,000 small request bodies",
+   "desc": "one loads call per body (bytes)",
+   "rjson_s": 0.0012825268571370024,
+   "orjson_s": 0.0015324182142779006,
+   "speedup": 1.247,
+   "speedup_min": 1.195,
+   "speedup_max": 1.252
+  },
+  {
+   "group": "native types",
+   "name": "events with datetime, UUID, Enum",
+   "desc": "2,000 records, no default= needed",
+   "rjson_s": 0.0003484646896563861,
+   "orjson_s": 0.0008147314310369031,
+   "speedup": 2.338,
+   "speedup_min": 2.314,
+   "speedup_max": 2.339
+  },
+  {
+   "group": "native types",
+   "name": "UTC timestamps",
+   "desc": "5,000 aware datetimes",
+   "rjson_s": 0.0001599403255793788,
+   "orjson_s": 0.0005006038720021024,
+   "speedup": 3.172,
+   "speedup_min": 3.123,
+   "speedup_max": 3.292
+  },
+  {
+   "group": "native types",
+   "name": "dataclasses",
+   "desc": "1,000 dataclass instances with nested items",
+   "rjson_s": 0.0001928638712883239,
+   "orjson_s": 0.00021223176237513279,
+   "speedup": 1.089,
+   "speedup_min": 1.078,
+   "speedup_max": 1.1
+  },
+  {
+   "group": "native types",
+   "name": "dataclasses with __slots__",
+   "desc": "2,000 slots=True instances",
+   "rjson_s": 0.0004480878000019099,
+   "orjson_s": 0.0009863910930234428,
+   "speedup": 2.138,
+   "speedup_min": 2.099,
+   "speedup_max": 2.366
+  },
+  {
+   "group": "native types",
+   "name": "int-keyed aggregates",
+   "desc": "5,000 int keys (non_str_keys / OPT_NON_STR_KEYS)",
+   "rjson_s": 8.453681967231935e-05,
+   "orjson_s": 0.0001862274653051697,
+   "speedup": 2.19,
+   "speedup_min": 2.145,
+   "speedup_max": 2.228
+  },
+  {
+   "group": "str output",
+   "name": "github.json as str",
+   "desc": "rjson.dumps_str vs orjson.dumps().decode()",
+   "rjson_s": 1.371717532038326e-05,
+   "orjson_s": 2.716283277161427e-05,
+   "speedup": 1.994,
+   "speedup_min": 1.98,
+   "speedup_max": 2.062
+  },
+  {
+   "group": "str output",
+   "name": "twitter.json as str",
+   "desc": "rjson.dumps_str vs orjson.dumps().decode()",
+   "rjson_s": 0.00028851696363496805,
+   "orjson_s": 0.00047711667273026915,
+   "speedup": 1.654,
+   "speedup_min": 1.628,
+   "speedup_max": 1.661
+  },
+  {
+   "group": "str output",
+   "name": "log records as str",
+   "desc": "rjson.dumps_str vs orjson.dumps().decode()",
+   "rjson_s": 0.00041705330302261933,
+   "orjson_s": 0.0007365196363686912,
+   "speedup": 1.769,
+   "speedup_min": 1.766,
+   "speedup_max": 1.778
+  },
+  {
+   "group": "corpus",
+   "name": "twitter.json loads",
+   "desc": "616 KB",
+   "rjson_s": 0.0011959928823510862,
+   "orjson_s": 0.0012600591176391497,
+   "speedup": 1.098,
+   "speedup_min": 1.046,
+   "speedup_max": 1.258
+  },
+  {
+   "group": "corpus",
+   "name": "twitter.json dumps",
+   "desc": "616 KB",
+   "rjson_s": 0.00013327877777988934,
+   "orjson_s": 0.00024095210967589668,
+   "speedup": 1.82,
+   "speedup_min": 1.769,
+   "speedup_max": 1.867
+  },
+  {
+   "group": "corpus",
+   "name": "citm_catalog.json loads",
+   "desc": "1686 KB",
+   "rjson_s": 0.003501092799979233,
+   "orjson_s": 0.003755694199935533,
+   "speedup": 1.093,
+   "speedup_min": 1.073,
+   "speedup_max": 1.176
+  },
+  {
+   "group": "corpus",
+   "name": "citm_catalog.json dumps",
+   "desc": "1686 KB",
+   "rjson_s": 0.0003861188600058085,
+   "orjson_s": 0.0005156974199962861,
+   "speedup": 1.335,
+   "speedup_min": 1.092,
+   "speedup_max": 1.336
+  },
+  {
+   "group": "corpus",
+   "name": "canada.json loads",
+   "desc": "2198 KB",
+   "rjson_s": 0.007354967000082979,
+   "orjson_s": 0.00829606699994656,
+   "speedup": 1.112,
+   "speedup_min": 1.001,
+   "speedup_max": 1.128
+  },
+  {
+   "group": "corpus",
+   "name": "canada.json dumps",
+   "desc": "2198 KB",
+   "rjson_s": 0.0025792564285568786,
+   "orjson_s": 0.002861697714316896,
+   "speedup": 1.122,
+   "speedup_min": 1.11,
+   "speedup_max": 1.138
+  }
+ ],
+ "fresh_process": [
+  {
+   "rjson": [
+    0.0008629280000604922,
+    4
+   ],
+   "orjson": [
+    0.0035611549997156544,
+    1976
+   ]
+  },
+  {
+   "rjson": [
+    0.0008473730003970559,
+    3
+   ],
+   "orjson": [
+    0.0037385079999694426,
+    1976
+   ]
+  },
+  {
+   "rjson": [
+    0.0008073099998000544,
+    1
+   ],
+   "orjson": [
+    0.0033173269998769683,
+    1976
+   ]
+  }
+ ]
+}
