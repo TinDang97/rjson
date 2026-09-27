@@ -26,7 +26,7 @@ src/
 build.rs      # pyo3_build_config::use_pyo3_cfgs() -> Py_3_10/Py_3_12... cfgs
 rjson.pyi     # type stub (installed as rjson/__init__.pyi + py.typed)
 llms.txt      # summary + API + migration map for AI assistants (llmstxt.org); AGENTS.md: short guide for coding agents (points here)
-examples/     # FastAPI, JSON logging/NDJSON, Redis/Kafka codec (tested by tests/test_examples.py)
+examples/     # FastAPI, Django, Flask, JSON logging/NDJSON, Redis/Kafka codec (tested by tests/test_examples.py)
 tests/        # test_rjson.py (general + regressions), test_dumps.py (serializer), test_lenient.py (loads lenient=), test_native.py
               # (datetime/UUID/dataclass/Enum, differential vs orjson), test_keys.py
               # (non_str_keys, vs json), test_examples.py, test_fuzz.py (differential fuzzing vs json;

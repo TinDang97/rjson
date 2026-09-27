@@ -8,7 +8,7 @@
 
 **Fast JSON for Python, written in Rust directly against the CPython C API.** A faster
 alternative to [orjson](https://github.com/ijl/orjson) and the standard library `json` for
-web APIs (FastAPI and others), logging and NDJSON, caches and message queues; switching is
+web APIs (FastAPI, Django, Flask), logging and NDJSON, caches and message queues; switching is
 mostly a find-and-replace ([migration guide](#migrating-from-json-or-orjson)).
 
 - **Faster than orjson** on 18 of the 20 cases of the reference benchmark (geomean `loads`
@@ -246,6 +246,38 @@ fields, and a 1,000-row export 3.0–3.2× faster; against an endpoint without a
 `dump_json`. [`examples/fastapi_app.py`](https://github.com/TinDang97/rjson/blob/main/examples/fastapi_app.py) adds a fallback for
 Decimal, Pydantic models and dataclasses, and rjson-parsed request bodies.
 
+### Django and Flask
+
+```python
+# Django: a JsonResponse rendered by rjson
+from django.http import HttpResponse, JsonResponse
+import rjson
+
+class RJSONResponse(JsonResponse):
+    def __init__(self, data, safe=True, **kwargs):
+        if safe and not isinstance(data, dict):
+            raise TypeError("set safe=False to serialize non-dict objects")
+        kwargs.setdefault("content_type", "application/json")
+        HttpResponse.__init__(self, content=rjson.dumps(data), **kwargs)
+
+# Flask: every jsonify() / dict return goes through rjson
+from flask.json.provider import JSONProvider
+
+class RJSONProvider(JSONProvider):
+    def dumps(self, obj, **kwargs):
+        return rjson.dumps_str(obj)
+
+    def loads(self, s, **kwargs):
+        return rjson.loads(s)
+
+app.json = RJSONProvider(app)
+```
+
+[`examples/django_json.py`](https://github.com/TinDang97/rjson/blob/main/examples/django_json.py)
+and [`examples/flask_json.py`](https://github.com/TinDang97/rjson/blob/main/examples/flask_json.py)
+add a fallback for Decimal, sets and dataclasses, and a request-body parser that turns
+invalid JSON into a 400 with the error position.
+
 ### Logging, NDJSON, Redis and Kafka
 
 - [`examples/json_logging.py`](https://github.com/TinDang97/rjson/blob/main/examples/json_logging.py): a `logging.Formatter` writing one
@@ -357,7 +389,7 @@ maturin develop --release && python -m pytest tests -q
 | `src/entry.rs`, `src/compat.rs` | C-API entry points, version-portable helpers |
 | `rjson.pyi` | type stubs |
 | `tests/` | pytest suites |
-| `examples/` | FastAPI, logging/NDJSON and Redis/Kafka integrations (tested) |
+| `examples/` | FastAPI, Django, Flask, logging/NDJSON and Redis/Kafka integrations (tested) |
 | `benches/` | `corpus_benchmark.py` (reference), `showcase.py` (vs orjson on production shapes), `production_benchmark.py` (production workloads), `examples_benchmark.py` (the examples on rjson vs json vs orjson), `perf_gate.py`, `make_charts.py` / `make_showcase_charts.py` / `make_demo_svg.py` (README charts, demo), `demo.py` |
 | `docs/` | showcase, performance review, production readiness report, async guide |
 

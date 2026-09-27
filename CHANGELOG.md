@@ -7,6 +7,11 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
 
 ## [Unreleased]
 
+### Added
+- Django (`examples/django_json.py`: `JsonResponse` subclass, request-body parsing) and
+  Flask (`examples/flask_json.py`: `JSONProvider`) integration examples (#27, #29, thanks
+  @HarshRajSinghania), with tests; README section with copy-paste snippets.
+
 ## [0.2.0] - 2026-09-27
 
 ### Added
