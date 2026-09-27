@@ -11,6 +11,32 @@ The loads, dumps and build reviews each prototyped and measured their changes, a
 
 ## 1. Results
 
+### Current (after PR #11, PGO wheels, CPython 3.13)
+
+rjson time ÷ orjson time, so **below 1.00 means rjson is faster**. Median time per case over 5 runs of `benches/corpus_benchmark.py --json --repeat 11`, in parentheses the lowest and highest ratio of the 5 runs; CPython 3.13.12, orjson 3.12.0, x86_64 Xeon (4 cores), PGO build from `scripts/build_pgo.sh` (what the published wheels are). `loads` parses the document's UTF-8 `bytes`; `loads_str` parses the same `str` object every call; `dumps` returns `bytes` like `orjson.dumps`, `dumps_str` returns `str` (compared with the same `orjson.dumps` time). Raw data: `docs/img/benchmark-results.json`.
+
+| case | loads | loads_str | dumps | dumps_str |
+|---|---|---|---|---|
+| twitter | **0.84** (0.81–0.89) | 1.17 (1.09–1.30) | **0.58** (0.55–0.62) | 1.39 (1.10–1.44) |
+| citm_catalog | 1.06 (0.85–1.15) | 1.12 (1.11–1.37) | **0.89** (0.78–1.06) | 1.01 (0.80–1.23) |
+| canada | **0.92** (0.88–1.05) | **0.88** (0.73–1.12) | **0.91** (0.73–0.97) | **0.90** (0.76–0.95) |
+| github | **0.75** (0.71–0.77) | **0.71** (0.71–0.86) | **0.53** (0.51–0.54) | **0.59** (0.53–0.61) |
+| small_dict | **0.79** (0.76–0.94) | **0.79** (0.62–1.04) | **0.79** (0.76–0.92) | **0.67** (0.65–0.86) |
+| records | **0.90** (0.71–0.95) | **0.91** (0.87–1.12) | **0.74** (0.52–0.85) | **0.77** (0.55–0.83) |
+| unicode_strings | **0.89** (0.68–1.14) | 1.47 (1.40–1.92) | **0.96** (0.93–1.06) | 2.64 (2.12–3.21) |
+| escaped_strings | **0.82** (0.77–0.82) | **0.79** (0.77–0.83) | **0.31** (0.30–0.32) | **0.31** (0.30–0.32) |
+| int_array | **0.86** (0.83–1.03) | **0.96** (0.78–1.19) | **0.97** (0.92–1.07) | **0.91** (0.86–1.18) |
+| float_array | **0.79** (0.67–0.86) | **0.78** (0.78–0.95) | 1.08 (0.86–1.14) | 1.05 (0.70–1.11) |
+| **geomean** | **0.86** | **0.94** | **0.73** | **0.89** |
+
+- **Headline** (README): `loads` 1.17× and `dumps` 1.36× faster than orjson on the geomean; 18 of 20 `loads`/`dumps` medians below 1.00. The two above (citm `loads` 1.06, float array `dumps` 1.08) have per-run ranges straddling 1.00 on this host.
+- **`loads_str` is a trade-off, not parser speed.** Before PR #11 the corpus benchmark parsed the same `str` repeatedly and rjson's first call attached a UTF-8 copy to it, like orjson does. Since #10 a non-ASCII `str` of ≥ 4096 characters is re-encoded into a temporary buffer every call, so nothing doubles the caller's string; parsing that same object again then costs the encode each time (twitter 1.17, unicode strings 1.47). With `bytes` or a new `str` per call (a server decoding request bodies) rjson is faster: twitter, plain build, µs per call — bytes 1134 vs orjson 1241, new `str` per call 2029 vs 2402. The benchmark now times `loads` on `bytes` and reports `loads_str` separately.
+- **Plain builds are layout-sensitive.** In plain (non-PGO) builds canada `dumps` measured 1.39–1.55 on `main` against 0.90–1.04 before PR #11, with the same instruction count (callgrind: 596M vs 594M for 5 calls) and no extra page faults or syscalls. Bisecting gave non-monotonic results (18d679f 1.03, the following `loads`-only commit 1.42–1.52), and `-C llvm-args=-align-loops=32` (or `-x86-branches-within-32B-boundaries`) brought canada back to 1.01 while moving other cases the other way (escaped strings `dumps` 0.33 → 0.41, citm `loads` 0.89 → 1.16). PGO builds do not show it (canada `dumps` 1.08 before → 0.98 after), so the published wheels are unaffected; when comparing plain builds, compare geomeans, not single cases.
+- **Small `dumps` after a big one** ([#13](https://github.com/TinDang97/rjson/issues/13), fixed after these tables): the first growth of a small result (its worst-case string reservation) jumped to the recent peak size, ~935 KB, then copied 150 B out of it. The jump now waits until the output needs max(peak/64, 4 KiB). `percall/small_after_big` with PGO wheels: 1.23–1.31 → 0.79–0.92 (`dumps_str` 1.43–1.54 → 0.91–1.07); steady-state instruction counts unchanged. Details in PRODUCTION_READINESS.md, Performance fixes item 2.
+- **PGO, before vs after PR #11** (2 interleaved runs, `loads` on `str` as the benchmark then did): `dumps` geomean 0.71–0.75 → 0.65–0.73, `dumps_str` 0.91–0.92 → 0.84–0.88, `loads` unchanged except the `str`-reuse cases above (twitter 0.81 → 1.44, unicode strings 1.02 → 1.57, citm 0.83 → 1.08).
+
+### First review round (historical)
+
 Numbers are rjson time divided by orjson time on the same run, so **below 1.00 means rjson is faster**. They come from `benches/corpus_benchmark.py --repeat 11` on an x86_64 Xeon (4 cores, otherwise idle) against orjson 3.12.0, with **plain release builds (no PGO)** of the current branch. Treat single cells as ±5–10% and trust the geomeans. `dumps` returns `str`; `dumps_bytes` returns `bytes`, the same type `orjson.dumps` returns.
 
 | case | loads before | loads 3.11 | loads 3.13 | dumps before | dumps 3.11 | dumps 3.13 | dumps_bytes 3.11 | dumps_bytes 3.13 |
@@ -218,7 +244,7 @@ Numbers: [docs/PRODUCTION_READINESS.md](PRODUCTION_READINESS.md#performance-fixe
 uv venv .venv -p 3.11 && . .venv/bin/activate
 uv pip install maturin orjson pytest
 maturin develop --release
-python -m pytest tests -q                      # 1052 tests
+python -m pytest tests -q                      # 1056 tests
 benches/fetch_corpus.sh                        # corpora -> benches/data/ (sha256-pinned)
 python benches/corpus_benchmark.py [--json] [--output-json results.json]
 python benches/make_charts.py results.json     # README charts -> docs/img/

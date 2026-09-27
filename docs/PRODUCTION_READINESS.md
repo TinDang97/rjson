@@ -6,8 +6,10 @@ pipelines with large files, and cache or message-queue payloads. Everything in i
 measured or checked by running code; nothing is taken from docs or assumed.
 
 *Scope: rjson 0.1.0 (PyPI distribution `pyrjson`), CPython 3.10–3.14, orjson 3.12.0 as
-the reference. Measured on a 4-core x86_64 VM (noise ±10%) with plain release builds (no
-PGO).*
+the reference. Measured on a 4-core x86_64 VM (noise ±10%) with PGO builds from
+`scripts/build_pgo.sh`, as the published wheels are built, on `main` after PR #11; the
+before/after tables under [Performance fixes](#performance-fixes) were measured per change
+on plain release builds.*
 
 ## Verdict
 
@@ -25,9 +27,9 @@ each is tracked as an issue.
 
 | question | answer |
 |---|---|
-| Faster than `json`? | Yes: 4–20× on `dumps`, 1.3–5× on `loads`. |
-| Faster than orjson? | Yes on most shapes: geomean `dumps` 0.76×, `loads` 0.87×, round trip 0.83× (rjson ÷ orjson time). CJK text (0.59–0.91×) and full-precision float arrays (0.89–0.95×) now load faster than orjson; see [Performance](#performance). |
-| Correct? | 0 mismatches. 1052 tests, fuzzing against `json`, and output byte-identical to orjson. |
+| Faster than `json`? | Yes: 2.9–29× on `dumps`, 1.7–5.8× on `loads` (28× on tiny documents). |
+| Faster than orjson? | Yes on most shapes: geomean `dumps` 0.67×, `loads` 0.83×, round trip 0.78× (rjson ÷ orjson time). CJK text (0.59–0.91×) and full-precision float arrays (0.89–0.95×) now load faster than orjson; see [Performance](#performance). |
+| Correct? | 0 mismatches. 1056 tests, fuzzing against `json`, and output byte-identical to orjson. |
 | Memory? | Better on large `loads`: peak RSS 30–37% below orjson. Retained small results cost ~400 B instead of ~8 KB each. |
 | Safe for async services? | Yes, but each call blocks the event loop, and `to_thread` doesn't help. See [ASYNC.md](ASYNC.md). |
 | Compress / go binary? | Compress at the transport, and only payloads of a few KB and up. Use Arrow/Polars only for columnar data. See [Transfer size](#transfer-size-compression-and-binary-formats). |
@@ -44,12 +46,12 @@ Numbers are rjson time ÷ orjson time from `benches/production_benchmark.py` (CP
 
 | case | `dumps` | `loads` |
 |---|---|---|
-| paginated REST page (50 nested objects) | 0.78 | 0.84 |
-| GraphQL-style nested response | 0.81 | 0.84 |
-| ~300 B request body | n/a | 0.85 (0.83 from `str`) |
-| small response (~150 B) | 0.83 | n/a |
-| mixed and alternating response sizes | 0.81–0.86 | n/a |
-| per-call overhead (tiny documents) | 0.66 | 0.62 |
+| paginated REST page (50 nested objects) | 0.65 | 0.90 |
+| GraphQL-style nested response | 0.75 | 0.84 |
+| ~300 B request body | n/a | 0.82 (0.84 from `str`) |
+| small response (~150 B) | 0.78 | n/a |
+| mixed and alternating response sizes | 0.63–0.64 | n/a |
+| per-call overhead (tiny documents) | 0.57 | 0.59 |
 
 In a real FastAPI app the serializer is rarely the bottleneck. `jsonable_encoder` takes
 ~590 µs for 100 records, while `rjson.dumps` of the same data takes 6.3 µs (orjson 8.5 µs).
@@ -63,9 +65,9 @@ with a response model already use Pydantic's fast `dump_json`, so leave those al
 
 | case | result |
 |---|---|
-| encode log records and keep the lines (NDJSON join) | **0.08** (orjson allocates ~8 KB per result) |
-| encode freshly built log records | 0.84 |
-| parse NDJSON line by line | 0.79–0.95 |
+| encode log records and keep the lines (NDJSON join) | **0.05** (orjson allocates ~8 KB per result) |
+| encode freshly built log records | 0.81 |
+| parse NDJSON line by line | 0.78–0.94 |
 | stdlib `logging` formatter ([`examples/json_logging.py`](../examples/json_logging.py)) | 2.4 µs per record vs 5.2 µs with `json.dumps(default=str)` |
 
 ### Data pipelines and large files
@@ -74,12 +76,12 @@ Large files run each operation in a fresh subprocess, reporting time and peak RS
 
 | file | op | rjson ÷ orjson time | peak RSS rjson / orjson |
 |---|---|---|---|
-| 97 MB records | `loads` (bytes) | 1.00 | **528 / 762 MB** |
-| 97 MB records | `dumps` | 0.84 | 94 / 94 MB |
-| 21 MB, 100k distinct keys | `dumps` | 0.75 (was 1.27) | 20.3 / 19.8 MB (was 35.8) |
-| 99 MB floats | `loads` | 0.84 | **230 / 362 MB** |
-| 42 MB ints | `loads` / `dumps` | 0.81 / 0.77 | 226 / 304 MB |
-| 21 MB, 100k distinct keys | `loads` | 0.85 | 151 / 182 MB |
+| 97 MB records | `loads` (bytes) | 0.86 | **528 / 762 MB** |
+| 97 MB records | `dumps` | 0.89 | 94 / 94 MB |
+| 21 MB, 100k distinct keys | `dumps` | 0.83 (was 1.27) | 20.3 / 19.8 MB (was 35.8) |
+| 99 MB floats | `loads` | 0.81 | **230 / 362 MB** |
+| 42 MB ints | `loads` / `dumps` | 0.75 / 0.62 | 226 / 304 MB |
+| 21 MB, 100k distinct keys | `loads` | 0.82 | 151 / 182 MB |
 
 Integers beyond 64 bits round-trip exactly in both directions (orjson turns them into
 floats on `loads` and rejects them on `dumps`).
@@ -89,8 +91,8 @@ floats on `loads` and rejects them on `dumps`).
 | case | round trip (`dumps` + `loads`) |
 |---|---|
 | 1 KB blob | 0.82 |
-| 8 KB blob | 0.82 |
-| 48 KB blob | 0.85 |
+| 8 KB blob | 0.81 |
+| 48 KB blob | 0.72 |
 
 [`examples/codec.py`](../examples/codec.py) shows a versioned bytes codec with typed
 round trips (datetime, UUID, Decimal, Enum, dataclass) and Kafka serializer callables.
@@ -102,11 +104,11 @@ status column reflects this branch.
 
 | pattern | before | status |
 |---|---|---|
-| small `dumps` right after a large one | 1.7–2.0× slower | **fixed**: ~1.0–1.3× (see [Performance fixes](#performance-fixes)) |
+| small `dumps` right after a large one | 1.7–2.0× slower | **fixed** ([#13](https://github.com/TinDang97/rjson/issues/13)): `percall/small_after_big` 0.79–0.92× (`dumps_str` 0.91–1.07×) with PGO wheels; see [Performance fixes](#performance-fixes) item 2 |
 | large `dumps` peak memory | 1.8× the output size, 16 MB kept, 1.27× slower | **fixed**: at orjson's peak, 0.5 MB kept, 0.75× |
 | CJK / UCS-2 text `loads` | 1.3× slower (1.6× on 3.11) | **fixed**: 0.74× on the benchmark's CJK case; Chinese 0.59×, Korean 0.91×, Cyrillic 0.59× ([#8](https://github.com/TinDang97/rjson/issues/8)) |
 | mixed-magnitude float arrays `loads` | 1.12–1.32× slower | **fixed**: 0.89–0.95× ([#9](https://github.com/TinDang97/rjson/issues/9)); arrays of mostly `0.0` ~1.05× (allocation-bound) |
-| cold-cache tiny `dumps` | parity on 3.13, 1.29× on 3.11 | at the noise floor; PGO release wheels should cover it |
+| cold-cache tiny `dumps` | parity on 3.13, 1.29× on 3.11 | at the noise floor: 0.98–1.21× on 3.13 with PGO wheels |
 
 Memory side effects shared with orjson (the stdlib `json` has none of them), and what this
 branch changed ([#10](https://github.com/TinDang97/rjson/issues/10)):
@@ -133,7 +135,7 @@ response right after a big page allocated a buffer of the big page's size (~830 
 | case | before | after |
 |---|---|---|
 | 150 B `dumps` after a big page | 9.0–9.6 µs (10.9 µs) | 4.0–4.5 µs (4.0 µs) |
-| `percall/small_after_big` vs orjson | 1.97× | 1.08–1.27× (noisy: ±40% IQR) |
+| `percall/small_after_big` vs orjson | 1.97× | 1.08–1.27× (noisy: ±40% IQR); item 2 below moved it back to 1.60–1.75× until [#13](https://github.com/TinDang97/rjson/issues/13), see the note there |
 
 **2. Large outputs grow without stranding the old buffer.**
 
@@ -151,7 +153,33 @@ response right after a big page allocated a buffer of the big page's size (~830 
 | 700 KB then 150 B `dumps`, per pair | 810–822 µs | 778–807 µs (orjson 916–974 µs) |
 
 In the last row the small call gets 0.6 µs slower (2.1 → 2.7 µs) while the big call gets
-15–30 µs faster. The reference benchmark's geomeans were unchanged (−1.3% `dumps`, −0.2%
+15–30 µs faster.
+
+That estimate missed a case ([#13](https://github.com/TinDang97/rjson/issues/13)): every
+write reserves its worst case (6× a string's length), so a small result with an 88-character
+string outgrew its 171 B starting buffer, and that first growth jumped to the recent peak:
+a 150 B call allocated a ~935 KB block, wrote into cold memory and copied its bytes out
+(1.60–1.75× orjson, bisected to this change). The jump now applies only once the output
+needs max(peak/64, 4 KiB); below that the buffer doubles, which costs a big result a few
+reallocs under ~22 KB before its jump. Measured with PGO wheels, 3 runs each:
+
+| case (rjson ÷ orjson) | before #13 | after |
+|---|---|---|
+| `percall/small_after_big`, `dumps` | 1.23–1.31 | **0.79–0.92** |
+| same, `dumps_str` | 1.43–1.54 | **0.91–1.07** |
+| `percall/big_after_small`, `dumps` | 0.56–0.62 | 0.63–0.67 |
+| `mixed_sizes` | 0.62–0.64 | 0.64–0.66 |
+| `alternating_sizes` | 0.64 | 0.64–0.65 |
+| `cold_small_response` | 0.99–1.03 | 0.91–1.01 |
+| `big_hicard` 21 MB `dumps`: peak / kept | 20.3 / 0.5 MB | 20.3 / 0.5 MB |
+
+Steady-state calls never reach this code: instructions per call are identical on twitter
+and escaped strings (`dumps` and `dumps_str`). The benchmark itself was also unfair here:
+its prep ran rjson `dumps`, `dumps_str` and then orjson's big call before every timed call,
+so orjson's code was still in the caches and rjson's had been evicted by a 780 KB write
+(worth ~1.3× on its own: 2.98 vs 2.22 µs with orjson's call last, 2.29 vs 2.68 µs with
+rjson's last). The prep now runs the timed library's own call last, as in a service that
+uses one library; the "before" column above is `main` under the same fair prep. The reference benchmark's geomeans were unchanged (−1.3% `dumps`, −0.2%
 `dumps_str`, −2.5% `loads`; lower is better).
 
 **3. UTF-8 → UCS-2 decoding with SIMD fast paths** ([#8](https://github.com/TinDang97/rjson/issues/8)).
@@ -354,5 +382,5 @@ benches/fetch_corpus.sh
 python benches/production_benchmark.py --quick                 # ~30 s smoke run
 python benches/production_benchmark.py --output-json prod.json # full run, ~6 min
 python benches/production_benchmark.py --big-only              # large-file time + RSS
-python -m pytest tests -q                                      # 1052 tests
+python -m pytest tests -q                                      # 1056 tests
 ```

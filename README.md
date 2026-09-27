@@ -6,53 +6,65 @@
 [![Status: experimental](https://img.shields.io/badge/status-experimental-orange.svg)](#status)
 
 **Fast JSON for Python, written in Rust directly against the CPython C API.**
-It beats [orjson](https://github.com/ijl/orjson) on every case of our reference benchmark
-and on most production workloads, and parses 3.4× / serializes 14.7× faster than the
-standard library `json`. Output is byte-identical to orjson.
+It is faster than [orjson](https://github.com/ijl/orjson) on 18 of the 20 cases of our
+reference benchmark (geomean: `loads` 1.17×, `dumps` 1.36×) and on most production
+workloads, and parses 3.5× / serializes 14× faster than the standard library `json`.
+Output is byte-identical to orjson.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/headline-dark.svg">
-  <img alt="Geometric-mean speedups on CPython 3.13: loads 1.20× faster than orjson, dumps 1.40× faster than orjson, loads 3.36× and dumps 14.7× faster than the standard library json." src="docs/img/headline-light.svg" width="880">
+  <img alt="Geometric-mean speedups on CPython 3.13: loads 1.17× faster than orjson, dumps 1.36× faster than orjson, loads 3.53× and dumps 14.2× faster than the standard library json." src="docs/img/headline-light.svg" width="880">
 </picture>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/img/vs-orjson-dark.svg">
-  <img alt="Per-case speed relative to orjson. loads: 1.07× to 1.40× faster on all ten cases. dumps: 1.01× to 2.57× faster on all ten cases." src="docs/img/vs-orjson-light.svg" width="880">
+  <img alt="Per-case speed relative to orjson. loads: 1.09× to 1.33× faster on nine cases, 0.95× on citm_catalog. dumps: 1.03× to 3.19× faster on nine cases, 0.93× on the float array." src="docs/img/vs-orjson-light.svg" width="880">
 </picture>
 
 <details>
 <summary>Numbers behind the charts, and how they were measured</summary>
 
-Speedup = other library's time ÷ rjson's time (**higher is better**). Median time per call,
-CPython 3.13.12, orjson 3.12.0, x86_64 (Xeon, idle host), plain release build (no PGO).
-`dumps` returns `bytes` in both rjson and orjson. Raw results:
-[docs/img/benchmark-results.json](docs/img/benchmark-results.json).
+Speedup = other library's time ÷ rjson's time (**higher is better**). Median time per call
+over 5 runs, CPython 3.13.12, orjson 3.12.0, x86_64 (Xeon), PGO build
+(`scripts/build_pgo.sh`, as the published wheels are built). `loads` parses the documents'
+UTF-8 `bytes`; `dumps` returns `bytes` in both rjson and orjson. Raw results, with each
+case's per-run range: [docs/img/benchmark-results.json](docs/img/benchmark-results.json).
 
 | case | loads vs orjson | dumps vs orjson | loads vs json | dumps vs json |
 |---|---|---|---|---|
-| twitter.json | 1.22× | 1.49× | 2.88× | 13.0× |
-| citm_catalog.json | 1.13× | 1.25× | 2.50× | 9.15× |
-| canada.json | 1.07× | 1.18× | 4.94× | 18.6× |
-| github.json | 1.40× | 1.76× | 2.82× | 16.6× |
-| small dict | 1.38× | 1.34× | 4.89× | 17.7× |
-| records | 1.20× | 1.50× | 2.20× | 12.9× |
-| unicode strings | 1.29× | 1.01× | 1.46× | 44.1× |
-| escaped strings | 1.11× | 2.57× | 4.85× | 5.19× |
-| int array | 1.10× | 1.14× | 3.06× | 12.8× |
-| float array | 1.11× | 1.28× | 7.93× | 18.9× |
-| **geomean** | **1.20×** | **1.40×** | **3.36×** | **14.7×** |
+| twitter.json | 1.20× | 1.71× | 3.23× | 12.9× |
+| citm_catalog.json | 0.95× | 1.12× | 2.23× | 6.06× |
+| canada.json | 1.09× | 1.10× | 4.34× | 17.7× |
+| github.json | 1.33× | 1.89× | 2.98× | 18.0× |
+| small dict | 1.27× | 1.27× | 6.37× | 18.5× |
+| records | 1.12× | 1.34× | 2.17× | 11.8× |
+| unicode strings | 1.12× | 1.05× | 1.80× | 54.0× |
+| escaped strings | 1.22× | 3.19× | 5.14× | 5.38× |
+| int array | 1.16× | 1.03× | 3.33× | 11.1× |
+| float array | 1.26× | 0.93× | 7.53× | 18.6× |
+| **geomean** | **1.17×** | **1.36×** | **3.53×** | **14.2×** |
+
+The two cases below 1× are within this host's run-to-run noise (citm `loads` ranged
+0.87–1.17×, float array `dumps` 0.88–1.16× over the 5 runs).
 
 Reproduce and redraw:
 
 ```bash
 benches/fetch_corpus.sh                                   # sha256-pinned corpora -> benches/data/
+scripts/build_pgo.sh python3.13 && pip install target/wheels/*cp313*.whl   # or a plain build
 python benches/corpus_benchmark.py --json --repeat 11 --output-json results.json
 python benches/make_charts.py results.json                # -> docs/img/*.svg + this table
 ```
 
-`dumps_str` (returns `str`) is also faster than orjson on 8 of 10 cases; it trails on
-twitter.json and unicode strings, because a `str` holding emoji must be stored at 4 bytes per
-character. Methodology, per-version results (3.11 is faster still) and the roadmap:
+`dumps_str` (returns `str`) is faster than orjson's `dumps` on 6 of 10 cases (geomean 1.13×);
+it trails on twitter.json and unicode strings, because a `str` holding emoji must be stored
+at 4 bytes per character, and is at parity on citm_catalog and the float array (1.01, 1.05). `loads` of the same large non-ASCII `str` object over and
+over is 1.1–1.5× slower than orjson (twitter, citm, unicode strings): orjson keeps a UTF-8
+copy attached to that string, which rjson deliberately does not (it would double the string's
+memory, [#10](https://github.com/TinDang97/rjson/issues/10)); with `bytes` or a new `str` per
+call, as a server gets, rjson is faster. In plain (non-PGO) builds single cases move by up
+to 1.5× with code layout (canada `dumps`), which PGO removes.
+Methodology, per-version results and the roadmap:
 [docs/PERFORMANCE_REVIEW.md](docs/PERFORMANCE_REVIEW.md).
 
 </details>
@@ -222,7 +234,7 @@ bodies, NDJSON logs, 100 MB files, cache blobs) rjson is faster on most shapes (
 
 **Is it safe?**
 It checks the exact type of every value, reserves the worst-case output size before
-writing, and version-gates every CPython internal it uses, with self-tests at import. 1052
+writing, and version-gates every CPython internal it uses, with self-tests at import. 1056
 tests, fuzzing against `json`, and 0 mismatches against orjson on all benchmark workloads.
 It is still 0.x: pin the version.
 
