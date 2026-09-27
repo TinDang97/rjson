@@ -917,3 +917,123 @@ def test_examples_benchmark_variants_are_equivalent():
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "outputs equivalent" in proc.stdout
     assert "n/a" not in proc.stdout  # every backend did every job
+
+
+# ---------------------------------------------------------------------------------------
+# examples/django_json.py and examples/flask_json.py (skip without django / flask)
+# ---------------------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class Money:
+    amount: decimal.Decimal
+    currency: str
+
+
+def test_web_examples_to_jsonable_handles_dataclasses():
+    for name in ("django_json", "flask_json"):
+        mod = load_example(name)
+        value = {"price": Money(decimal.Decimal("1.50"), "EUR"), 3: {Color.RED}}
+        assert mod.to_jsonable(value) == {
+            "price": {"amount": "1.50", "currency": "EUR"},
+            "3": ["red"],
+        }
+        with pytest.raises(TypeError, match="not JSON serializable"):
+            mod.to_jsonable(object())
+
+
+def test_django_example_import_does_not_configure_settings():
+    pytest.importorskip("django")
+    code = (
+        "import importlib.util, sys\n"
+        f"spec = importlib.util.spec_from_file_location('m', {str(EXAMPLES / 'django_json.py')!r})\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "from django.conf import settings\n"
+        "assert not settings.configured\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.fixture(scope="module")
+def dj():
+    pytest.importorskip("django")
+    mod = load_example("django_json")
+    mod.configure_demo()
+    from django.test import Client
+
+    return mod, Client()
+
+
+@pytest.fixture(scope="module")
+def fl():
+    pytest.importorskip("flask")
+    mod = load_example("flask_json")
+    return mod, mod.app.test_client()
+
+
+class TestDjango:
+    def test_get_items(self, dj):
+        _, client = dj
+        r = client.get("/items")
+        assert r.status_code == 200 and r["Content-Type"] == "application/json"
+        assert json.loads(r.content)["count"] == 3
+
+    def test_post_event(self, dj):
+        _, client = dj
+        body = b'{"type": "click", "big": 12345678901234567890}'
+        r = client.generic("POST", "/events", body, content_type="application/json")
+        assert r.status_code == 202
+        assert json.loads(r.content)["accepted"] == {"type": "click", "big": 12345678901234567890}
+
+    def test_bad_json(self, dj):
+        _, client = dj
+        r = client.generic("POST", "/events", b'{"type": ', content_type="application/json")
+        assert r.status_code == 400
+        detail = json.loads(r.content)
+        assert detail["error"] == "invalid_json" and detail["position"] == 9
+
+    def test_response_class(self, dj):
+        mod, _ = dj
+        with pytest.raises(TypeError, match="safe parameter"):
+            mod.RJSONResponse([1, 2])
+        r = mod.RJSONResponse([1], safe=False)
+        assert r.content == b"[1]"
+        r = mod.RJSONResponse({"m": Money(decimal.Decimal("2"), "USD"), "id": uuid.UUID(int=1)})
+        assert json.loads(r.content) == {
+            "m": {"amount": "2", "currency": "USD"},
+            "id": "00000000-0000-0000-0000-000000000001",
+        }
+
+    def test_demo_runs(self, dj):
+        out = run_demo("django_json")
+        assert "GET /items -> 200" in out and "POST /events -> 202" in out
+        assert "POST /events -> 400" in out
+
+
+class TestFlask:
+    def test_get_items(self, fl):
+        _, client = fl
+        r = client.get("/items")
+        assert r.status_code == 200 and r.get_json()["count"] == 3
+
+    def test_post_event(self, fl):
+        _, client = fl
+        r = client.post("/events", data=b'{"a": 1}', headers={"content-type": "application/json"})
+        assert r.status_code == 202 and r.get_json()["accepted"] == {"a": 1}
+
+    def test_errors(self, fl):
+        _, client = fl
+        r = client.post("/events", data=b'{"a": ', headers={"content-type": "application/json"})
+        assert r.status_code == 400 and r.get_json()["position"] == 6
+        assert client.post("/events", data=b"{}", headers={"content-type": "text/plain"}).status_code == 415
+        assert client.post("/events", data=b"[1]", headers={"content-type": "application/json"}).status_code == 422
+
+    def test_provider_fallback(self, fl):
+        mod, _ = fl
+        text = mod.app.json.dumps({"m": Money(decimal.Decimal("3.0"), "EUR"), "s": {1}})
+        assert json.loads(text) == {"m": {"amount": "3.0", "currency": "EUR"}, "s": [1]}
+
+    def test_demo_runs(self, fl):
+        out = run_demo("flask_json")
+        assert "GET /items -> 200" in out

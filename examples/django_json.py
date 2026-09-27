@@ -6,12 +6,18 @@
 * :func:`loads_body` parses ``request.body`` with ``rjson.loads``. Invalid JSON
   becomes a 400 whose JSON detail carries the message, line, column and position.
 
+Importing this module has no side effects: copy :class:`RJSONResponse` and
+:func:`loads_body` into your project and use your own settings. The demo
+settings (:func:`configure_demo`) are for ``python examples/django_json.py``
+and the tests only; never use them in a deployment.
+
 Run ``python examples/django_json.py`` for a demo through Django's test client
 (needs ``django``).
 """
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import decimal
 import enum
@@ -22,14 +28,15 @@ from typing import Any, ClassVar
 
 import rjson
 
-__all__ = ["RJSONResponse", "app", "loads_body", "to_jsonable"]
+__all__ = ["RJSONResponse", "configure_demo", "loads_body", "to_jsonable", "urlpatterns"]
 
 
 def to_jsonable(value: Any) -> Any:
     """Convert common non-JSON types to JSON-native values.
 
     datetime/date/time -> ISO 8601 string, UUID/Decimal -> string, Enum -> its
-    value, set/frozenset/tuple -> list, non-str dict keys -> ``str(key)``.
+    value, set/frozenset/tuple -> list, dataclass -> object of its fields,
+    non-str dict keys -> ``str(key)``.
     """
     if isinstance(value, enum.Enum):
         return to_jsonable(value.value)
@@ -46,6 +53,8 @@ def to_jsonable(value: Any) -> Any:
         return value.isoformat()
     if isinstance(value, (uuid.UUID, decimal.Decimal)):
         return str(value)
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {f.name: to_jsonable(getattr(value, f.name)) for f in dataclasses.fields(value)}
     raise TypeError(f"Object of type {type(value).__qualname__} is not JSON serializable")
 
 
@@ -71,8 +80,13 @@ except ImportError:  # pragma: no cover
     def loads_body(request: Any) -> Any:
         raise ImportError("django is required for examples.django_json")
 
-    app = None
+    def configure_demo() -> None:
+        raise ImportError("django is required for examples.django_json")
+
+    urlpatterns: list[Any] = []
 else:
+    from django.urls import path
+
 
     class RJSONResponse(JsonResponse):
         """``JsonResponse`` rendered with ``rjson.dumps``.
@@ -150,35 +164,27 @@ else:
             status=202,
         )
 
-    def _configure() -> list[Any]:
-        import sys
+    urlpatterns = [
+        path("items", list_items),
+        path("events", create_event),
+    ]
 
+    def configure_demo() -> None:
+        """Minimal settings for the demo and the tests (this module as the URLconf).
+
+        Not for production: fixed secret key, ``DEBUG=True``.
+        """
         import django
         from django.conf import settings
-        from django.urls import path
 
-        sys.modules.setdefault(__name__, sys.modules[__name__])
         if not settings.configured:
             settings.configure(
                 DEBUG=True,
-                SECRET_KEY="rjson-example",
+                SECRET_KEY="rjson-example-demo-only",
                 ROOT_URLCONF=__name__,
-                ALLOWED_HOSTS=["*", "testserver"],
+                ALLOWED_HOSTS=["testserver", "localhost"],
             )
             django.setup()
-        return [
-            path("items", list_items),
-            path("events", create_event),
-        ]
-
-    urlpatterns = _configure()
-
-    def get_wsgi_application() -> Any:
-        from django.core.wsgi import get_wsgi_application as _get
-
-        return _get()
-
-    app = get_wsgi_application()
 
 
 def _demo() -> None:
@@ -187,6 +193,7 @@ def _demo() -> None:
     except ImportError as exc:
         raise SystemExit(f"the demo needs django: {exc}") from exc
 
+    configure_demo()
     client = Client()
     payload_ok = b'{"type": "click", "big": 12345678901234567890}'
     payload_bad = b'{"type": '
