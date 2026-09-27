@@ -112,7 +112,7 @@ jobs:
           persist-credentials: false
       - name: Install the Rust toolchain
         run: |
-          apk add --no-cache build-base curl
+          apk add --no-cache build-base curl patchelf
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - run: python -m pip install "maturin>=1.8,<2" pytest orjson
