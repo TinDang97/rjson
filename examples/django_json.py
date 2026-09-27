@@ -188,17 +188,12 @@ def _demo() -> None:
         raise SystemExit(f"the demo needs django: {exc}") from exc
 
     client = Client()
+    payload_ok = b'{"type": "click", "big": 12345678901234567890}'
+    payload_bad = b'{"type": '
     calls: list[tuple[str, str, dict[str, Any]]] = [
         ("GET", "/items", {}),
-        (
-            "POST",
-            "/events",
-            {
-                "data": b'{\"type\": \"click\", \"big\": 12345678901234567890}',
-                "content_type": "application/json",
-            },
-        ),
-        ("POST", "/events", {"data": b'{\"type\": ', "content_type": "application/json"}),
+        ("POST", "/events", {"data": payload_ok, "content_type": "application/json"}),
+        ("POST", "/events", {"data": payload_bad, "content_type": "application/json"}),
     ]
     for method, url, kwargs in calls:
         if method == "POST":
@@ -209,5 +204,5 @@ def _demo() -> None:
         print(f"    {response.content.decode()}")
 
 
-if __name__ == \"__main__\":
+if __name__ == "__main__":
     _demo()
