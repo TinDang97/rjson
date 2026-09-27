@@ -29,7 +29,7 @@ each is tracked as an issue.
 |---|---|
 | Faster than `json`? | Yes: 2.9–29× on `dumps`, 1.7–5.8× on `loads` (28× on tiny documents). |
 | Faster than orjson? | Yes on most shapes: geomean `dumps` 0.67×, `loads` 0.83×, round trip 0.78× (rjson ÷ orjson time). CJK text (0.59–0.91×) and full-precision float arrays (0.89–0.95×) now load faster than orjson; see [Performance](#performance). |
-| Correct? | 0 mismatches. 1052 tests, fuzzing against `json`, and output byte-identical to orjson. |
+| Correct? | 0 mismatches. 1056 tests, fuzzing against `json`, and output byte-identical to orjson. |
 | Memory? | Better on large `loads`: peak RSS 30–37% below orjson. Retained small results cost ~400 B instead of ~8 KB each. |
 | Safe for async services? | Yes, but each call blocks the event loop, and `to_thread` doesn't help. See [ASYNC.md](ASYNC.md). |
 | Compress / go binary? | Compress at the transport, and only payloads of a few KB and up. Use Arrow/Polars only for columnar data. See [Transfer size](#transfer-size-compression-and-binary-formats). |
@@ -104,7 +104,7 @@ status column reflects this branch.
 
 | pattern | before | status |
 |---|---|---|
-| small `dumps` right after a large one | 1.7–2.0× slower | **fixed for plain sequences**: after one or two 880 KB `dumps`, a 150 B call takes 2.4–2.7 µs (orjson 2.3–2.4 µs; before: 3.5–4.4 µs). The benchmark's `percall/small_after_big` case, which interleaves rjson `dumps`, `dumps_str` and orjson calls, still reads 1.5–1.8× (see [Performance fixes](#performance-fixes)) |
+| small `dumps` right after a large one | 1.7–2.0× slower | **fixed** ([#13](https://github.com/TinDang97/rjson/issues/13)): `percall/small_after_big` 0.79–0.92× (`dumps_str` 0.91–1.07×) with PGO wheels; see [Performance fixes](#performance-fixes) item 2 |
 | large `dumps` peak memory | 1.8× the output size, 16 MB kept, 1.27× slower | **fixed**: at orjson's peak, 0.5 MB kept, 0.75× |
 | CJK / UCS-2 text `loads` | 1.3× slower (1.6× on 3.11) | **fixed**: 0.74× on the benchmark's CJK case; Chinese 0.59×, Korean 0.91×, Cyrillic 0.59× ([#8](https://github.com/TinDang97/rjson/issues/8)) |
 | mixed-magnitude float arrays `loads` | 1.12–1.32× slower | **fixed**: 0.89–0.95× ([#9](https://github.com/TinDang97/rjson/issues/9)); arrays of mostly `0.0` ~1.05× (allocation-bound) |
@@ -135,7 +135,7 @@ response right after a big page allocated a buffer of the big page's size (~830 
 | case | before | after |
 |---|---|---|
 | 150 B `dumps` after a big page | 9.0–9.6 µs (10.9 µs) | 4.0–4.5 µs (4.0 µs) |
-| `percall/small_after_big` vs orjson | 1.97× | 1.08–1.27× (noisy: ±40% IQR); item 2 below moved it back to 1.60–1.75× (1.5–1.8× on `main` with PGO), see the note there |
+| `percall/small_after_big` vs orjson | 1.97× | 1.08–1.27× (noisy: ±40% IQR); item 2 below moved it back to 1.60–1.75× until [#13](https://github.com/TinDang97/rjson/issues/13), see the note there |
 
 **2. Large outputs grow without stranding the old buffer.**
 
@@ -153,13 +153,33 @@ response right after a big page allocated a buffer of the big page's size (~830 
 | 700 KB then 150 B `dumps`, per pair | 810–822 µs | 778–807 µs (orjson 916–974 µs) |
 
 In the last row the small call gets 0.6 µs slower (2.1 → 2.7 µs) while the big call gets
-15–30 µs faster. Re-measured after PR #11 (PGO, same process): in a plain sequence of one
-or two 880 KB `dumps` followed by a 150 B one, the small call takes 2.4–2.7 µs against
-orjson's 2.3–2.4 µs (the pre-PR build: 3.5–4.4 µs). The benchmark's
-`percall/small_after_big` case, which runs rjson `dumps` and `dumps_str` and orjson's big
-call before each timed call, reads 1.5–1.8× since this change (bisected: 1.00–1.28× at the
-min-of-two fix, 1.60–1.75× here). The small call makes no syscalls and takes no page faults;
-what the interleaving costs it is not identified yet. The reference benchmark's geomeans were unchanged (−1.3% `dumps`, −0.2%
+15–30 µs faster.
+
+That estimate missed a case ([#13](https://github.com/TinDang97/rjson/issues/13)): every
+write reserves its worst case (6× a string's length), so a small result with an 88-character
+string outgrew its 171 B starting buffer, and that first growth jumped to the recent peak:
+a 150 B call allocated a ~935 KB block, wrote into cold memory and copied its bytes out
+(1.60–1.75× orjson, bisected to this change). The jump now applies only once the output
+needs max(peak/64, 4 KiB); below that the buffer doubles, which costs a big result a few
+reallocs under ~22 KB before its jump. Measured with PGO wheels, 3 runs each:
+
+| case (rjson ÷ orjson) | before #13 | after |
+|---|---|---|
+| `percall/small_after_big`, `dumps` | 1.23–1.31 | **0.79–0.92** |
+| same, `dumps_str` | 1.43–1.54 | **0.91–1.07** |
+| `percall/big_after_small`, `dumps` | 0.56–0.62 | 0.63–0.67 |
+| `mixed_sizes` | 0.62–0.64 | 0.64–0.66 |
+| `alternating_sizes` | 0.64 | 0.64–0.65 |
+| `cold_small_response` | 0.99–1.03 | 0.91–1.01 |
+| `big_hicard` 21 MB `dumps`: peak / kept | 20.3 / 0.5 MB | 20.3 / 0.5 MB |
+
+Steady-state calls never reach this code: instructions per call are identical on twitter
+and escaped strings (`dumps` and `dumps_str`). The benchmark itself was also unfair here:
+its prep ran rjson `dumps`, `dumps_str` and then orjson's big call before every timed call,
+so orjson's code was still in the caches and rjson's had been evicted by a 780 KB write
+(worth ~1.3× on its own: 2.98 vs 2.22 µs with orjson's call last, 2.29 vs 2.68 µs with
+rjson's last). The prep now runs the timed library's own call last, as in a service that
+uses one library; the "before" column above is `main` under the same fair prep. The reference benchmark's geomeans were unchanged (−1.3% `dumps`, −0.2%
 `dumps_str`, −2.5% `loads`; lower is better).
 
 **3. UTF-8 → UCS-2 decoding with SIMD fast paths** ([#8](https://github.com/TinDang97/rjson/issues/8)).
@@ -362,5 +382,5 @@ benches/fetch_corpus.sh
 python benches/production_benchmark.py --quick                 # ~30 s smoke run
 python benches/production_benchmark.py --output-json prod.json # full run, ~6 min
 python benches/production_benchmark.py --big-only              # large-file time + RSS
-python -m pytest tests -q                                      # 1052 tests
+python -m pytest tests -q                                      # 1056 tests
 ```

@@ -234,7 +234,7 @@ bodies, NDJSON logs, 100 MB files, cache blobs) rjson is faster on most shapes (
 
 **Is it safe?**
 It checks the exact type of every value, reserves the worst-case output size before
-writing, and version-gates every CPython internal it uses, with self-tests at import. 1052
+writing, and version-gates every CPython internal it uses, with self-tests at import. 1056
 tests, fuzzing against `json`, and 0 mismatches against orjson on all benchmark workloads.
 It is still 0.x: pin the version.
 

@@ -1192,8 +1192,8 @@ struct Out {
     len: usize,
     cap: usize,
     unicode: bool,
-    /// Capacity the first growth jumps to (the larger recent output size,
-    /// with headroom), or 0: see `reserve`.
+    /// Capacity growth jumps to once the output is large enough (the
+    /// larger recent output size, with headroom), or 0: see `reserve`.
     jump: usize,
 }
 
@@ -1253,6 +1253,15 @@ const LARGE_GROWTH: usize = 1 << 20;
 /// shrinking it is an mremap (no copy). Other allocators treat a request
 /// this size the same way.
 const LARGE_RESERVE: usize = (32 << 20) + (64 << 10);
+
+/// Output size from which growth may jump to a recent peak of `jump` bytes
+/// (see `Out::reserve`): past what a small or medium result's worst-case
+/// reservations reach, and a small fraction of the peak, so a big result
+/// that started from a small hint gets there after a few cheap doublings.
+#[inline(always)]
+fn jump_threshold(jump: usize) -> usize {
+    (jump / 64).max(4096)
+}
 
 /// Capacity for an expected output of `len` bytes: headroom below the
 /// shrink threshold in `into_object`, so a steady workload never shrinks.
@@ -1331,9 +1340,14 @@ impl Out {
     ///
     /// Growth policy (a large output that has to grow is where time and
     /// peak memory went, see docs/PERFORMANCE_REVIEW.md):
-    /// - The first growth jumps to the larger recent output size when that
-    ///   suffices, so a big result after a small one is one realloc to its
-    ///   usual size, which is then freed at that size (not shrunk).
+    /// - Once the output needs `jump_threshold` bytes, growth jumps to the
+    ///   larger recent output size when that suffices, so a big result after
+    ///   a small one is one realloc to its usual size, which is then freed at
+    ///   that size (not shrunk). Below the threshold the buffer doubles:
+    ///   every write reserves its worst case (6x a string's length), so a
+    ///   150 B result after a big one used to grow here and jumped to the
+    ///   big size, allocating ~1 MB of cold memory and then copying its
+    ///   bytes out (issue #13: 1.5-1.8x orjson's time).
     /// - Otherwise the capacity doubles; once that passes `LARGE_GROWTH` it
     ///   jumps to at least `LARGE_RESERVE`, which malloc serves with mmap.
     ///   Doubling on the brk heap copied the buffer at every step that could
@@ -1348,7 +1362,13 @@ impl Out {
             return;
         }
         let need = self.len.checked_add(n).unwrap_or_else(|| Self::oom(isize::MAX as usize));
-        let jump = std::mem::replace(&mut self.jump, 0);
+        // The jump is taken at most once, when the output reaches the
+        // threshold; if it is too small by then, it never becomes useful.
+        let jump = if self.jump != 0 && need >= jump_threshold(self.jump) {
+            std::mem::replace(&mut self.jump, 0)
+        } else {
+            0
+        };
         let cap = if jump >= need {
             jump
         } else {

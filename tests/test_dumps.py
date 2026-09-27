@@ -826,6 +826,40 @@ class TestOutputBuffer:
         assert peak < 16 * 1024
 
     @pytest.mark.parametrize("fn", [rjson.dumps, rjson.dumps_str], ids=["bytes", "str"])
+    def test_small_that_grows_after_big_does_not_jump_to_big(self, fn):
+        # Issue #13: every write reserves its worst case (6x a string's
+        # length), so a small result with an 88-char string outgrows its
+        # 171 B starting buffer. That first growth jumped to the recent peak
+        # (~935 KB) and then copied the 150 B out of it.
+        big = ["x" * 100] * 8000
+        small = {"id": 1, "name": "alice", "msg": "hello world" * 8}
+
+        def run():
+            fn(small)
+            fn(big)
+            return self._peak_alloc(fn, small)
+
+        peak, out = self._in_fresh_thread(run)
+        assert out == (ref(small) if fn is rjson.dumps_str else ref(small).encode())
+        assert peak < 16 * 1024
+
+    @pytest.mark.parametrize("fn", [rjson.dumps, rjson.dumps_str], ids=["bytes", "str"])
+    def test_big_after_small_still_jumps(self, fn):
+        # A big result after small ones still reaches its usual size in one
+        # jump after a few small doublings, not a chain of doublings to it.
+        big = ["x" * 100] * 8000
+        small = {"id": 1}
+
+        def run():
+            fn(big)
+            fn(small)
+            return self._peak_alloc(fn, big)
+
+        peak, out = self._in_fresh_thread(run)
+        assert len(out) == len(ref(big))
+        assert peak < len(out) * 1.25
+
+    @pytest.mark.parametrize("fn", [rjson.dumps, rjson.dumps_str], ids=["bytes", "str"])
     def test_repeated_big_is_presized(self, fn):
         # A steady workload still gets an exactly sized buffer: no doubling
         # growth (peak up to ~2x) once the size was seen twice in a row.

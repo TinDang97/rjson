@@ -185,11 +185,12 @@ class Case:
     # "batch": variant.fn() runs a whole batch (timed in calibrated loops).
     # "fresh": variant.fn(items) with items = factory() rebuilt untimed before
     #          every sample (fresh objects: no CPython UTF-8 caches yet).
-    # "percall": variant.fn(x) timed one call at a time, prep() run untimed
-    #          before each call (cache eviction, a preceding big dumps, ...).
+    # "percall": variant.fn(x) timed one call at a time, prep(label) run
+    #          untimed before each call (cache eviction, a preceding big
+    #          dumps, ...) with the label of the variant about to be timed.
     mode: str = "batch"
     factory: Callable[[], list[Any]] | None = None
-    prep: Callable[[], Any] | None = None
+    prep: Callable[[str], Any] | None = None
     inputs: list[Any] = field(default_factory=list)
 
 
@@ -490,10 +491,10 @@ def build_cases(quick: bool, data_dir: str) -> list[Case]:
     ev_src = bytes(4 << 20)
     ev_dst = bytearray(4 << 20)
 
-    def evict() -> None:  # stream 8 MB through the caches, as other request work would
+    def evict(_label: str) -> None:  # stream 8 MB through the caches, as other request work would
         ev_dst[:] = ev_src
 
-    def percall(name: str, op: str, desc: str, inputs: list[Any], prep: Callable[[], Any],
+    def percall(name: str, op: str, desc: str, inputs: list[Any], prep: Callable[[str], Any],
                 libs: dict[str, Callable[[Any], Any]]) -> Case:
         size = sum(len(x) if isinstance(x, bytes) else len(enc(x)) for x in inputs[:50]) // min(len(inputs), 50)
         return Case("percall", name, op, desc, 1, [Variant(k, f, k.split(".")[0]) for k, f in libs.items()],
@@ -508,19 +509,25 @@ def build_cases(quick: bool, data_dir: str) -> list[Case]:
     cases.append(percall("cold_api_page", "dumps", "39 KB api_page, caches evicted before each call",
                          pages, evict, DUMPS))
 
-    def after_big() -> None:  # every library's per-call state now reflects a big result
-        rjson.dumps(big_page)
-        rjson.dumps_str(big_page)
-        orjson.dumps(big_page)
-
     three = {"rjson": rjson.dumps, "orjson": orjson.dumps, "rjson.dumps_str": rjson.dumps_str}
+
+    def run_all(label: str, obj: Any) -> None:
+        # Every variant's per-call state now reflects `obj`, and the timed
+        # variant ran last, as in a service using one library. A fixed order
+        # (orjson last) left orjson's code in the caches and rjson's evicted
+        # by a 780 KB write, which alone read as 1.3x in orjson's favour.
+        for k, f in three.items():
+            if k != label:
+                f(obj)
+        three[label](obj)
+
+    def after_big(label: str) -> None:
+        run_all(label, big_page)
     cases.append(percall("small_after_big", "dumps", "150 B response right after a 780 KB dumps",
                          resps, after_big, three))
 
-    def after_small() -> None:
-        rjson.dumps(resps[0])
-        rjson.dumps_str(resps[0])
-        orjson.dumps(resps[0])
+    def after_small(label: str) -> None:
+        run_all(label, resps[0])
 
     cases.append(percall("big_after_small", "dumps", "780 KB page right after a 150 B dumps",
                          [big_page], after_small, three))
@@ -596,12 +603,12 @@ def time_case_fresh(case: Case, rounds: int) -> dict[str, list[float]]:
 
 
 def time_case_percall(case: Case, rounds: int, per_round: int) -> dict[str, list[float]]:
-    prep = case.prep or (lambda: None)
+    prep = case.prep or (lambda label: None)
     pc = time.perf_counter_ns
     # Timer + prep bookkeeping overhead, subtracted from every sample.
     ov = []
     for _ in range(200):
-        prep()
+        prep(case.variants[0].label)
         t0 = pc()
         t1 = pc()
         ov.append(t1 - t0)
@@ -616,7 +623,7 @@ def time_case_percall(case: Case, rounds: int, per_round: int) -> dict[str, list
             out = samples[v.label]
             for i in range(per_round):
                 x = xs[i % len(xs)]
-                prep()
+                prep(v.label)
                 t0 = pc()
                 f(x)
                 t1 = pc()
