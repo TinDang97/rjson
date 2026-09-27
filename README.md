@@ -172,8 +172,10 @@ The wheel ships type stubs (`py.typed`), so mypy and pyright check calls to rjso
 - **`indent=` / `sort_keys=`:** `indent=2` and `sort_keys=True` give exactly the bytes of
   orjson's `OPT_INDENT_2` and `OPT_SORT_KEYS` (keys sorted by code point; dataclass fields
   keep their order); other widths (`indent=4`, `indent=0`) lay out like
-  `json.dumps(indent=n)`. Compact calls pay nothing for them. With either option,
-  `dumps_str` raises `UnicodeEncodeError` on a lone surrogate, as `dumps` does.
+  `json.dumps(indent=n)`. Compact calls pay nothing for them; the options themselves are
+  not yet as fast as orjson's (twitter.json: `sort_keys` 0.78×, `indent=2` 0.48×). With
+  either option, `dumps_str` raises `UnicodeEncodeError` on a lone surrogate, as `dumps`
+  does.
 - **`default=`:** called with each value rjson cannot serialize; its return value is
   serialized in its place (and passed to `default` again if still unsupported), as in
   `json.dumps` and orjson. Exceptions it raises propagate unchanged. It is not called for

@@ -12,7 +12,9 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
   `sort_keys=True` produce exactly orjson's `OPT_INDENT_2` / `OPT_SORT_KEYS`
   output (differential-tested, including the benchmark corpora); other
   widths lay out like `json.dumps(indent=n)`. Compact output is unchanged
-  and pays nothing (same instruction count).
+  and pays nothing (same instruction count). The options are slower than
+  orjson's for now (twitter.json: `sort_keys` 0.78x, `indent=2` 0.48x): the
+  indentation is a second pass over the compact output.
 
 ### Docs
 - README images and links are absolute, so they render on PyPI; richer PyPI
