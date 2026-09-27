@@ -1,0 +1,1028 @@
+{
+ "meta": {
+  "python": "3.13.12",
+  "rjson": "0.1.0",
+  "orjson": "3.12.0",
+  "rounds": 9,
+  "quick": false,
+  "runs": 2,
+  "build": "PGO (scripts/build_pgo.sh), main @ 7334e5f",
+  "fastapi": "0.141.1",
+  "pydantic": "2.13.5",
+  "aggregate": "per-run results; speedup = baseline time / variant time"
+ },
+ "runs": [
+  [
+   {
+    "group": "fastapi",
+    "case": "page_native",
+    "desc": "GET page, 50 records (JSON-native)",
+    "variant": "stock FastAPI, return type",
+    "seconds": 6.337520507848637e-05,
+    "speedup": 1.0,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "page_native",
+    "desc": "GET page, 50 records (JSON-native)",
+    "variant": "stock FastAPI, no return type",
+    "seconds": 0.0004470088437500408,
+    "speedup": 0.14177617728280256,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "page_native",
+    "desc": "GET page, 50 records (JSON-native)",
+    "variant": "example on json",
+    "seconds": 9.508134863267514e-05,
+    "speedup": 0.6665366656011775,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "page_native",
+    "desc": "GET page, 50 records (JSON-native)",
+    "variant": "example on orjson",
+    "seconds": 5.525075878898278e-05,
+    "speedup": 1.1470467821181063,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "page_native",
+    "desc": "GET page, 50 records (JSON-native)",
+    "variant": "example on rjson",
+    "seconds": 5.085384814473848e-05,
+    "speedup": 1.246222407753884,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "page_typed",
+    "desc": "GET page, 50 records with UUID/datetime/Enum",
+    "variant": "stock FastAPI, return type",
+    "seconds": 0.00012212437304714996,
+    "speedup": 1.0,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "page_typed",
+    "desc": "GET page, 50 records with UUID/datetime/Enum",
+    "variant": "stock FastAPI, no return type",
+    "seconds": 0.0008327537343753022,
+    "speedup": 0.14665124634807272,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "page_typed",
+    "desc": "GET page, 50 records with UUID/datetime/Enum",
+    "variant": "example on json",
+    "seconds": 0.0008010924374985962,
+    "speedup": 0.15244729238548577,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "page_typed",
+    "desc": "GET page, 50 records with UUID/datetime/Enum",
+    "variant": "example on orjson",
+    "seconds": 7.506275585944522e-05,
+    "speedup": 1.6269636206246874,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "page_typed",
+    "desc": "GET page, 50 records with UUID/datetime/Enum",
+    "variant": "example on rjson",
+    "seconds": 6.367390917949578e-05,
+    "speedup": 1.917965688314867,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "export",
+    "desc": "GET export, 1000 records",
+    "variant": "stock FastAPI, return type",
+    "seconds": 0.0003993550078114083,
+    "speedup": 1.0,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "export",
+    "desc": "GET export, 1000 records",
+    "variant": "stock FastAPI, no return type",
+    "seconds": 0.007932830250013012,
+    "speedup": 0.05034205891532259,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "export",
+    "desc": "GET export, 1000 records",
+    "variant": "example on json",
+    "seconds": 0.000958403531249985,
+    "speedup": 0.4166877466431649,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "export",
+    "desc": "GET export, 1000 records",
+    "variant": "example on orjson",
+    "seconds": 0.00017781143945327926,
+    "speedup": 2.2459466558468564,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "export",
+    "desc": "GET export, 1000 records",
+    "variant": "example on rjson",
+    "seconds": 0.00012535758203124914,
+    "speedup": 3.185726793229444,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "events_post",
+    "desc": "POST event, 3 KB JSON body (Depends(json_body))",
+    "variant": "stock FastAPI, return type",
+    "seconds": 8.865718066397577e-05,
+    "speedup": 1.0,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "events_post",
+    "desc": "POST event, 3 KB JSON body (Depends(json_body))",
+    "variant": "stock FastAPI, no return type",
+    "seconds": 9.504192871112593e-05,
+    "speedup": 0.9328217752550433,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "events_post",
+    "desc": "POST event, 3 KB JSON body (Depends(json_body))",
+    "variant": "example on json",
+    "seconds": 0.00010208848046833197,
+    "speedup": 0.8684347171910095,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "events_post",
+    "desc": "POST event, 3 KB JSON body (Depends(json_body))",
+    "variant": "example on orjson",
+    "seconds": 8.515082617188696e-05,
+    "speedup": 1.0411781617363385,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "events_post",
+    "desc": "POST event, 3 KB JSON body (Depends(json_body))",
+    "variant": "example on rjson",
+    "seconds": 8.293001562487134e-05,
+    "speedup": 1.069060218980434,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "items_post",
+    "desc": "POST Pydantic body (RJSONRoute)",
+    "variant": "stock FastAPI, return type",
+    "seconds": 9.369467089825889e-05,
+    "speedup": 1.0,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "items_post",
+    "desc": "POST Pydantic body (RJSONRoute)",
+    "variant": "stock FastAPI, no return type",
+    "seconds": 9.295588281243994e-05,
+    "speedup": 1.0079477281422804,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "items_post",
+    "desc": "POST Pydantic body (RJSONRoute)",
+    "variant": "example on json",
+    "seconds": 9.368255859421026e-05,
+    "speedup": 1.000129290918506,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "items_post",
+    "desc": "POST Pydantic body (RJSONRoute)",
+    "variant": "example on orjson",
+    "seconds": 9.229429492174646e-05,
+    "speedup": 1.0151729419212723,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "items_post",
+    "desc": "POST Pydantic body (RJSONRoute)",
+    "variant": "example on rjson",
+    "seconds": 9.078920117211453e-05,
+    "speedup": 1.0320023713022466,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "logging",
+    "case": "format_plain",
+    "desc": "format(): record with 5 plain extras",
+    "variant": "example on json",
+    "seconds": 6.071307006805249e-06,
+    "speedup": 1.0,
+    "baseline": "example on json"
+   },
+   {
+    "group": "logging",
+    "case": "format_plain",
+    "desc": "format(): record with 5 plain extras",
+    "variant": "example on orjson",
+    "seconds": 3.395345092777058e-06,
+    "speedup": 1.7881266383557843,
+    "baseline": "example on json"
+   },
+   {
+    "group": "logging",
+    "case": "format_plain",
+    "desc": "format(): record with 5 plain extras",
+    "variant": "example on rjson",
+    "seconds": 2.5294126586861143e-06,
+    "speedup": 2.4002833171393023,
+    "baseline": "example on json"
+   },
+   {
+    "group": "logging",
+    "case": "format_typed",
+    "desc": "format(): extras with UUID/datetime/Decimal/Enum/set",
+    "variant": "example on json",
+    "seconds": 1.1287091308598285e-05,
+    "speedup": 1.0,
+    "baseline": "example on json"
+   },
+   {
+    "group": "logging",
+    "case": "format_typed",
+    "desc": "format(): extras with UUID/datetime/Decimal/Enum/set",
+    "variant": "example on orjson",
+    "seconds": 5.36459014893742e-06,
+    "speedup": 2.103998813559681,
+    "baseline": "example on json"
+   },
+   {
+    "group": "logging",
+    "case": "format_typed",
+    "desc": "format(): extras with UUID/datetime/Decimal/Enum/set",
+    "variant": "example on rjson",
+    "seconds": 4.166533996569077e-06,
+    "speedup": 2.7089881704775753,
+    "baseline": "example on json"
+   },
+   {
+    "group": "logging",
+    "case": "logger_info",
+    "desc": "logger.info(...) through a StreamHandler",
+    "variant": "example on json",
+    "seconds": 1.5081939941374856e-05,
+    "speedup": 1.0,
+    "baseline": "example on json"
+   },
+   {
+    "group": "logging",
+    "case": "logger_info",
+    "desc": "logger.info(...) through a StreamHandler",
+    "variant": "example on orjson",
+    "seconds": 1.1470535766611167e-05,
+    "speedup": 1.3148418041008938,
+    "baseline": "example on json"
+   },
+   {
+    "group": "logging",
+    "case": "logger_info",
+    "desc": "logger.info(...) through a StreamHandler",
+    "variant": "example on rjson",
+    "seconds": 1.0046744018554765e-05,
+    "speedup": 1.5011768900970175,
+    "baseline": "example on json"
+   },
+   {
+    "group": "ndjson",
+    "case": "write",
+    "desc": "write_ndjson: 10000 records to a binary file",
+    "variant": "example on json",
+    "seconds": 3.1926816999884978e-06,
+    "speedup": 1.0,
+    "baseline": "example on json"
+   },
+   {
+    "group": "ndjson",
+    "case": "write",
+    "desc": "write_ndjson: 10000 records to a binary file",
+    "variant": "example on orjson",
+    "seconds": 5.050398124978983e-07,
+    "speedup": 6.321643603100664,
+    "baseline": "example on json"
+   },
+   {
+    "group": "ndjson",
+    "case": "write",
+    "desc": "write_ndjson: 10000 records to a binary file",
+    "variant": "example on rjson",
+    "seconds": 2.5253141562444624e-07,
+    "speedup": 12.642710975558444,
+    "baseline": "example on json"
+   },
+   {
+    "group": "ndjson",
+    "case": "read",
+    "desc": "read_ndjson: 10000 lines from a binary file",
+    "variant": "example on json",
+    "seconds": 2.0700458499959497e-06,
+    "speedup": 1.0,
+    "baseline": "example on json"
+   },
+   {
+    "group": "ndjson",
+    "case": "read",
+    "desc": "read_ndjson: 10000 lines from a binary file",
+    "variant": "example on orjson",
+    "seconds": 8.65768412501211e-07,
+    "speedup": 2.3909925796617744,
+    "baseline": "example on json"
+   },
+   {
+    "group": "ndjson",
+    "case": "read",
+    "desc": "read_ndjson: 10000 lines from a binary file",
+    "variant": "example on rjson",
+    "seconds": 8.331685499967989e-07,
+    "speedup": 2.484546314192852,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_1k",
+    "desc": "round trip, ~1 KB JSON-native payload",
+    "variant": "example on json",
+    "seconds": 2.41591982421685e-05,
+    "speedup": 1.0,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_1k",
+    "desc": "round trip, ~1 KB JSON-native payload",
+    "variant": "example on orjson",
+    "seconds": 6.8180078124924215e-06,
+    "speedup": 3.5434395070510716,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_1k",
+    "desc": "round trip, ~1 KB JSON-native payload",
+    "variant": "example on rjson",
+    "seconds": 5.338045715341799e-06,
+    "speedup": 4.525850757091459,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_1k",
+    "desc": "round trip, ~1 KB JSON-native payload",
+    "variant": "pickle (reference)",
+    "seconds": 7.3101403808562004e-06,
+    "speedup": 3.3048884130100458,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_8k",
+    "desc": "round trip, ~8 KB JSON-native payload",
+    "variant": "example on json",
+    "seconds": 0.00015344612890633158,
+    "speedup": 1.0,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_8k",
+    "desc": "round trip, ~8 KB JSON-native payload",
+    "variant": "example on orjson",
+    "seconds": 4.1601384277223374e-05,
+    "speedup": 3.688486130264248,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_8k",
+    "desc": "round trip, ~8 KB JSON-native payload",
+    "variant": "example on rjson",
+    "seconds": 3.341286865232718e-05,
+    "speedup": 4.592426065028816,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_8k",
+    "desc": "round trip, ~8 KB JSON-native payload",
+    "variant": "pickle (reference)",
+    "seconds": 5.0994375000001924e-05,
+    "speedup": 3.0090795093836484,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_48k",
+    "desc": "round trip, ~48 KB JSON-native payload",
+    "variant": "example on json",
+    "seconds": 0.0007999824687487944,
+    "speedup": 1.0,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_48k",
+    "desc": "round trip, ~48 KB JSON-native payload",
+    "variant": "example on orjson",
+    "seconds": 0.00023046551171823637,
+    "speedup": 3.471159145611517,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_48k",
+    "desc": "round trip, ~48 KB JSON-native payload",
+    "variant": "example on rjson",
+    "seconds": 0.00019007676367177595,
+    "speedup": 4.20873363632286,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_48k",
+    "desc": "round trip, ~48 KB JSON-native payload",
+    "variant": "pickle (reference)",
+    "seconds": 0.0003118799140633399,
+    "speedup": 2.565033632099582,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "typed",
+    "desc": "round trip, 20 dataclasses with UUID/Enum/Decimal/datetime/frozenset",
+    "variant": "example on json",
+    "seconds": 0.0003909698828117314,
+    "speedup": 1.0,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "typed",
+    "desc": "round trip, 20 dataclasses with UUID/Enum/Decimal/datetime/frozenset",
+    "variant": "example on orjson",
+    "seconds": 0.00029424645703102215,
+    "speedup": 1.3287156853362274,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "typed",
+    "desc": "round trip, 20 dataclasses with UUID/Enum/Decimal/datetime/frozenset",
+    "variant": "example on rjson",
+    "seconds": 0.00030144242968610513,
+    "speedup": 1.2969968534915675,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "typed",
+    "desc": "round trip, 20 dataclasses with UUID/Enum/Decimal/datetime/frozenset",
+    "variant": "pickle (reference)",
+    "seconds": 8.572247363280994e-05,
+    "speedup": 4.5608796181785545,
+    "baseline": "example on json"
+   }
+  ],
+  [
+   {
+    "group": "fastapi",
+    "case": "page_native",
+    "desc": "GET page, 50 records (JSON-native)",
+    "variant": "stock FastAPI, return type",
+    "seconds": 7.026073437499392e-05,
+    "speedup": 1.0,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "page_native",
+    "desc": "GET page, 50 records (JSON-native)",
+    "variant": "stock FastAPI, no return type",
+    "seconds": 0.00048101042187553844,
+    "speedup": 0.14606904794502332,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "page_native",
+    "desc": "GET page, 50 records (JSON-native)",
+    "variant": "example on json",
+    "seconds": 0.00011332679394548961,
+    "speedup": 0.6199834295920297,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "page_native",
+    "desc": "GET page, 50 records (JSON-native)",
+    "variant": "example on orjson",
+    "seconds": 5.9764669921857916e-05,
+    "speedup": 1.1756232313649446,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "page_native",
+    "desc": "GET page, 50 records (JSON-native)",
+    "variant": "example on rjson",
+    "seconds": 5.0830925292899565e-05,
+    "speedup": 1.382243859818315,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "page_typed",
+    "desc": "GET page, 50 records with UUID/datetime/Enum",
+    "variant": "stock FastAPI, return type",
+    "seconds": 0.00011313507812538148,
+    "speedup": 1.0,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "page_typed",
+    "desc": "GET page, 50 records with UUID/datetime/Enum",
+    "variant": "stock FastAPI, no return type",
+    "seconds": 0.0006562496718771627,
+    "speedup": 0.17239639572202056,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "page_typed",
+    "desc": "GET page, 50 records with UUID/datetime/Enum",
+    "variant": "example on json",
+    "seconds": 0.0007807491796896215,
+    "speedup": 0.14490579185796534,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "page_typed",
+    "desc": "GET page, 50 records with UUID/datetime/Enum",
+    "variant": "example on orjson",
+    "seconds": 7.310366015644831e-05,
+    "speedup": 1.5475979982843866,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "page_typed",
+    "desc": "GET page, 50 records with UUID/datetime/Enum",
+    "variant": "example on rjson",
+    "seconds": 6.299887499983114e-05,
+    "speedup": 1.7958269592224418,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "export",
+    "desc": "GET export, 1000 records",
+    "variant": "stock FastAPI, return type",
+    "seconds": 0.0004035543828120325,
+    "speedup": 1.0,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "export",
+    "desc": "GET export, 1000 records",
+    "variant": "stock FastAPI, no return type",
+    "seconds": 0.009307099750003545,
+    "speedup": 0.0433598428782155,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "export",
+    "desc": "GET export, 1000 records",
+    "variant": "example on json",
+    "seconds": 0.0010507229531242501,
+    "speedup": 0.38407306284886245,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "export",
+    "desc": "GET export, 1000 records",
+    "variant": "example on orjson",
+    "seconds": 0.00017488921289032788,
+    "speedup": 2.307485842852408,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "export",
+    "desc": "GET export, 1000 records",
+    "variant": "example on rjson",
+    "seconds": 0.00013450650195334646,
+    "speedup": 3.000259295658475,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "events_post",
+    "desc": "POST event, 3 KB JSON body (Depends(json_body))",
+    "variant": "stock FastAPI, return type",
+    "seconds": 7.258973730461804e-05,
+    "speedup": 1.0,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "events_post",
+    "desc": "POST event, 3 KB JSON body (Depends(json_body))",
+    "variant": "stock FastAPI, no return type",
+    "seconds": 8.096242578137236e-05,
+    "speedup": 0.8965855037574642,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "events_post",
+    "desc": "POST event, 3 KB JSON body (Depends(json_body))",
+    "variant": "example on json",
+    "seconds": 8.366006249982405e-05,
+    "speedup": 0.8676749112489691,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "events_post",
+    "desc": "POST event, 3 KB JSON body (Depends(json_body))",
+    "variant": "example on orjson",
+    "seconds": 6.835584667985728e-05,
+    "speedup": 1.0619389683605276,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "events_post",
+    "desc": "POST event, 3 KB JSON body (Depends(json_body))",
+    "variant": "example on rjson",
+    "seconds": 6.75011611326326e-05,
+    "speedup": 1.075385016888627,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "items_post",
+    "desc": "POST Pydantic body (RJSONRoute)",
+    "variant": "stock FastAPI, return type",
+    "seconds": 9.126276855475624e-05,
+    "speedup": 1.0,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "items_post",
+    "desc": "POST Pydantic body (RJSONRoute)",
+    "variant": "stock FastAPI, no return type",
+    "seconds": 8.812744042963061e-05,
+    "speedup": 1.0355772062576716,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "items_post",
+    "desc": "POST Pydantic body (RJSONRoute)",
+    "variant": "example on json",
+    "seconds": 9.219635058554942e-05,
+    "speedup": 0.9898739806417076,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "items_post",
+    "desc": "POST Pydantic body (RJSONRoute)",
+    "variant": "example on orjson",
+    "seconds": 8.860245507813502e-05,
+    "speedup": 1.0300252794832285,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "fastapi",
+    "case": "items_post",
+    "desc": "POST Pydantic body (RJSONRoute)",
+    "variant": "example on rjson",
+    "seconds": 8.794407812473537e-05,
+    "speedup": 1.037736371803384,
+    "baseline": "stock FastAPI, return type"
+   },
+   {
+    "group": "logging",
+    "case": "format_plain",
+    "desc": "format(): record with 5 plain extras",
+    "variant": "example on json",
+    "seconds": 5.573650634776994e-06,
+    "speedup": 1.0,
+    "baseline": "example on json"
+   },
+   {
+    "group": "logging",
+    "case": "format_plain",
+    "desc": "format(): record with 5 plain extras",
+    "variant": "example on orjson",
+    "seconds": 2.864020568843495e-06,
+    "speedup": 1.94609308864973,
+    "baseline": "example on json"
+   },
+   {
+    "group": "logging",
+    "case": "format_plain",
+    "desc": "format(): record with 5 plain extras",
+    "variant": "example on rjson",
+    "seconds": 2.19180200196345e-06,
+    "speedup": 2.542953528550495,
+    "baseline": "example on json"
+   },
+   {
+    "group": "logging",
+    "case": "format_typed",
+    "desc": "format(): extras with UUID/datetime/Decimal/Enum/set",
+    "variant": "example on json",
+    "seconds": 1.1319057128922339e-05,
+    "speedup": 1.0,
+    "baseline": "example on json"
+   },
+   {
+    "group": "logging",
+    "case": "format_typed",
+    "desc": "format(): extras with UUID/datetime/Decimal/Enum/set",
+    "variant": "example on orjson",
+    "seconds": 5.598528930672586e-06,
+    "speedup": 2.021791307875319,
+    "baseline": "example on json"
+   },
+   {
+    "group": "logging",
+    "case": "format_typed",
+    "desc": "format(): extras with UUID/datetime/Decimal/Enum/set",
+    "variant": "example on rjson",
+    "seconds": 4.220712707531105e-06,
+    "speedup": 2.681788103872958,
+    "baseline": "example on json"
+   },
+   {
+    "group": "logging",
+    "case": "logger_info",
+    "desc": "logger.info(...) through a StreamHandler",
+    "variant": "example on json",
+    "seconds": 1.2029092041121459e-05,
+    "speedup": 1.0,
+    "baseline": "example on json"
+   },
+   {
+    "group": "logging",
+    "case": "logger_info",
+    "desc": "logger.info(...) through a StreamHandler",
+    "variant": "example on orjson",
+    "seconds": 9.232678344739398e-06,
+    "speedup": 1.3028821748106716,
+    "baseline": "example on json"
+   },
+   {
+    "group": "logging",
+    "case": "logger_info",
+    "desc": "logger.info(...) through a StreamHandler",
+    "variant": "example on rjson",
+    "seconds": 8.531331420869037e-06,
+    "speedup": 1.4099900059791752,
+    "baseline": "example on json"
+   },
+   {
+    "group": "ndjson",
+    "case": "write",
+    "desc": "write_ndjson: 10000 records to a binary file",
+    "variant": "example on json",
+    "seconds": 3.5174371000039174e-06,
+    "speedup": 1.0,
+    "baseline": "example on json"
+   },
+   {
+    "group": "ndjson",
+    "case": "write",
+    "desc": "write_ndjson: 10000 records to a binary file",
+    "variant": "example on orjson",
+    "seconds": 5.320025937493256e-07,
+    "speedup": 6.611691637092467,
+    "baseline": "example on json"
+   },
+   {
+    "group": "ndjson",
+    "case": "write",
+    "desc": "write_ndjson: 10000 records to a binary file",
+    "variant": "example on rjson",
+    "seconds": 2.8137135625172504e-07,
+    "speedup": 12.501048958434456,
+    "baseline": "example on json"
+   },
+   {
+    "group": "ndjson",
+    "case": "read",
+    "desc": "read_ndjson: 10000 lines from a binary file",
+    "variant": "example on json",
+    "seconds": 2.6019991000111986e-06,
+    "speedup": 1.0,
+    "baseline": "example on json"
+   },
+   {
+    "group": "ndjson",
+    "case": "read",
+    "desc": "read_ndjson: 10000 lines from a binary file",
+    "variant": "example on orjson",
+    "seconds": 1.033317762500019e-06,
+    "speedup": 2.5181015893077237,
+    "baseline": "example on json"
+   },
+   {
+    "group": "ndjson",
+    "case": "read",
+    "desc": "read_ndjson: 10000 lines from a binary file",
+    "variant": "example on rjson",
+    "seconds": 9.241002875000958e-07,
+    "speedup": 2.8157107353036386,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_1k",
+    "desc": "round trip, ~1 KB JSON-native payload",
+    "variant": "example on json",
+    "seconds": 2.344732153325424e-05,
+    "speedup": 1.0,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_1k",
+    "desc": "round trip, ~1 KB JSON-native payload",
+    "variant": "example on orjson",
+    "seconds": 6.81986230466336e-06,
+    "speedup": 3.4380931000939965,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_1k",
+    "desc": "round trip, ~1 KB JSON-native payload",
+    "variant": "example on rjson",
+    "seconds": 5.753192810070695e-06,
+    "speedup": 4.075532023229049,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_1k",
+    "desc": "round trip, ~1 KB JSON-native payload",
+    "variant": "pickle (reference)",
+    "seconds": 7.188106567357355e-06,
+    "speedup": 3.261960756081896,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_8k",
+    "desc": "round trip, ~8 KB JSON-native payload",
+    "variant": "example on json",
+    "seconds": 0.00014944080468737297,
+    "speedup": 1.0,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_8k",
+    "desc": "round trip, ~8 KB JSON-native payload",
+    "variant": "example on orjson",
+    "seconds": 4.139379248035979e-05,
+    "speedup": 3.610222589734403,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_8k",
+    "desc": "round trip, ~8 KB JSON-native payload",
+    "variant": "example on rjson",
+    "seconds": 3.3159706543051115e-05,
+    "speedup": 4.506698649258388,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_8k",
+    "desc": "round trip, ~8 KB JSON-native payload",
+    "variant": "pickle (reference)",
+    "seconds": 4.943944335922268e-05,
+    "speedup": 3.022704030090896,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_48k",
+    "desc": "round trip, ~48 KB JSON-native payload",
+    "variant": "example on json",
+    "seconds": 0.0008408494531266797,
+    "speedup": 1.0,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_48k",
+    "desc": "round trip, ~48 KB JSON-native payload",
+    "variant": "example on orjson",
+    "seconds": 0.0002508530312503865,
+    "speedup": 3.3519605042659184,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_48k",
+    "desc": "round trip, ~48 KB JSON-native payload",
+    "variant": "example on rjson",
+    "seconds": 0.00019181369726517516,
+    "speedup": 4.38367783487452,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "native_48k",
+    "desc": "round trip, ~48 KB JSON-native payload",
+    "variant": "pickle (reference)",
+    "seconds": 0.000297099300780701,
+    "speedup": 2.830196674704862,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "typed",
+    "desc": "round trip, 20 dataclasses with UUID/Enum/Decimal/datetime/frozenset",
+    "variant": "example on json",
+    "seconds": 0.0003791616601560577,
+    "speedup": 1.0,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "typed",
+    "desc": "round trip, 20 dataclasses with UUID/Enum/Decimal/datetime/frozenset",
+    "variant": "example on orjson",
+    "seconds": 0.0002996926328133753,
+    "speedup": 1.2651684380649066,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "typed",
+    "desc": "round trip, 20 dataclasses with UUID/Enum/Decimal/datetime/frozenset",
+    "variant": "example on rjson",
+    "seconds": 0.00028313362890663996,
+    "speedup": 1.3391615175500111,
+    "baseline": "example on json"
+   },
+   {
+    "group": "codec",
+    "case": "typed",
+    "desc": "round trip, 20 dataclasses with UUID/Enum/Decimal/datetime/frozenset",
+    "variant": "pickle (reference)",
+    "seconds": 8.567366601575088e-05,
+    "speedup": 4.425650001791096,
+    "baseline": "example on json"
+   }
+  ]
+ ]
+}

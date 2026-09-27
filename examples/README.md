@@ -50,14 +50,73 @@ rjson's API is `loads`, `dumps` (bytes), `dumps_str` (str). The keyword options 
   orjson). `pos`, `lineno`, `colno` and `doc` match `json` for delimiter errors
   (missing/trailing `,` or `:`, extra data).
 
-## Performance notes (measured, CPython 3.13, noisy host)
+## Measured gains
 
-- FastAPI, 100 small records: `jsonable_encoder` + `json` 664 µs, `jsonable_encoder` +
-  rjson 593 µs, **`rjson.dumps` alone 6.3 µs** (orjson 8.5 µs). Return `RJSONResponse(...)`
-  directly for native data. For endpoints with a response model, FastAPI's default path
-  (Pydantic `dump_json`, 47 µs) is already as fast as `dump_python` + rjson (45 µs), so
-  leave those alone.
-- Logging: 2.4 µs per record with `JSONFormatter` against 5.2 µs for the same payload
-  through `json.dumps(default=str)`. A record with datetime and UUID extras takes 3.4–4 µs
-  through the formatter's `default=` hook, against 7.6 µs with the old convert-and-retry
-  fallback, which now only runs for NaN and unsupported key types.
+[`benches/examples_benchmark.py`](../benches/examples_benchmark.py) runs each example as
+written, then runs **the same example code** with its `rjson` name bound to stdlib `json`
+or to orjson (a shim with the same call signatures), so only the JSON library changes. Every
+variant's output is checked against the others first (parsed response bodies, log lines,
+NDJSON records, lossless codec round trips). Speedup = baseline time ÷ variant time, so
+**higher is better**. Two runs of 9 interleaved rounds each on CPython 3.13.12, PGO wheel of
+`main`, orjson 3.12.0, FastAPI 0.141.1, Pydantic 2.13.5, 4-core x86_64 Xeon; ranges span
+both runs. Raw data: [`docs/examples-benchmark-results.json`](../docs/examples-benchmark-results.json).
+
+**FastAPI, whole requests through the ASGI app** (routing, dependencies, Pydantic,
+response; no network). The baseline is stock FastAPI returning the data from an endpoint
+with a return type, which FastAPI 0.141 serializes with Pydantic's `dump_json` (Rust).
+All apps mount their routes through an `APIRouter`, as this example does.
+
+| request | stock, return type | stock, no return type | example on `json` | example on orjson | **example on rjson** |
+|---|---|---|---|---|---|
+| GET page, 50 JSON-native records | 63–70 µs (1.00×) | 0.14–0.15× | 0.62–0.67× | 1.15–1.18× | **1.25–1.38×** (51 µs) |
+| GET page, 50 records with UUID/datetime/Enum | 113–122 µs (1.00×) | 0.15–0.17× | 0.14–0.15× | 1.55–1.63× | **1.80–1.92×** (63 µs) |
+| GET export, 1,000 records | 399–404 µs (1.00×) | 0.04–0.05× | 0.38–0.42× | 2.25–2.31× | **3.00–3.19×** (125–135 µs) |
+| POST 3 KB event, `Depends(json_body)` | 73–89 µs (1.00×) | 0.90–0.93× | 0.87× | 1.04–1.06× | **1.07–1.08×** |
+| POST Pydantic body, `RJSONRoute` | 91–94 µs (1.00×) | 1.01–1.04× | 0.99–1.00× | 1.02–1.03× | **1.03–1.04×** |
+
+- Responses are where it pays: `RJSONResponse` serializes UUID/datetime/Enum rows itself,
+  so a typed page is 1.8–1.9× faster end to end than FastAPI's own Pydantic path, and a
+  1,000-row export 3×. Against an endpoint *without* a return type (FastAPI then runs
+  `jsonable_encoder` + `json.dumps`), the same requests are 9–74× faster.
+- The pattern needs rjson: on stdlib `json` the same example code is slower than stock
+  FastAPI (0.14–0.67×): Pydantic's serializer is faster than `json.dumps`, and typed rows
+  make `RJSONResponse` fall back to `jsonable_encoder`.
+- Request bodies gain little (3–8%): a 3 KB body parses in a few µs, while FastAPI's
+  routing and dependency handling take ~70–90 µs. Use `RJSONRoute`/`json_body` for large
+  bodies or when you want `rjson.loads` semantics, not for speed on small ones.
+- Mount through `include_router` or not, but compare like with like: in FastAPI 0.141 an
+  included route costs ~15 µs more per request than one added to the app directly,
+  whichever library serializes.
+
+**Logging and NDJSON** (baseline: the same example code on stdlib `json`):
+
+| operation | `json` | orjson | **rjson** |
+|---|---|---|---|
+| `JSONFormatter.format()`, 5 plain extras | 5.6–6.1 µs | 1.79–1.95× | **2.40–2.54×** (2.2–2.5 µs) |
+| `JSONFormatter.format()`, UUID/datetime/Decimal/Enum/set extras | 11 µs | 2.02–2.10× | **2.68–2.71×** (4.2 µs) |
+| whole `logger.info(...)` through a `StreamHandler` | 12–15 µs | 1.30–1.31× | **1.41–1.50×** (8.5–10 µs) |
+| `write_ndjson`, per record (10,000 records) | 3.2–3.5 µs | 6.32–6.61× | **12.5–12.6×** (253–281 ns) |
+| `read_ndjson`, per line (10,000 lines) | 2.1–2.6 µs | 2.39–2.52× | **2.48–2.82×** (833–924 ns) |
+
+A whole `logger.info` call gains less than `format()` because the `logging` module itself
+(record creation, handler lock, filters) costs ~6–8 µs.
+
+**Redis/Kafka codec, `encode` + `decode` round trip** (baseline: the same `Codec` on `json`):
+
+| payload | `json` | orjson | **rjson** | `pickle` (reference) |
+|---|---|---|---|---|
+| ~1 KB JSON-native | 23–24 µs | 3.44–3.54× | **4.08–4.53×** (5.3–5.8 µs) | 3.26–3.30× |
+| ~8 KB JSON-native | 149–153 µs | 3.61–3.69× | **4.51–4.59×** (33 µs) | 3.01–3.02× |
+| ~48 KB JSON-native | 800–841 µs | 3.35–3.47× | **4.21–4.38×** (190–192 µs) | 2.57–2.83× |
+| 20 dataclasses with UUID/Enum/Decimal/datetime/frozenset | 379–391 µs | 1.27–1.33× | **1.30–1.34×** (283–301 µs) | 4.43–4.56× |
+
+- JSON-native payloads take the codec's fast path (one `rjson.dumps`/`loads` call) and are
+  4.1–4.6× faster than on `json`, and faster than `pickle`.
+- Typed payloads go through the codec's type tagging, a Python walk that dominates the time
+  whichever library is underneath (1.3×). `pickle` is 3.3–3.5× faster there, but it only works
+  Python-to-Python, and unpickling untrusted data runs arbitrary code; keep it for private,
+  trusted caches.
+
+Reproduce: `python benches/examples_benchmark.py` (add `--quick` for a short run, `--check`
+for the equivalence checks alone, `--output-json PATH` for raw data). Needs `fastapi` and
+`orjson` installed.

@@ -31,6 +31,7 @@ tests/        # test_rjson.py (general + regressions), test_dumps.py (serializer
 benches/corpus_benchmark.py   # reference benchmark vs orjson (ratio, same process; --output-json)
 benches/production_benchmark.py, prod_workloads.py   # production-shaped workloads (web/logs/big files/codec), time + RSS
 benches/fetch_corpus.sh       # download the corpora (sha256-pinned) into benches/data/
+benches/examples_benchmark.py # examples/ as written vs the same code on json/orjson (shim), end to end
 benches/perf_gate.py          # compare base/head benchmark runs, fail on >5% geomean regression
 benches/make_charts.py        # README charts (docs/img/*.svg) + table from a --json --output-json run
 scripts/build_pgo.sh, scripts/pgo_train.py   # PGO wheel build; training is synthetic, disjoint from the benchmark
