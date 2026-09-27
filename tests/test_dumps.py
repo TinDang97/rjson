@@ -9,6 +9,7 @@ import collections
 import enum
 import json
 import os
+import platform
 import sys
 
 import pytest
@@ -949,7 +950,8 @@ class TestOutputBuffer:
         assert held < len(out) * 1.25
 
 
-@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="glibc malloc behaviour")
+@pytest.mark.skipif(not sys.platform.startswith("linux") or platform.libc_ver()[0] != "glibc",
+                    reason="glibc malloc behaviour (musl unmaps every large block on free)")
 @pytest.mark.skipif(bool(os.environ.get("RJSON_SANITIZER")), reason="sanitizer allocator, not glibc's")
 def test_large_output_does_not_refault_every_call():
     # Shrinking each result by the capacity headroom made every call free a

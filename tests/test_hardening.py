@@ -158,6 +158,26 @@ def test_main_thread_limits_unchanged():
         rjson.dumps(x)
 
 
+def test_full_depth_on_a_fresh_main_thread():
+    # musl reports only the mapped part of the main thread's stack (~100-200
+    # KiB of an 8 MiB limit) until it grows: rjson 0.1.0 raised
+    # RecursionError at ~600 levels on Alpine's main thread. A new process,
+    # so the stack has not grown yet.
+    code = (
+        "import rjson\n"
+        "rjson.loads(b'[' * 1024 + b']' * 1024)\n"
+        "rjson.loads(b'{\"a\":' * 1024 + b'1' + b'}' * 1024)\n"
+        "x = object()\n"
+        "for _ in range(250):\n    x = [x]\n"
+        "rjson.dumps(x, default=lambda o: {'d': 1})\n"
+        "try:\n    rjson.loads(b'[' * 2000 + b']' * 2000)\n"
+        "except rjson.JSONDecodeError:\n    print('ok')\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr[-400:]
+    assert proc.stdout.strip() == "ok"
+
+
 def test_lenient_beyond_depth_limit_on_main_thread_uses_json():
     # Plenty of stack on the main thread: the json.loads fallback still runs.
     doc = b"[" * 1500 + b"]" * 1500

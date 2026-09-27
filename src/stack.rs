@@ -84,10 +84,31 @@ fn stack_low() -> Option<usize> {
         if !ok || addr.is_null() || size == 0 {
             return None;
         }
+        #[cfg(target_env = "musl")]
+        if libc::syscall(libc::SYS_gettid) as libc::pid_t == libc::getpid() {
+            return musl_main_thread_low(addr as usize + size);
+        }
         // glibc and musl report the guard area inside [addr, addr + size)
         // for threads they created; skipping it is conservative either way.
         Some(addr as usize + guard)
     }
+}
+
+/// musl's `pthread_getattr_np` reports only the part of the main thread's
+/// stack that is mapped so far (often ~100-200 KiB), not what it can grow
+/// to, so a document a few hundred levels deep raised RecursionError on an
+/// 8 MiB stack (Alpine). The main thread's stack grows down from `top` to
+/// `RLIMIT_STACK`, as glibc computes it; `top` is musl's (the auxiliary
+/// vector's page, a little below the real top: argv/env are above it, and
+/// count against the limit), so keep 64 KiB of slack. No limit: unknown.
+#[cfg(target_env = "musl")]
+unsafe fn musl_main_thread_low(top: usize) -> Option<usize> {
+    let mut lim: libc::rlimit = std::mem::zeroed();
+    if libc::getrlimit(libc::RLIMIT_STACK, &mut lim) != 0 || lim.rlim_cur == libc::RLIM_INFINITY {
+        return None;
+    }
+    let size = usize::try_from(lim.rlim_cur).ok()?;
+    top.checked_sub(size)?.checked_add(64 * 1024)
 }
 
 #[cfg(target_os = "macos")]

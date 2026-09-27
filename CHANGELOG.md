@@ -42,6 +42,10 @@ First PyPI release, as `pyrjson`.
   with small stacks (64-128 KiB: musl/Alpine, `threading.stack_size`); they
   raise `RecursionError`. The lenient `json.loads` fallback is skipped where
   it would overflow the stack itself.
+- On musl (Alpine), `loads`/`dumps` on the main thread no longer raise
+  `RecursionError` a few hundred levels deep: musl reports only the part of
+  the main thread's stack mapped so far, so the headroom check now takes the
+  bound from `RLIMIT_STACK` there, as glibc does.
 - `loads` names CPython's integer digit limit (`sys.set_int_max_str_digits`)
   instead of reporting "invalid number".
 - A small `dumps` right after a big one no longer allocates a buffer of the

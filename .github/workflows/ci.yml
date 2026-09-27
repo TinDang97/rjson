@@ -99,6 +99,29 @@ jobs:
         run: python -m pip install --no-index --find-links dist pyrjson
       - run: python -m pytest tests -q
 
+  # musl (Alpine): the musllinux wheels' platform. Its pthread_getattr_np
+  # reports the main thread's stack differently from glibc (src/stack.rs);
+  # rjson 0.1.0's musllinux wheel builds failed on exactly that.
+  musl:
+    name: test musl (Alpine) py3.13
+    runs-on: ubuntu-24.04
+    container: python:3.13-alpine
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Install the Rust toolchain
+        run: |
+          apk add --no-cache build-base curl
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - run: python -m pip install "maturin>=1.8,<2" pytest orjson
+      - name: Build wheel
+        run: maturin build --release -i python -o dist
+      - name: Install wheel
+        run: python -m pip install --no-index --find-links dist pyrjson
+      - run: python -m pytest tests -q
+
   # The extension built with AddressSanitizer (nightly rustc), run under a
   # normal CPython with the ASan runtime preloaded. PYTHONMALLOC=malloc puts
   # Python objects (the bytes/str rjson writes into) on ASan's allocator, so
