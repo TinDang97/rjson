@@ -4,7 +4,7 @@
 
 **rjson** is a JSON library for Python written in Rust directly against the CPython C API (PyO3 is used only for module setup and the entry-point trampoline). Goal: beat orjson on every metric while staying correct on every supported CPython version.
 
-- API: `loads(str | bytes | bytearray | memoryview, *, lenient=False)`, `dumps(obj, *, default=None, passthrough=0, non_str_keys=False, indent=None, sort_keys=False) -> bytes` (like orjson), `dumps_str(...) -> str`, `dumps_bytes` = alias of `dumps`; `PASSTHROUGH_DATETIME/_UUID/_DATACLASS/_ENUM` flags; `JSONDecodeError` (= json's), `JSONEncodeError(TypeError, ValueError)`, `__version__`; stub `rjson.pyi` (maturin installs it as `rjson/__init__.pyi` + `py.typed`)
+- API: `loads(str | bytes | bytearray | memoryview, *, lenient=False)`, `dumps(obj, *, default=None, passthrough=0, non_str_keys=False, indent=None, separators=None, sort_keys=False, ensure_ascii=False, allow_nan=False) -> bytes` (like orjson; the json.dumps options behave as json's), `dumps_str(...) -> str`, `dumps_bytes` = alias of `dumps`; `PASSTHROUGH_DATETIME/_UUID/_DATACLASS/_ENUM` flags; `JSONDecodeError` (= json's), `JSONEncodeError(TypeError, ValueError)`, `__version__`; stub `python/rjson/__init__.pyi` + `py.typed`; command line `rjson` / `python -m rjson` (`python/rjson/tool.py`: json.tool-compatible beautifier, `--in-place`/`--check`/`--validate`, `beautify()`)
 - Packaging: PyPI distribution `pyrjson` (the name `rjson` is taken); import name `rjson`. MIT license.
 - Supported: CPython 3.10-3.14 (`requires-python >=3.10`), GIL builds only
 - Status: experimental; APIs may change before 1.0
@@ -24,18 +24,21 @@ src/
               # and extern decls of private-but-exported C-API symbols
   stack.rs    # thread stack bounds (pthread/macOS/Windows) + headroom check for deep nesting
 build.rs      # pyo3_build_config::use_pyo3_cfgs() -> Py_3_10/Py_3_12... cfgs
-rjson.pyi     # type stub (installed as rjson/__init__.pyi + py.typed)
+python/rjson/ # mixed maturin layout (python-source; extension = rjson.rjson): __init__.py (star-imports the
+              # extension), __init__.pyi stubs + py.typed, tool.py (CLI) + __main__.py; console script `rjson`
 llms.txt      # summary + API + migration map for AI assistants (llmstxt.org); AGENTS.md: short guide for coding agents (points here)
 examples/     # FastAPI, Django, Flask, JSON logging/NDJSON, Redis/Kafka codec (tested by tests/test_examples.py)
 tests/        # test_rjson.py (general + regressions), test_dumps.py (serializer), test_lenient.py (loads lenient=), test_native.py
               # (datetime/UUID/dataclass/Enum, differential vs orjson), test_keys.py
-              # (non_str_keys, vs json), test_examples.py, test_fuzz.py (differential fuzzing vs json;
+              # (non_str_keys, vs json), test_examples.py, test_cli.py (CLI vs json.tool), test_format.py
+              # (indent/sort_keys/json.dumps options vs orjson and json), test_fuzz.py (differential fuzzing vs json;
               # RJSON_FUZZ_ITERS/RJSON_FUZZ_SEED), test_hardening.py (small-stack nesting in
               # subprocesses, int digit limit, thread/re-entrancy stress)
 benches/corpus_benchmark.py   # reference benchmark vs orjson (ratio, same process; --output-json)
 benches/production_benchmark.py, prod_workloads.py   # production-shaped workloads (web/logs/big files/codec), time + RSS
 benches/fetch_corpus.sh       # download the corpora (sha256-pinned) into benches/data/
 benches/examples_benchmark.py # examples/ as written vs the same code on json/orjson (shim), end to end
+benches/cli_benchmark.py      # rjson CLI vs python -m json.tool, whole processes (docs/cli-benchmark-results.json)
 benches/showcase.py           # head-to-head vs orjson on production-shaped workloads (docs/SHOWCASE.md); --fresh: new-process allocator effect
 benches/perf_gate.py          # compare base/head benchmark runs, fail on >5% geomean regression
 benches/make_charts.py        # README charts (docs/img/*.svg) + table from a --json --output-json run
@@ -80,12 +83,12 @@ docs/guides/                  # user-facing guides (faster-json-in-python-servic
 - `non_str_keys=True` (issue #6): `dict_item`'s non-str branch calls cold `key_text`; bool/None/int/float keys get exactly `json.dumps`'s text (float `repr` rebuilt from zmij's digits in `native::fmt_float_repr`, which equal CPython's `repr` digits; Rust's `{:e}` does not), Enum/datetime/date/time/UUID keys follow orjson's `OPT_NON_STR_KEYS`. Str keys never reach it, so the option costs nothing when off. Options travel in `ser::DumpsOpts`.
 - Native types (`native.rs`, issue #5): exact `datetime`/`date`/`time`/`uuid.UUID` types, any `Enum` (metaclass check; int/str/float mix-ins are caught earlier as subclasses), dataclasses (`__dataclass_fields__` in the type's own dict). Output is orjson's byte for byte (differential test in `test_native.py`) except orjson's crashes/invalid output (documented there). Types come from `sys.modules` lazily; rjson never imports a module. Missing ones are looked up again only when `len(sys.modules)` changes (`native::types`), plus a forced `refresh` before a value is reported unsupported. Per-type facts (dataclass, `__slots__`, Enum `_value_` plain, standard `__dict__` descriptor) are cached by `tp_version_tag` (`native::type_facts`); dataclasses whose `__dict__` read runs no Python code stay unguarded on 3.12+ (`dict_plain`; before 3.12 a GC-tracked allocation may run the collector). Checked only after all builtin checks (`ser_other`, cold), so JSON-native documents pay nothing.
 - Non-ASCII strings in bytes output: cached UTF-8 copy if present; < 256 chars via `PyUnicode_AsUTF8AndSize` (attaches the copy: fast repeats); longer UCS2/UCS4 via `encode_utf8_escaped` (direct, ASCII 8-blocks only at ASCII units), longer Latin-1 via a temporary `PyUnicode_AsUTF8String`. No copy attached to long strings.
-- `indent=`/`sort_keys=` (issues #23/#24, `dumps_formatted`, cold): always serialized in bytes mode; `sort_keys` reorders each dict's items in place right after the dict is written (`ser_dict_slow` → `sort_object`, by unescaped key text = UTF-8/code-point order, stable), so non-str keys and nested dicts need nothing special; dataclass fields are not sorted (as orjson). `indent` reformats the finished compact bytes (`indent_json`); `dumps_str` then decodes (a lone surrogate raises there). The fast path keeps one check per dict (`slow_dicts = guard || sort`).
+- `indent=`/`separators=`/`sort_keys=`/`ensure_ascii=` (issues #23/#24, `dumps_formatted`, cold): always serialized in bytes mode; `sort_keys` reorders each dict's items in place right after the dict is written (`ser_dict_slow` → `sort_object`, by unescaped key text = UTF-8/code-point order, stable), so non-str keys and nested dicts need nothing special; dataclass fields are not sorted (as orjson). Then `ensure_ascii` escapes every byte >= 0x7F of the compact bytes (`ascii_escape`; such bytes occur only inside strings, so no string tracking), then the layout (`Layout`: indent unit + separators, json.dumps's defaults) is applied to the finished bytes (`indent_json` for space units with `,`/`: `, ~20% faster; `reformat` otherwise), then `dumps_str` decodes. Lone surrogates: with `ensure_ascii` or for `dumps_str`, the serializer writes them as generalized UTF-8 (`wtf8`, `write_wtf8`) and they come out as `\udXXX` / are decoded back with `surrogatepass`, as json keeps them; `dumps` without `ensure_ascii` still raises. `allow_nan` is checked only in `write_float`'s non-finite branch. The fast path keeps one check per dict (`slow_dicts = guard || sort`), and `dumps_call` (entry.rs) never builds a `DumpsOpts` for a keyword-less call (its owned `Layout` cost ~5 ns there).
 - Every serializer-detected failure raises `rjson.JSONEncodeError` (`ser::to_pyerr`, cold); Python-raised errors (`SerError::PyErrSet`) propagate unchanged.
 
 ### Entry points (`entry.rs`)
-- Raw builtins through PyO3's `impl_::trampoline` (`get_trampoline_function!(binaryfunc | fastcall_cfunction_with_keywords, ..)`; doc-hidden PyO3 API, keeps panics caught and GIL bookkeeping correct; re-check on every PyO3 upgrade). ~8 ns/call cheaper than `#[pyfunction]`. `loads`/`dumps`/`dumps_str` are `METH_FASTCALL | METH_KEYWORDS` whose one-positional, no-kwnames call is a single compare (`dumps_args`; `loads_body`), the rest in cold `dumps_args_slow`/`loads_args_slow`. Keep one call site of `loads_impl` (`#[inline(always)]`, as is `parser::parse`): with two, LLVM stopped inlining `get_input`/`parse` (+60 instructions per call).
-- `ALL` in entry.rs must list every public name (maturin's generated `__init__.py` star-imports from `rjson.rjson`); keep it in sync with `rjson.pyi`. The functions' `__module__` is the package `rjson`.
+- Raw builtins through PyO3's `impl_::trampoline` (`get_trampoline_function!(binaryfunc | fastcall_cfunction_with_keywords, ..)`; doc-hidden PyO3 API, keeps panics caught and GIL bookkeeping correct; re-check on every PyO3 upgrade). ~8 ns/call cheaper than `#[pyfunction]`. `loads`/`dumps`/`dumps_str` are `METH_FASTCALL | METH_KEYWORDS` whose one-positional, no-kwnames call is a single compare (`dumps_call`; `loads_body`), the rest in cold `dumps_with_kwargs` → `dumps_args_slow` / `loads_args_slow`. Keep one call site of `loads_impl` (`#[inline(always)]`, as is `parser::parse`): with two, LLVM stopped inlining `get_input`/`parse` (+60 instructions per call).
+- `ALL` in entry.rs must list every public name (`python/rjson/__init__.py` star-imports from `rjson.rjson`); keep it in sync with `python/rjson/__init__.pyi`. The functions' `__module__` is the package `rjson`.
 - New keyword options go into `dumps_args_slow`'s hand-parsed kwnames, not PyO3 `FunctionDescription`.
 
 ## Hard Rules (learned from bugs found in review)
@@ -101,6 +104,9 @@ docs/guides/                  # user-facing guides (faster-json-in-python-servic
 - **Any new recursion must go through the depth/stack checks** (`Parser::enter`, `Serializer::nest_error`): a recursion step without them can overflow a small thread stack (SIGSEGV). tests/test_hardening.py runs every nesting kind in 32-128 KiB threads.
 - Keep the module GIL-only (no free-threading declaration) until borrowed list/dict iteration is audited.
 - `panic = "abort"` is set: a panic kills the interpreter, so do not `unwrap` on Python-derived data.
+
+### Command line (`python/rjson/tool.py`)
+- Output must stay byte-identical to `python -m json.tool` for every shared option (tests/test_cli.py runs both); json.tool's `json.dumps` arguments map to rjson's in `_dump_opts`. Keep its imports light (startup is most of a small file's time): `typing`/`shutil`/`tempfile` only under `TYPE_CHECKING` or where used.
 
 ## Development Workflow
 

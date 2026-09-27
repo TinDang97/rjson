@@ -41,6 +41,10 @@ requires-python = ">=3.10"
 dependencies = [
 ]
 
+[project.scripts]
+# A faster `python -m json.tool` (also `python -m rjson`).
+rjson = "rjson.tool:run"
+
 [project.urls]
 Homepage = "https://github.com/TinDang97/rjson"
 Documentation = "https://github.com/TinDang97/rjson#usage"
@@ -54,6 +58,10 @@ Issues = "https://github.com/TinDang97/rjson/issues"
 # project); the import name stays `rjson`, taken from the cdylib name in
 # Cargo.toml ([lib] name).
 features = ["pyo3/extension-module"]
+# Mixed layout: python/rjson/ (package __init__, the CLI in tool.py, type
+# stubs) around the extension, installed as rjson/rjson.*.so.
+python-source = "python"
+module-name = "rjson.rjson"
 # `compatibility = "linux"` produced plain `linux_x86_64` wheels, which PyPI
 # rejects. Leave it unset so maturin auditwheel-checks and tags the highest
 # manylinux policy the binary satisfies. Release wheels (.github/workflows/

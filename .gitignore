@@ -15,3 +15,7 @@ target/
 
 # Benchmark corpora (benches/fetch_corpus.sh)
 benches/data/
+
+# maturin develop copies the extension into the package source
+python/rjson/*.so
+python/rjson/*.pyd

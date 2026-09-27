@@ -6,18 +6,20 @@ Install with `pip install pyrjson` (not `rjson`, an unrelated package), then `im
 
 API:
 - `rjson.loads(data, *, lenient=False)`: `data` is `str`, `bytes`, `bytearray` or `memoryview`. `lenient=True` accepts exactly what `json.loads` accepts (NaN/Infinity, BOM, lone surrogates).
-- `rjson.dumps(obj, *, default=None, passthrough=0, non_str_keys=False, indent=None, sort_keys=False) -> bytes`: UTF-8, same bytes as `orjson.dumps(obj)`; `indent=2`/`sort_keys=True` match orjson's `OPT_INDENT_2`/`OPT_SORT_KEYS`. Serializes `datetime`, `date`, `time`, `uuid.UUID`, dataclasses and `Enum` natively.
+- `rjson.dumps(obj, *, default=None, passthrough=0, non_str_keys=False, indent=None, separators=None, sort_keys=False, ensure_ascii=False, allow_nan=False) -> bytes`: UTF-8, same bytes as `orjson.dumps(obj)`; `indent=2`/`sort_keys=True` match orjson's `OPT_INDENT_2`/`OPT_SORT_KEYS`; `indent` (int or str), `separators`, `ensure_ascii`, `allow_nan` work as in `json.dumps` (defaults: compact, non-ASCII kept, NaN raises). Serializes `datetime`, `date`, `time`, `uuid.UUID`, dataclasses and `Enum` natively.
 - `rjson.dumps_str(...) -> str`: same JSON as a `str` (like `json.dumps(obj, ensure_ascii=False, separators=(",", ":"))`).
 - `rjson.JSONDecodeError` is `json.JSONDecodeError`; `rjson.JSONEncodeError` subclasses both `TypeError` and `ValueError`.
 - `passthrough=rjson.PASSTHROUGH_DATETIME | ...` corresponds to orjson's `OPT_PASSTHROUGH_*`; `non_str_keys=True` to `OPT_NON_STR_KEYS`.
+- Command line: `rjson` / `python -m rjson` is a drop-in, faster `python -m json.tool` (same options and output) and JSON beautifier: `rjson in.json out.json`, `--compact`, `--tab`, `--sort-keys`, `--json-lines`, `-i/--in-place FILE...`, `--check FILE...` (CI: exit 1 if unformatted), `--validate FILE...`, `--color`. From Python: `rjson.tool.beautify(text, indent=4, ...)`.
 
 Migrating code (find-and-replace):
 - `orjson.loads(x)` / `json.loads(x)` → `rjson.loads(x)`
 - `orjson.dumps(x)` → `rjson.dumps(x)`; `orjson.dumps(x).decode()` → `rjson.dumps_str(x)`
 - `json.dumps(x).encode()` → `rjson.dumps(x)`
 - `orjson.dumps(x, default=f)` → `rjson.dumps(x, default=f)`
-- `orjson.dumps(x, option=OPT_INDENT_2 | OPT_SORT_KEYS)` → `rjson.dumps(x, indent=2, sort_keys=True)` (same bytes); `json.dumps(x, indent=4, sort_keys=True)` → `rjson.dumps_str(x, indent=4, sort_keys=True)`
-- Not supported yet: orjson's other `option=` flags (`OPT_SERIALIZE_NUMPY`, `OPT_APPEND_NEWLINE`, `OPT_OMIT_MICROSECONDS`, ...); NaN/Infinity in `dumps` raise. Not supported: PyPy, free-threaded CPython builds. Keep orjson or `json` for those calls.
+- `orjson.dumps(x, option=OPT_INDENT_2 | OPT_SORT_KEYS)` → `rjson.dumps(x, indent=2, sort_keys=True)` (same bytes); `json.dumps(x, indent=4, sort_keys=True)` → `rjson.dumps_str(x, indent=4, sort_keys=True, ensure_ascii=True)`; `json.dumps(x)` → `rjson.dumps_str(x, separators=(", ", ": "), ensure_ascii=True, allow_nan=True)`
+- `python -m json.tool ...` → `rjson ...`
+- Not supported yet: orjson's other `option=` flags (`OPT_SERIALIZE_NUMPY`, `OPT_APPEND_NEWLINE`, `OPT_OMIT_MICROSECONDS`, ...); NaN/Infinity in `dumps` raise unless `allow_nan=True`. Not supported: PyPy, free-threaded CPython builds. Keep orjson or `json` for those calls.
 
 ## Docs
 

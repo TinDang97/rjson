@@ -1,4 +1,4 @@
-"""Type stubs for rjson (installed as ``rjson/__init__.pyi`` next to ``py.typed``)."""
+"""Type stubs for rjson (``rjson/__init__.pyi`` next to ``py.typed``)."""
 
 from collections.abc import Callable
 from json import JSONDecodeError as JSONDecodeError
@@ -45,13 +45,18 @@ def dumps(
     default: Callable[[Any], Any] | None = None,
     passthrough: int | None = 0,
     non_str_keys: bool = False,
-    indent: int | None = None,
+    indent: int | str | None = None,
+    separators: tuple[str, str] | None = None,
     sort_keys: bool = False,
+    ensure_ascii: bool = False,
+    allow_nan: bool = False,
 ) -> bytes:
     """Serialize to UTF-8 JSON bytes (compact unless indent is given); raises JSONEncodeError.
 
     indent=2 and sort_keys=True give the same bytes as orjson's OPT_INDENT_2 and
-    OPT_SORT_KEYS; other indent widths follow json.dumps(indent=n).
+    OPT_SORT_KEYS. indent (int or str such as "\t"), separators, ensure_ascii and
+    allow_nan work as in json.dumps, except that the defaults stay compact,
+    non-ASCII is kept and NaN/Infinity raise.
 
     Besides JSON types, serializes datetime/date/time (RFC 3339), uuid.UUID,
     dataclasses and Enum members, like orjson.
@@ -61,6 +66,10 @@ def dumps(
     passthrough: PASSTHROUGH_* flags; those types go to default instead.
     non_str_keys: allow int, float, bool, None, Enum, datetime/date/time and UUID
     dict keys (int/float/bool/None written as json.dumps writes them).
+    separators: (item_separator, key_separator); with an indent the default is
+    (",", ": "), without one (",", ":").
+    ensure_ascii: write non-ASCII characters (and DEL) as \\uXXXX escapes.
+    allow_nan: write NaN/Infinity/-Infinity (as json does) instead of raising.
     """
 
 def dumps_str(
@@ -70,8 +79,11 @@ def dumps_str(
     default: Callable[[Any], Any] | None = None,
     passthrough: int | None = 0,
     non_str_keys: bool = False,
-    indent: int | None = None,
+    indent: int | str | None = None,
+    separators: tuple[str, str] | None = None,
     sort_keys: bool = False,
+    ensure_ascii: bool = False,
+    allow_nan: bool = False,
 ) -> str:
     """Serialize to a JSON str (non-ASCII kept as-is; compact unless indent is given); raises JSONEncodeError."""
 
@@ -82,7 +94,10 @@ def dumps_bytes(
     default: Callable[[Any], Any] | None = None,
     passthrough: int | None = 0,
     non_str_keys: bool = False,
-    indent: int | None = None,
+    indent: int | str | None = None,
+    separators: tuple[str, str] | None = None,
     sort_keys: bool = False,
+    ensure_ascii: bool = False,
+    allow_nan: bool = False,
 ) -> bytes:
     """Alias of dumps."""

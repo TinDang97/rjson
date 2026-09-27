@@ -1158,7 +1158,7 @@ class TestModuleSurface:
     def test_stub_matches_runtime(self):
         import ast
 
-        stub = REPO_ROOT / "rjson.pyi"
+        stub = REPO_ROOT / "python" / "rjson" / "__init__.pyi"
         tree = ast.parse(stub.read_text())
         defined = set()
         stub_all = None
