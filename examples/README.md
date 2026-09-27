@@ -7,6 +7,8 @@ runnable. `tests/test_examples.py` exercises all of them.
 | file | what it shows | run it |
 |---|---|---|
 | [`fastapi_app.py`](fastapi_app.py) | `RJSONResponse` (rjson-rendered `JSONResponse`; datetime/UUID/Enum native, a fallback for Decimal/models/dataclasses), `RJSONRoute` (request bodies parsed by `rjson.loads`, FastAPI's 422 errors unchanged), `json_body` dependency (400 with position / 415 on wrong content type) | `python examples/fastapi_app.py` (needs `fastapi`, `httpx`) |
+| [`django_json.py`](django_json.py) | `RJSONResponse` (a `JsonResponse` rendered by rjson, Django's `safe=` kept; datetime/UUID/Enum native, a fallback for Decimal/sets/dataclasses), `loads_body` for `request.body` (invalid JSON becomes a 400 with message, line, column and position); no side effects on import | `python examples/django_json.py` (needs `django`) |
+| [`flask_json.py`](flask_json.py) | `RJSONProvider` (Flask `JSONProvider`: `jsonify` and dict returns rendered by `rjson.dumps_str`, request JSON parsed by `rjson.loads`), the same fallback, 400/415/422 handling for request bodies | `python examples/flask_json.py` (needs `flask`) |
 | [`json_logging.py`](json_logging.py) | `JSONFormatter` for `logging` (one JSON object per line, never raises, stringifies unsupported extras, replaces lone surrogates), `write_ndjson` / `read_ndjson` with blank-line handling and per-line errors | `python examples/json_logging.py` |
 | [`codec.py`](codec.py) | bytes codec for Redis/Kafka: schema/version envelope with migrations, round-tripping datetime/UUID/Decimal/set/bytes/Enum/dataclass via registered types, Kafka serializer/deserializer callables (tombstone-safe), optional zstd compression above 1 KB (`compress="zstd"`) | `python examples/codec.py` |
 
