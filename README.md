@@ -449,6 +449,11 @@ self-tested at import (`CLAUDE.md`); the full review is in
 [docs/PERFORMANCE_REVIEW.md](https://github.com/TinDang97/rjson/blob/main/docs/PERFORMANCE_REVIEW.md).
 Reproduce with `python benches/why_faster.py` (valgrind for the instruction counts).
 
+**The full design, stage by stage:** [docs/ARCHITECTURE.md](https://github.com/TinDang97/rjson/blob/main/docs/ARCHITECTURE.md) walks both pipelines
+function by function (input handling, the key cache, number parsing, string decoding, the
+output-buffer policy, escaping kernels, the dict walk, native types, guarded mode and the
+safety checks), with the reason and the measured effect of each choice.
+
 ## Contributing
 
 Bug reports and pull requests are welcome. [CONTRIBUTING.md](https://github.com/TinDang97/rjson/blob/main/CONTRIBUTING.md) covers the
@@ -470,7 +475,7 @@ maturin develop --release && python -m pytest tests -q
 | `python/rjson/` | package: `__init__.py`, the command line (`tool.py`, `__main__.py`), type stubs (`__init__.pyi`) |
 | `examples/` | FastAPI, Django, Flask, logging/NDJSON and Redis/Kafka integrations (tested) |
 | `benches/` | `corpus_benchmark.py` (reference), `showcase.py` (vs orjson on production shapes), `production_benchmark.py` (production workloads), `examples_benchmark.py` (the examples on rjson vs json vs orjson), `cli_benchmark.py` (the command line vs `json.tool`), `why_faster.py` (each design difference, measured), `perf_gate.py`, `make_charts.py` / `make_showcase_charts.py` / `make_demo_svg.py` (README charts, demo), `demo.py` |
-| `docs/` | showcase, performance review, production readiness report, async guide |
+| `docs/` | architecture, showcase, performance review, production readiness report, async guide |
 
 <details>
 <summary>Troubleshooting source builds</summary>

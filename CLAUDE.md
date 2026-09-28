@@ -49,6 +49,7 @@ benches/make_showcase_charts.py # README showcase chart + architecture diagram (
 scripts/build_pgo.sh, scripts/pgo_train.py   # PGO wheel build; training is synthetic, disjoint from the benchmark
 .github/workflows/            # ci.yml (clippy + tests + ASan job), wheels.yml (PGO wheels; on a v* tag: provenance + PyPI trusted publishing), perf.yml (perf gate, label `perf`)
                               # actions pinned to commit SHAs (Dependabot bumps them); SECURITY.md, CHANGELOG.md at the root
+docs/ARCHITECTURE.md          # design deep-dive (both pipelines, reasons, measured effects); update when a design changes
 docs/PERFORMANCE_REVIEW.md    # review findings, results, ranked roadmap
 docs/PRODUCTION_READINESS.md  # production workloads report, migration, adoption blockers
 docs/ASYNC.md                 # asyncio/threads guidance, free-threading/subinterpreter roadmap
