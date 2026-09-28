@@ -1,0 +1,61 @@
+{
+  "python": "3.13.12",
+  "rjson": "0.3.0",
+  "orjson": "3.12.0",
+  "loads_memory": {
+    "rjson": {
+      "peak_mb": 84.62890625,
+      "time_s": 0.6775194030000193
+    },
+    "orjson": {
+      "peak_mb": 183.44140625,
+      "time_s": 1.073273683000025
+    }
+  },
+  "dumps_str": {
+    "rjson": {
+      "peak_alloc_kb": 1947.373046875,
+      "time_us": 297.4890937501584
+    },
+    "orjson": {
+      "peak_alloc_kb": 3242.9248046875,
+      "time_us": 478.2123906235114
+    }
+  },
+  "escaping": {
+    "rjson": {
+      "gb_per_s": 3.3983790165821404,
+      "time_us": 294.2561718750625
+    },
+    "orjson": {
+      "gb_per_s": 0.9487999424785405,
+      "time_us": 1053.956640625131
+    }
+  },
+  "datetimes": {
+    "rjson": {
+      "ns_per_datetime": 28.06784218751801
+    },
+    "orjson": {
+      "ns_per_datetime": 95.29992109369445
+    }
+  },
+  "instructions": {
+    "dumps small dict": {
+      "rjson": 2064.8715,
+      "orjson": 2472.5545
+    },
+    "loads small dict": {
+      "rjson": 4554.725,
+      "orjson": 5024.673
+    },
+    "dumps twitter.json": {
+      "rjson": 1999202.2,
+      "orjson": 3174096.3
+    },
+    "loads twitter.json": {
+      "rjson": 10977607.4,
+      "orjson": 13082159.6
+    }
+  }
+}

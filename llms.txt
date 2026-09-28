@@ -24,6 +24,7 @@ Migrating code (find-and-replace):
 ## Docs
 
 - [README](https://github.com/TinDang97/rjson/blob/main/README.md): usage, full API table, migration guide, FastAPI integration, FAQ
+- [Architecture](https://github.com/TinDang97/rjson/blob/main/docs/ARCHITECTURE.md): how loads and dumps work stage by stage, why each design choice, measured effect of each, safety mechanisms
 - [Showcase: rjson vs orjson](https://github.com/TinDang97/rjson/blob/main/docs/SHOWCASE.md): 22 production-shaped workloads, method, and where rjson is not faster
 - [Production readiness](https://github.com/TinDang97/rjson/blob/main/docs/PRODUCTION_READINESS.md): workloads, memory, migration blockers
 - [Async and threads](https://github.com/TinDang97/rjson/blob/main/docs/ASYNC.md): asyncio, uvloop, thread guidance

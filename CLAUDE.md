@@ -39,6 +39,8 @@ benches/production_benchmark.py, prod_workloads.py   # production-shaped workloa
 benches/fetch_corpus.sh       # download the corpora (sha256-pinned) into benches/data/
 benches/examples_benchmark.py # examples/ as written vs the same code on json/orjson (shim), end to end
 benches/cli_benchmark.py      # rjson CLI vs python -m json.tool, whole processes (docs/cli-benchmark-results.json)
+benches/why_faster.py         # one experiment per design difference vs orjson (memory, escaping, datetimes, str, instructions);
+                              # README "Why it is faster" table, docs/why-faster-results.json; cites orjson 3.12.0 source
 benches/showcase.py           # head-to-head vs orjson on production-shaped workloads (docs/SHOWCASE.md); --fresh: new-process allocator effect
 benches/perf_gate.py          # compare base/head benchmark runs, fail on >5% geomean regression
 benches/make_charts.py        # README charts (docs/img/*.svg) + table from a --json --output-json run
@@ -47,6 +49,7 @@ benches/make_showcase_charts.py # README showcase chart + architecture diagram (
 scripts/build_pgo.sh, scripts/pgo_train.py   # PGO wheel build; training is synthetic, disjoint from the benchmark
 .github/workflows/            # ci.yml (clippy + tests + ASan job), wheels.yml (PGO wheels; on a v* tag: provenance + PyPI trusted publishing), perf.yml (perf gate, label `perf`)
                               # actions pinned to commit SHAs (Dependabot bumps them); SECURITY.md, CHANGELOG.md at the root
+docs/ARCHITECTURE.md          # design deep-dive (both pipelines, reasons, measured effects); update when a design changes
 docs/PERFORMANCE_REVIEW.md    # review findings, results, ranked roadmap
 docs/PRODUCTION_READINESS.md  # production workloads report, migration, adoption blockers
 docs/ASYNC.md                 # asyncio/threads guidance, free-threading/subinterpreter roadmap
