@@ -7,6 +7,8 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-28
+
 ### Added
 - `rjson` command line (also `python -m rjson` / `python -m rjson.tool`): a JSON
   beautifier and drop-in `python -m json.tool` with the same options and byte-identical
@@ -17,15 +19,15 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
 - `dumps`/`dumps_str`: `json.dumps`'s `separators=`, `ensure_ascii=` and `allow_nan=`, and
   a str `indent=` (e.g. `"\t"`), each with `json.dumps`'s output (differential tests). The
   defaults are unchanged (compact, non-ASCII kept, NaN raises).
+- Django (`examples/django_json.py`: `JsonResponse` subclass, request-body parsing) and
+  Flask (`examples/flask_json.py`: `JSONProvider`) integration examples (#27, #29, thanks
+  @HarshRajSinghania), with tests; README section with copy-paste snippets.
 
 ### Changed
 - `dumps_str` with `indent=`/`sort_keys=` now keeps lone surrogates, as `json.dumps` and
   compact `dumps_str` do (it raised `UnicodeEncodeError`).
 - The package is a mixed Python/Rust layout (`python/rjson/`); the type stubs moved from
   `rjson.pyi` to `python/rjson/__init__.pyi`. Installed files are the same plus the CLI.
-- Django (`examples/django_json.py`: `JsonResponse` subclass, request-body parsing) and
-  Flask (`examples/flask_json.py`: `JSONProvider`) integration examples (#27, #29, thanks
-  @HarshRajSinghania), with tests; README section with copy-paste snippets.
 
 ## [0.2.0] - 2026-09-27
 
@@ -111,7 +113,8 @@ Tagged, not published to PyPI (see 0.1.1); everything below ships in 0.1.1.
   output buffer sizing, and fewer UTF-8 copies attached to strings (#10).
   Current numbers: [docs/PERFORMANCE_REVIEW.md](docs/PERFORMANCE_REVIEW.md).
 
-[Unreleased]: https://github.com/TinDang97/rjson/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/TinDang97/rjson/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/TinDang97/rjson/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/TinDang97/rjson/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/TinDang97/rjson/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/TinDang97/rjson/releases/tag/v0.1.0
