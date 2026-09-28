@@ -267,8 +267,11 @@ pub fn init(py: Python<'_>) {
 /// `build.rs`) and enabled only if an init-time self-test over dicts with
 /// str keys, other keys and deleted entries matches `PyDict_Next`. Split
 /// tables (`ma_values != NULL`, e.g. instance dicts) use `PyDict_Next`.
+///
+/// `loads` uses the same layout to fill cloned template dicts (the shape
+/// cache in parser.rs), so this self-test gates that too.
 #[cfg(rjson_dict_direct)]
-mod dictiter {
+pub(crate) mod dictiter {
     use pyo3::ffi;
 
     /// `struct _dictkeysobject` up to `dk_indices` (CPython 3.11-3.13).

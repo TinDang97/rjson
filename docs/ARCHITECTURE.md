@@ -107,7 +107,7 @@ flowchart TD
   P -->|"array"| A["parse_array: items pushed on the value stack"]
   P -->|"string"| S["parse_str: SIMD scan, ASCII memcpy or<br/>UTF-8 → UCS1/2/4 directly"]
   P -->|"number"| N["parse_number: fast path → Eisel-Lemire → fast_float"]
-  O -->|"}"| D["dict created at exact size"]
+  O -->|"}"| D["dict: copy of a shape template,<br/>or created at exact size"]
   A -->|"]"| L["list created at exact size"]
 ```
 
@@ -149,6 +149,38 @@ direct-mapped table of 2,048 entries holding keys of up to 64 bytes:
 
 Measured at 25–30% of `loads` time on record-shaped documents **[R]**. It is also why a
 300k-record result takes 193 MB instead of 420 MB **[R]**.
+
+#### Shapes: dicts copied from a template
+
+Because the key cache returns the same key objects every time, an object's *shape* (its
+keys, in order) is just the sequence of its key pointers. Building a record's dict one
+`PyDict_SetItem` per key still costs a table allocation, and a probe and entry write per key
+(about 56% of `loads` time on 8-key records **[R]**). The shape cache (`shaped_dict`) skips
+that for shapes that repeat:
+
+- `SHAPES` is a direct-mapped table of 64 slots, indexed by a fold of the key pointers.
+  Objects of 1–64 keys go through it.
+- A shape seen twice in a row in its slot becomes the slot's *template*: a dict with those
+  keys and `None` values. It holds references to its keys, so their pointers stay unique.
+- A later object of that shape (confirmed pointer by pointer against the template's
+  entries) is built by `PyDict_Copy(template)`, which clones the key table in one allocation
+  and a `memcpy`. Then the values are written into the copy's entries directly, and the
+  dict is GC-tracked if a value is a container, as `PyDict_SetItem` would do.
+- One object of another shape records itself as the slot's candidate but doesn't evict the
+  template. Duplicate keys never become a template.
+
+Writing the entries uses the private dict layout that `dumps` already reads (§4.6), so it
+has the same build gate (3.11–3.13) and import-time self-test, plus a check of its own
+(`shape_self_test`). 3.10 and 3.14 use the plain path. Measured on 3.11–3.13 **[R]**:
+
+- **Records:** 15–40% faster.
+- **twitter.json:** 9–13% faster.
+- **One `loads` per log line:** 8–14% faster, because the cache persists across calls.
+- **Every object a new shape (worst case):** at most 2% slower.
+
+On 3.11/3.12, results made of records with more than 8 keys also take about 16% less memory
+(each dict is 27–29% smaller), because copies have the compact str-key table that
+`json.loads`'s dicts have.
 
 ### 3.4 Strings
 
@@ -403,7 +435,7 @@ nesting kind in 32–128 KiB threads.
 ### 6.3 Private CPython internals, gated and self-tested
 
 rjson reads a few structures CPython doesn't promise to keep stable: dict entries
-(3.11–3.13), the str state bitfield (3.14), int digits, `_PyDict_FromItems` (3.13), and
+(3.11–3.13; read by `dumps`, written into fresh template copies by `loads`' shape cache), the str state bitfield (3.14), int digits, `_PyDict_FromItems` (3.13), and
 `_PyBytes_Resize`/`_PyDict_NewPresized`. Each one is:
 
 1. compiled in only for the versions whose headers were checked (`#[cfg(Py_3_x)]`, cfgs from
@@ -456,11 +488,11 @@ This rule exists because an early version hard-coded the str data offset: it cra
 
 ## 9. Reading the code
 
-A suggested order, about 8,700 lines of Rust in total:
+A suggested order, about 9,000 lines of Rust in total:
 
 1. `src/entry.rs`: argument handling and the fast paths into the two directions.
-2. `src/parser.rs` from `parse_value`: then `parse_object`, `cached_key`, `parse_str`,
-   `parse_number_fast`.
+2. `src/parser.rs` from `parse_value`: then `parse_object`, `cached_key`, `shaped_dict`,
+   `parse_str`, `parse_number_fast`.
 3. `src/ser.rs` from `Serializer::ser`: then `write_str`, `ser_dict_inner`, `list_scalars`,
    `Out::reserve`/`into_object`, and the escape kernels near the top.
 4. `src/native.rs` for datetime/UUID/dataclass/Enum, and `src/stack.rs` for the stack bounds.

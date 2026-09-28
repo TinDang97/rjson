@@ -7,6 +7,13 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
 
 ## [Unreleased]
 
+### Changed
+- `loads` is faster on documents whose objects repeat the same keys (API responses, records,
+  logs) on CPython 3.11–3.13: a shape cache builds each such dict by copying a template dict
+  and filling in the values. Records are 15–40% faster, twitter.json 9–13%; documents
+  without repeated shapes are unchanged (at most 2% slower in the worst case). On
+  3.11/3.12, results made of objects with more than 8 keys also take about 16% less memory.
+
 ## [0.3.0] - 2026-09-28
 
 ### Added

@@ -150,6 +150,26 @@ Second round (branch `wip-loads`, results in §1):
 9. **Numbers.** A one-pass fast path for `-?d{1,15}(.d{1,15})?([eE]…)?` with at most 19 digits and a cut-down inlined Eisel-Lemire; every other shape and every error falls back to the unchanged general parser. Verified against `float()` on canada's 111k numbers and ~1.5M random shapes (float_array 1.15–1.22 → 0.90–0.94).
 10. **Allocation.** On 3.13, dicts are built with `_PyDict_FromItems` (exported but private; gated to 3.13), which presizes and uses the compact str-only key table. Lists get a `PyMem_Malloc` item array on `PyList_New(0)`, skipping calloc zeroing; fast-path floats use `PyObject_Malloc` + `PyObject_Init` on 3.13+.
 11. **Key cache and bounds checks.** One folded multiply for the key hash, 16-byte compares instead of `memcmp`, and `peek()` without bounds checks by relying on the NUL byte after str/bytes/bytearray data (memoryview input is copied with a NUL appended). valgrind memcheck is clean.
+12. **Shape cache** (3.11–3.13; design in ARCHITECTURE.md §3.3). Building dicts was the largest remaining `loads` cost on records. Parsing 20k 8-key records took 8.4 ms, the same values as arrays 3.7 ms, so keys and dicts were 56% of the time. The key cache returns the same key objects, so an object's key pointers identify its shape. A shape that repeats gets a template dict (keys → `None`); later objects of that shape are `PyDict_Copy(template)` (one allocation plus a `memcpy` of the key table) with the values written into the copy's entries, using the layout `dumps` already reads and its self-test. The table has 64 slots, and a shape becomes a slot's template the second time it is seen in a row.
+
+    Plain release builds, rjson before → after, best of 5 interleaved process runs (`records_*`: synthetic records; `log_lines`: 3,000 one-line documents, one `loads` each; `unique_shapes`: every object a random key set, the worst case):
+
+    | case | 3.11 | 3.12 | 3.13 |
+    |---|---|---|---|
+    | records, 3 keys | 0.93 | 0.81 | 0.83 |
+    | records, 8 keys | 0.83 | 0.80 | 0.85 |
+    | records, 30 keys | 0.60 | 0.63 | 0.76 |
+    | nested orders | 0.82 | 0.84 | 0.88 |
+    | log_lines | 0.92 | 0.86 | 0.89 |
+    | twitter | 0.91 | 0.87 | 0.91 |
+    | citm_catalog / canada / github | 0.99–1.01 | 0.98–0.99 | 0.96–1.00 |
+    | unique_shapes | 0.97 | 0.98 | 1.02 |
+
+    Against orjson (`corpus_benchmark.py --repeat 7`, 3.13 plain build, best of 2 runs), the `loads` geomean went from 0.85 to 0.76: twitter 0.87 → 0.64, github 0.74 → 0.55, records 0.87 → 0.68, small_dict 0.82 → 0.69, citm 0.94 → 0.84. The other cases have no dicts and moved within noise. The README table (PGO) predates this change.
+
+    Memory: copies have the compact str-key table that `json.loads`'s dicts have. On 3.11/3.12 objects with more than 8 keys used to get `_PyDict_NewPresized`'s generic table; results with 12 and 30 keys per record are now 16% smaller (a 12-key dict: 632 → 464 B). Nothing is larger than before.
+
+    Tried first and dropped: copying the template and then setting each value with `PyDict_SetItem`, which was 7–9% faster on records but 8–15% slower on twitter/citm/github; and a single-slot cache, which kept replacing its template on mixed documents (twitter/citm up to 13% slower).
 
 ### dumps (`src/ser.rs`)
 
