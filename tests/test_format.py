@@ -150,17 +150,29 @@ def test_errors_and_options():
         rjson.dumps({"a": object()}, indent=2)
     with pytest.raises(rjson.JSONEncodeError):
         rjson.dumps({1: 2}, sort_keys=True)  # non-str key without non_str_keys
-    with pytest.raises(TypeError, match="indent must be None or an int"):
-        rjson.dumps({}, indent="  ")
+    with pytest.raises(TypeError, match="indent must be None, an int or a str"):
+        rjson.dumps({}, indent=2.0)
     with pytest.raises(TypeError):
         rjson.dumps({}, indent=True)
     with pytest.raises(ValueError, match="between 0 and 1024"):
         rjson.dumps({}, indent=-1)
-    assert rjson.dumps({"b": 1, "a": 2}, indent=None, sort_keys=False) == b'{"b":1,"a":2}'
-    # Lone surrogates: dumps_str raises too when formatting (bytes first).
-    assert rjson.dumps_str("\ud800") == '"\ud800"'
+    with pytest.raises(TypeError, match="separators must be"):
+        rjson.dumps({}, separators=(",",))
+    with pytest.raises(TypeError, match="separators must be"):
+        rjson.dumps({}, separators=1)
+    with pytest.raises(TypeError, match="key_separator must be str"):
+        rjson.dumps({}, separators=(",", b":"))
     with pytest.raises(UnicodeEncodeError):
-        rjson.dumps_str("\ud800", indent=2)
+        rjson.dumps({}, indent="\ud800")
+    assert rjson.dumps({"b": 1, "a": 2}, indent=None, sort_keys=False) == b'{"b":1,"a":2}'
+    assert rjson.dumps({"b": [1]}, separators=[",", ":"]) == b'{"b":[1]}'
+    # Lone surrogates: dumps (bytes) raises unless ensure_ascii escapes them;
+    # dumps_str keeps them when formatting too, as json.dumps does.
+    assert rjson.dumps_str("\ud800") == '"\ud800"'
+    assert rjson.dumps_str(["\ud800"], indent=2) == '[\n  "\ud800"\n]'
+    with pytest.raises(UnicodeEncodeError):
+        rjson.dumps("\ud800", indent=2)
+    assert rjson.dumps("\ud800", ensure_ascii=True) == b'"\\ud800"'
 
 
 def test_deep_nesting_limits_unchanged():
@@ -173,3 +185,98 @@ def test_deep_nesting_limits_unchanged():
         x = {"k": x}
     with pytest.raises(rjson.JSONEncodeError, match="nesting depth"):
         rjson.dumps(x, sort_keys=True)
+
+
+# json.dumps options (ensure_ascii, separators, str indent, allow_nan): output
+# equal to json.dumps with the same options (floats aside: rjson writes the
+# shortest form, json uses repr; both agree on NaN/Infinity and on ints).
+
+TEXT_CHARS = 'aZ "\\/\n\t\x00\x1f\x7f\x80é\xff日\uffff😀\U0010ffff\ud800\udfff'
+
+
+def rand_text(rng):
+    return "".join(rng.choice(TEXT_CHARS) for _ in range(rng.randint(0, 8)))
+
+
+def rand_json_doc(rng, depth=0):
+    k = rng.random()
+    if depth > 4 or k < 0.35:
+        return rng.choice([
+            None, True, False, rng.randint(-10**20, 10**20), rand_text(rng), "",
+            float("nan"), float("inf"), float("-inf"), 0.5, -2.0, [], {},
+        ])
+    if k < 0.65:
+        return [rand_json_doc(rng, depth + 1) for _ in range(rng.randint(0, 5))]
+    return {rand_text(rng): rand_json_doc(rng, depth + 1) for _ in range(rng.randint(0, 6))}
+
+
+JSON_OPTION_SETS = [
+    {"ensure_ascii": True},
+    {"ensure_ascii": True, "indent": 4},
+    {"ensure_ascii": False, "indent": "\t"},
+    {"ensure_ascii": True, "indent": "\t", "sort_keys": True},
+    {"ensure_ascii": False, "indent": None, "separators": (", ", ": ")},
+    {"ensure_ascii": True, "separators": (", ", ": "), "sort_keys": True},
+    {"ensure_ascii": False, "indent": 2, "separators": (" ,", " = ")},
+    {"ensure_ascii": True, "indent": "->", "separators": (";", "=")},
+    {"ensure_ascii": False, "indent": 0},
+    {"ensure_ascii": False, "indent": ""},
+    {"ensure_ascii": True, "separators": ("", "")},
+    {"ensure_ascii": False, "separators": ("é,", "日:"), "indent": 1},
+]
+
+
+@pytest.mark.parametrize("opts", JSON_OPTION_SETS, ids=repr)
+def test_json_dumps_options_match_json(opts):
+    rng = random.Random(repr(opts))
+    for _ in range(300):
+        doc = rand_json_doc(rng)
+        json_opts = dict(opts)
+        if opts.get("indent") is None:
+            # json's one-line default is (", ", ": "); rjson stays compact.
+            json_opts.setdefault("separators", (",", ":"))
+        # sort_keys: json sorts by Python's str order, code point order too.
+        want = json.dumps(doc, allow_nan=True, **json_opts)
+        got = rjson.dumps_str(doc, allow_nan=True, **opts)
+        assert got == want, (opts, doc)
+        if opts["ensure_ascii"]:
+            # ASCII output: dumps can encode lone surrogates too.
+            assert rjson.dumps(doc, allow_nan=True, **opts) == want.encode()
+
+
+def test_ensure_ascii_escapes():
+    assert rjson.dumps("é日😀\x7f\x7e", ensure_ascii=True) == b'"\\u00e9\\u65e5\\ud83d\\ude00\\u007f~"'
+    assert rjson.dumps_str({"ключ": "\ud83d\ude00"}, ensure_ascii=True) == '{"\\u043a\\u043b\\u044e\\u0447":"\\ud83d\\ude00"}'
+    assert rjson.dumps("x" * 100 + "é" + "y" * 100, ensure_ascii=True) == b'"' + b"x" * 100 + b"\\u00e9" + b"y" * 100 + b'"'
+    # Long non-ASCII strings take other encoder paths (UCS2/UCS4, Latin-1).
+    for s in ("é" * 5000, "日" * 5000, "😀" * 5000, "日" * 4999 + "\ud800"):
+        assert rjson.dumps(s, ensure_ascii=True) == json.dumps(s).encode()
+    assert rjson.dumps("abc", ensure_ascii=False) == b'"abc"'
+    assert rjson.dumps("é", ensure_ascii=0) == '"é"'.encode()
+
+
+def test_allow_nan():
+    doc = [float("nan"), float("inf"), float("-inf"), 1.5, {"x": float("nan")}]
+    assert rjson.dumps(doc, allow_nan=True) == b'[NaN,Infinity,-Infinity,1.5,{"x":NaN}]'
+    assert rjson.dumps_str(doc, allow_nan=True, indent=1) == json.dumps(doc, indent=1)
+    assert rjson.loads(rjson.dumps(doc, allow_nan=True), lenient=True)[1] == float("inf")
+    for v in (float("nan"), [1.0, float("inf")], {"a": float("-inf")}):
+        with pytest.raises(rjson.JSONEncodeError, match="non-finite"):
+            rjson.dumps(v)
+        with pytest.raises(rjson.JSONEncodeError):
+            rjson.dumps(v, allow_nan=False)
+    assert rjson.dumps({float("nan"): 1}, non_str_keys=True, allow_nan=True) == b'{"NaN":1}'
+
+
+def test_json_options_with_default_and_native_types():
+    class Money:
+        def __init__(self, v):
+            self.v = v
+
+    doc = {"é": Money(1), "at": dt.datetime(2024, 5, 1, tzinfo=dt.timezone.utc), "s": Shape.SQUARE}
+    out = rjson.dumps_str(doc, default=lambda o: {"v": o.v, "cur": "€"}, ensure_ascii=True,
+                          indent="\t", separators=(",", ":"), sort_keys=True)
+    assert out == (
+        '{\n\t"at":"2024-05-01T00:00:00+00:00",\n\t"s":"square",\n'
+        '\t"\\u00e9":{\n\t\t"cur":"\\u20ac",\n\t\t"v":1\n\t}\n}'
+    )

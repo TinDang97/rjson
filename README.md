@@ -18,6 +18,9 @@ mostly a find-and-replace ([migration guide](#migrating-from-json-or-orjson)).
   `Enum`; `dumps_str` returns a `str` directly.
 - **Hardened for untrusted input:** differential fuzzing against `json`, an
   AddressSanitizer CI build, and stack checks for deeply nested documents.
+- **A JSON beautifier on the command line:** `rjson` is a drop-in `python -m json.tool`
+  (same output) that is 2–10× faster on real files, with in-place formatting and a CI
+  `--check` ([command line](#command-line-json-beautifier)).
 - CPython 3.10–3.14 wheels for Linux (glibc and musl), macOS and Windows. MIT licensed.
 
 <img alt="Terminal: python benches/demo.py. rjson vs orjson with the same output: twitter.json loads 1.16x faster, twitter.json dumps 1.84x, github.json dumps 1.89x, 2k events with datetime and UUID 2.04x, twitter.json as str 1.77x." src="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/demo.svg" width="820">
@@ -136,8 +139,8 @@ rjson.dumps({"price": Decimal("9.99")}, default=str)             # convert the r
 | name | kind | notes |
 |---|---|---|
 | `loads(data, *, lenient=False)` | function → object | `data`: `str`, `bytes`, `bytearray` or `memoryview` (any layout) |
-| `dumps(obj, *, default=None, passthrough=0, non_str_keys=False, indent=None, sort_keys=False)` | function → `bytes` | UTF-8 JSON, like `orjson.dumps` |
-| `dumps_str(obj, *, default=None, passthrough=0, non_str_keys=False, indent=None, sort_keys=False)` | function → `str` | like `json.dumps(obj, ensure_ascii=False, separators=(",", ":"))` |
+| `dumps(obj, *, default=None, passthrough=0, non_str_keys=False, indent=None, separators=None, sort_keys=False, ensure_ascii=False, allow_nan=False)` | function → `bytes` | UTF-8 JSON, like `orjson.dumps` |
+| `dumps_str(...)` | function → `str` | same options; like `json.dumps(obj, ensure_ascii=False, separators=(",", ":"))` |
 | `dumps_bytes(...)` | function → `bytes` | alias of `dumps`, kept for compatibility |
 | `PASSTHROUGH_DATETIME`, `_UUID`, `_DATACLASS`, `_ENUM` | `int` flags | for `passthrough=`, combine with `\|` |
 | `JSONDecodeError` | exception | `json.JSONDecodeError` itself (a `ValueError`) |
@@ -175,9 +178,13 @@ The wheel ships type stubs (`py.typed`), so mypy and pyright check calls to rjso
   orjson's `OPT_INDENT_2` and `OPT_SORT_KEYS` (keys sorted by code point; dataclass fields
   keep their order); other widths (`indent=4`, `indent=0`) lay out like
   `json.dumps(indent=n)`. Compact calls pay nothing for them; the options themselves are
-  not yet as fast as orjson's (twitter.json: `sort_keys` 0.78×, `indent=2` 0.48×). With
-  either option, `dumps_str` raises `UnicodeEncodeError` on a lone surrogate, as `dumps`
-  does.
+  not yet as fast as orjson's (twitter.json: `sort_keys` 0.78×, `indent=2` 0.48×).
+- **`json.dumps` options:** `indent` also takes a str (`indent="\t"`), and `separators=`,
+  `ensure_ascii=True` (non-ASCII and DEL as `\uXXXX`, surrogate pairs above U+FFFF) and
+  `allow_nan=True` (`NaN`/`Infinity`/`-Infinity`) behave as in `json.dumps`, so any
+  `json.dumps` call has an exact equivalent (numbers aside, see floats below 1e-4). Only
+  the defaults differ: compact, non-ASCII kept, NaN raises. With `ensure_ascii=True`,
+  `dumps` also writes lone surrogates (as `\udXXX`, like `json`).
 - **`default=`:** called with each value rjson cannot serialize; its return value is
   serialized in its place (and passed to `default` again if still unsupported), as in
   `json.dumps` and orjson. Exceptions it raises propagate unchanged. It is not called for
@@ -191,6 +198,46 @@ The wheel ships type stubs (`py.typed`), so mypy and pyright check calls to rjso
   `UnicodeEncodeError` in `dumps`; `dumps_str` passes it through.
 - **Precision:** floats round-trip exactly (shortest representation, e.g. `1e+16`), and
   integers of any size are exact in both directions. `loads` accepts nesting up to 1024.
+
+## Command line: JSON beautifier
+
+`pip install pyrjson` also installs `rjson`, a faster drop-in for `python -m json.tool`: the
+same options and byte-for-byte the same output (checked against `json.tool` on the whole
+benchmark corpus), plus a formatter mode for files and CI.
+
+```console
+$ curl -s https://api.github.com/repos/TinDang97/rjson | rjson --sort-keys --no-ensure-ascii
+$ rjson data.json pretty.json            # beautify (indent 4, like json.tool)
+$ rjson --compact data.json min.json     # minify (also --minify)
+$ rjson --tab / --indent 2 / --no-indent # other layouts
+$ rjson --json-lines --compact < events.jsonl   # JSON Lines / NDJSON, streamed
+$ rjson -i --indent 2 config/*.json      # reformat files in place (only changed ones)
+$ rjson --check --indent 2 config/*.json # CI: exit 1 if a file is invalid or not formatted
+$ rjson --validate *.json                # exit 1 if a file is not valid JSON
+```
+
+Syntax colors on a terminal (`--color auto|always|never`; honors `NO_COLOR`,
+`FORCE_COLOR`, `PYTHON_COLORS`), NaN/Infinity accepted like `json.tool` (`--strict`
+rejects them), errors as `json.tool` prints them (JSON Lines errors name the input line),
+atomic in-place writes that keep file permissions. Also `python -m rjson` and
+`python -m rjson.tool`, and `rjson.tool.beautify(text, indent=4, ...)` from Python.
+
+End to end, process start included (CPython 3.13, median of 5; [`benches/cli_benchmark.py`](https://github.com/TinDang97/rjson/blob/main/benches/cli_benchmark.py),
+[results](https://github.com/TinDang97/rjson/blob/main/docs/cli-benchmark-results.json)):
+
+| input | `python -m json.tool` | `rjson` | speedup |
+|---|---|---|---|
+| github.json (55 KB) | 36 ms | 35 ms | 1.0× (process start dominates) |
+| twitter.json (0.6 MB) | 85 ms | 41 ms | 2.1× |
+| citm_catalog.json (1.7 MB) | 150 ms | 47 ms | 3.2× |
+| canada.json (2.2 MB, floats) | 380 ms | 69 ms | 5.5× |
+| 60 MB file, pretty-print | 4.5 s | 0.92 s | 4.9× |
+| 60 MB file, `--compact` | 4.0 s | 0.47 s | 8.5× |
+| 200k JSON Lines, `--compact` | 4.5 s | 0.45 s | 9.9× |
+
+The only output difference from `json.tool`: floats below 1e-4 are written in shortest form
+(`1e-7`; `json` writes `1e-07`, the same value). `json.tool --json-lines FILE` fails on
+CPython 3.13+ ("I/O operation on closed file"); `rjson --json-lines FILE` works.
 
 ## Migrating from `json` or orjson
 
@@ -208,7 +255,9 @@ Most code migrates with a find-and-replace:
 | `orjson.dumps(datetime/UUID/dataclass/Enum)` | the same bytes |
 | `json.dumps({1: "a", None: "b"})` / `orjson.dumps(obj, option=OPT_NON_STR_KEYS)` | `rjson.dumps(obj, non_str_keys=True)` (key text as `json` writes it) |
 | `orjson.dumps(obj, option=OPT_INDENT_2 \| OPT_SORT_KEYS)` | `rjson.dumps(obj, indent=2, sort_keys=True)` (same bytes) |
-| `json.dumps(obj, indent=4, sort_keys=True)` | `rjson.dumps_str(obj, indent=4, sort_keys=True)` (non-ASCII kept, like `ensure_ascii=False`) |
+| `json.dumps(obj, indent=4, sort_keys=True)` | `rjson.dumps_str(obj, indent=4, sort_keys=True, ensure_ascii=True)` (drop `ensure_ascii` to keep non-ASCII) |
+| `json.dumps(obj)` (all defaults) | `rjson.dumps_str(obj, separators=(", ", ": "), ensure_ascii=True, allow_nan=True)` (same text) |
+| `python -m json.tool` | `rjson` / `python -m rjson` (same options, same output; [command line](#command-line-json-beautifier)) |
 | `orjson.dumps(obj, option=OPT_PASSTHROUGH_DATETIME)` | `rjson.dumps(obj, passthrough=rjson.PASSTHROUGH_DATETIME)` (also `_UUID`, `_DATACLASS`, `_ENUM`) |
 | `json.dumps(obj, default=lambda o: o.isoformat())` for datetimes | `rjson.dumps(obj)` (the same text, except UTC offsets with a seconds part, which are rounded to the minute) |
 
@@ -216,7 +265,7 @@ What does **not** carry over yet, and how to handle it:
 
 | feature | status | workaround |
 |---|---|---|
-| NaN / Infinity | by design | `dumps` raises (`json` writes `NaN`, orjson `null`) |
+| NaN / Infinity | by design | `dumps` raises unless `allow_nan=True` (then `NaN`, as `json`; orjson writes `null`) |
 | floats below 1e-4 | by design | `1e-7`, same as orjson; `json` writes `1e-07` (same value, different bytes) |
 
 ### FastAPI
@@ -387,10 +436,10 @@ maturin develop --release && python -m pytest tests -q
 | `src/parser.rs`, `src/lemire.rs` | `loads` |
 | `src/ser.rs` | `dumps` / `dumps_str` |
 | `src/entry.rs`, `src/compat.rs` | C-API entry points, version-portable helpers |
-| `rjson.pyi` | type stubs |
 | `tests/` | pytest suites |
+| `python/rjson/` | package: `__init__.py`, the command line (`tool.py`, `__main__.py`), type stubs (`__init__.pyi`) |
 | `examples/` | FastAPI, Django, Flask, logging/NDJSON and Redis/Kafka integrations (tested) |
-| `benches/` | `corpus_benchmark.py` (reference), `showcase.py` (vs orjson on production shapes), `production_benchmark.py` (production workloads), `examples_benchmark.py` (the examples on rjson vs json vs orjson), `perf_gate.py`, `make_charts.py` / `make_showcase_charts.py` / `make_demo_svg.py` (README charts, demo), `demo.py` |
+| `benches/` | `corpus_benchmark.py` (reference), `showcase.py` (vs orjson on production shapes), `production_benchmark.py` (production workloads), `examples_benchmark.py` (the examples on rjson vs json vs orjson), `cli_benchmark.py` (the command line vs `json.tool`), `perf_gate.py`, `make_charts.py` / `make_showcase_charts.py` / `make_demo_svg.py` (README charts, demo), `demo.py` |
 | `docs/` | showcase, performance review, production readiness report, async guide |
 
 <details>

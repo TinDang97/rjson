@@ -1505,6 +1505,13 @@ pub struct Serializer {
     /// before the error message is built.
     err_obj: *mut ffi::PyObject,
     err_float: f64,
+    /// Bytes output of `dumps_formatted` for `dumps_str` or `ensure_ascii=`:
+    /// a lone surrogate is written as generalized UTF-8 (surrogatepass), which
+    /// `ascii_escape` escapes or `dumps_formatted` decodes back, as json
+    /// keeps it, instead of raising.
+    wtf8: bool,
+    /// `allow_nan=`.
+    allow_nan: bool,
     /// `default=` callable (borrowed from the call's arguments), or null.
     /// When set, unsupported objects are replaced by `default(obj)`.
     default: *mut ffi::PyObject,
@@ -1543,7 +1550,7 @@ impl Drop for Serializer {
 }
 
 impl Serializer {
-    unsafe fn new(str_mode: bool, opts: &DumpsOpts, guard: bool) -> Self {
+    unsafe fn new(str_mode: bool, opts: &DumpsOpts, guard: bool, wtf8: bool) -> Self {
         let default = opts.default;
         Serializer {
             buf: Out::new(str_mode),
@@ -1561,6 +1568,8 @@ impl Serializer {
             err_float: 0.0,
             sort: opts.sort_keys,
             slow_dicts: guard || !default.is_null() || opts.sort_keys,
+            wtf8,
+            allow_nan: opts.allow_nan,
         }
     }
 
@@ -1775,6 +1784,9 @@ impl Serializer {
     #[inline(always)]
     unsafe fn write_float(&mut self, p: Cur, v: f64, sep: u8, ns: usize) -> CurResult {
         if !v.is_finite() {
+            if self.allow_nan {
+                return self.write_nonfinite(p, v, sep, ns);
+            }
             self.err_float = v;
             return self.fail(SerError::NonFinite);
         }
@@ -1786,6 +1798,40 @@ impl Serializer {
         let b = &mut *(p.add(ns) as *mut zmij::Buffer);
         let n = b.format_finite(v).len();
         p.add(ns + n)
+    }
+
+    /// NaN or an infinity with `allow_nan=True`: json's `NaN`/`Infinity`/
+    /// `-Infinity`.
+    #[cold]
+    #[inline(never)]
+    unsafe fn write_nonfinite(&mut self, p: Cur, v: f64, sep: u8, ns: usize) -> CurResult {
+        let p = self.put_sep(p, sep, ns);
+        let text: &[u8] = if v.is_nan() {
+            b"NaN"
+        } else if v > 0.0 {
+            b"Infinity"
+        } else {
+            b"-Infinity"
+        };
+        let p = self.reserve(p, text.len());
+        ptr::copy_nonoverlapping(text.as_ptr(), p, text.len());
+        p.add(text.len())
+    }
+
+    /// `ensure_ascii=True`, bytes output, a string UTF-8 cannot encode (a
+    /// lone surrogate): written as generalized UTF-8 (`surrogatepass`), which
+    /// `ascii_escape` turns into `\udXXX` escapes like json.
+    #[cold]
+    #[inline(never)]
+    unsafe fn write_wtf8(&mut self, p: Cur, obj: *mut ffi::PyObject) -> CurResult {
+        ffi::PyErr_Clear();
+        let b = ffi::PyUnicode_AsEncodedString(obj, c"utf-8".as_ptr(), c"surrogatepass".as_ptr());
+        if b.is_null() {
+            return self.fail(SerError::PyErrSet);
+        }
+        let q = self.write_utf8(p, ffi::PyBytes_AsString(b) as *const u8, ffi::PyBytes_Size(b) as usize, 0, 0);
+        ffi::Py_DECREF(b);
+        q
     }
 
     // ----- strings -----
@@ -1913,6 +1959,7 @@ impl Serializer {
             // often serialized again: let CPython attach the UTF-8 copy.
             let (src, n) = match utf8_of(obj) {
                 Ok(v) => v,
+                Err(_) if self.wtf8 => return self.write_wtf8(p, obj),
                 Err(e) => return self.fail(e),
             };
             return self.write_utf8(p, src, n, 0, 0);
@@ -1951,6 +1998,7 @@ impl Serializer {
             None => {
                 let (src, n) = match utf8_of(obj) {
                     Ok(v) => v,
+                    Err(_) if self.wtf8 => return self.write_wtf8(q, obj),
                     Err(e) => return self.fail(e),
                 };
                 self.write_utf8(q, src, n, 0, 0)
@@ -3252,10 +3300,24 @@ pub struct DumpsOpts {
     pub passthrough: u32,
     /// `non_str_keys=`.
     pub non_str_keys: bool,
-    /// `indent=`: spaces per level, or -1 for compact output.
-    pub indent: i32,
+    /// `indent=` / `separators=` layout, or None for compact output.
+    pub layout: Option<Box<Layout>>,
     /// `sort_keys=`.
     pub sort_keys: bool,
+    /// `ensure_ascii=`: non-ASCII characters (and DEL) as `\uXXXX`, like json.
+    pub ensure_ascii: bool,
+    /// `allow_nan=`: NaN/Infinity/-Infinity written as json writes them.
+    pub allow_nan: bool,
+}
+
+/// Whitespace layout of `dumps_formatted` (json's `indent` + `separators`).
+pub struct Layout {
+    /// Indent unit per level (UTF-8), or None for one line.
+    pub indent: Option<Vec<u8>>,
+    /// Written after each item but the last (before the newline if indented).
+    pub item_sep: Vec<u8>,
+    /// Written between a key and its value.
+    pub key_sep: Vec<u8>,
 }
 
 impl DumpsOpts {
@@ -3263,14 +3325,17 @@ impl DumpsOpts {
         default: ptr::null_mut(),
         passthrough: 0,
         non_str_keys: false,
-        indent: -1,
+        layout: None,
         sort_keys: false,
+        ensure_ascii: false,
+        allow_nan: false,
     };
 
-    /// `indent=` or `sort_keys=` given: output goes through `dumps_formatted`.
+    /// A layout, `sort_keys=` or `ensure_ascii=` given: output goes through
+    /// `dumps_formatted`.
     #[inline(always)]
     fn formatted(&self) -> bool {
-        self.indent >= 0 || self.sort_keys
+        self.layout.is_some() || self.sort_keys || self.ensure_ascii
     }
 }
 
@@ -3405,15 +3470,15 @@ pub unsafe fn dumps_raw(
     if opts.formatted() {
         return dumps_formatted(py, obj, as_str, opts);
     }
-    dumps_compact(py, obj, as_str, opts)
+    dumps_compact(py, obj, as_str, opts, false)
 }
 
-/// `indent=` / `sort_keys=`: serialized as bytes (keys sorted in place per
-/// dict), then indented, then decoded for `dumps_str`. Output equals
-/// orjson's `OPT_INDENT_2` / `OPT_SORT_KEYS`, and `json.dumps(obj,
-/// indent=n, sort_keys=..., ensure_ascii=False)` for other indent widths
-/// (numbers aside, as in compact output). A lone surrogate raises
-/// `UnicodeEncodeError` here also in `dumps_str`.
+/// `indent=` / `separators=` / `sort_keys=` / `ensure_ascii=`: serialized as
+/// bytes (keys sorted in place per dict), then ASCII-escaped, then laid out,
+/// then decoded for `dumps_str`. Output equals orjson's `OPT_INDENT_2` /
+/// `OPT_SORT_KEYS`, and `json.dumps` with the same options (numbers aside, as
+/// in compact output). A lone surrogate raises `UnicodeEncodeError` in
+/// `dumps` without `ensure_ascii`, as in compact output.
 #[cold]
 #[inline(never)]
 unsafe fn dumps_formatted(
@@ -3422,21 +3487,35 @@ unsafe fn dumps_formatted(
     as_str: bool,
     opts: &DumpsOpts,
 ) -> PyResult<*mut ffi::PyObject> {
-    let compact = dumps_compact(py, obj, false, opts)?;
+    let compact = dumps_compact(py, obj, false, opts, as_str || opts.ensure_ascii)?;
     let data = ffi::PyBytes_AsString(compact) as *const u8;
     let len = ffi::PyBytes_Size(compact) as usize;
-    let src = std::slice::from_raw_parts(data, len);
-    let out = if opts.indent >= 0 {
-        let pretty = indent_json(src, opts.indent as usize);
-        if as_str {
-            ffi::PyUnicode_DecodeUTF8(pretty.as_ptr().cast(), pretty.len() as ffi::Py_ssize_t, ptr::null())
-        } else {
-            ffi::PyBytes_FromStringAndSize(pretty.as_ptr().cast(), pretty.len() as ffi::Py_ssize_t)
+    let mut src = std::slice::from_raw_parts(data, len);
+    let escaped;
+    if opts.ensure_ascii {
+        if let Some(v) = ascii_escape(src) {
+            escaped = v;
+            src = &escaped;
         }
-    } else if as_str {
-        ffi::PyUnicode_DecodeUTF8(data.cast(), len as ffi::Py_ssize_t, ptr::null())
-    } else {
+    }
+    let laid_out;
+    if let Some(layout) = &opts.layout {
+        laid_out = match &layout.indent {
+            // orjson's and json's usual layout: the tighter loop (~20% faster).
+            Some(unit) if unit.iter().all(|&c| c == b' ') && layout.item_sep == b"," && layout.key_sep == b": " => {
+                indent_json(src, unit.len())
+            }
+            _ => reformat(src, layout),
+        };
+        src = &laid_out;
+    }
+    let out = if as_str {
+        let errors = c"surrogatepass".as_ptr();
+        ffi::PyUnicode_DecodeUTF8(src.as_ptr().cast(), src.len() as ffi::Py_ssize_t, errors)
+    } else if src.as_ptr() == data {
         return Ok(compact);
+    } else {
+        ffi::PyBytes_FromStringAndSize(src.as_ptr().cast(), src.len() as ffi::Py_ssize_t)
     };
     ffi::Py_DECREF(compact);
     if out.is_null() {
@@ -3445,20 +3524,102 @@ unsafe fn dumps_formatted(
     Ok(out)
 }
 
+/// `src` (rjson's compact output) with every non-ASCII character and DEL
+/// written as `\uXXXX` (a surrogate pair above U+FFFF), as json's
+/// `ensure_ascii=True` does; None if there is none. Such bytes occur only
+/// inside strings, so no string tracking is needed. Lone surrogates arrive
+/// as generalized UTF-8 (see `Serializer::write_wtf8`).
+fn ascii_escape(src: &[u8]) -> Option<Vec<u8>> {
+    let first = next_non_ascii(src, 0);
+    if first == src.len() {
+        return None;
+    }
+    let hex = b"0123456789abcdef";
+    let mut out = Vec::with_capacity(src.len() + src.len() / 2 + 16);
+    let (mut i, mut run) = (first, 0usize);
+    let push_u = |out: &mut Vec<u8>, u: u32| {
+        out.extend_from_slice(&[
+            b'\\',
+            b'u',
+            hex[(u >> 12) as usize & 15],
+            hex[(u >> 8) as usize & 15],
+            hex[(u >> 4) as usize & 15],
+            hex[u as usize & 15],
+        ]);
+    };
+    while i < src.len() {
+        out.extend_from_slice(&src[run..i]);
+        let b = src[i] as u32;
+        // Our own output: every sequence is complete (3-byte lead bytes
+        // include surrogates as ED A0..BF xx).
+        let (cp, n) = if b < 0x80 {
+            (b, 1) // DEL
+        } else if b < 0xE0 {
+            (((b & 0x1F) << 6) | (src[i + 1] as u32 & 0x3F), 2)
+        } else if b < 0xF0 {
+            (((b & 0x0F) << 12) | ((src[i + 1] as u32 & 0x3F) << 6) | (src[i + 2] as u32 & 0x3F), 3)
+        } else {
+            (
+                ((b & 0x07) << 18)
+                    | ((src[i + 1] as u32 & 0x3F) << 12)
+                    | ((src[i + 2] as u32 & 0x3F) << 6)
+                    | (src[i + 3] as u32 & 0x3F),
+                4,
+            )
+        };
+        if cp >= 0x10000 {
+            let v = cp - 0x10000;
+            push_u(&mut out, 0xD800 | (v >> 10));
+            push_u(&mut out, 0xDC00 | (v & 0x3FF));
+        } else {
+            push_u(&mut out, cp);
+        }
+        i += n;
+        run = i;
+        i = next_non_ascii(src, i);
+    }
+    out.extend_from_slice(&src[run..]);
+    Some(out)
+}
+
+/// Index of the first byte >= 0x7F in `b[i..]` (`b.len()` if none), 16
+/// bytes at a time.
+fn next_non_ascii(b: &[u8], mut i: usize) -> usize {
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: SSE2 is part of x86_64; loads stay within `b` (i + 16 <= len).
+    unsafe {
+        use std::arch::x86_64::*;
+        let del = _mm_set1_epi8(0x7F);
+        while i + 16 <= b.len() {
+            let v = _mm_loadu_si128(b.as_ptr().add(i) as *const __m128i);
+            let m = _mm_movemask_epi8(_mm_or_si128(v, _mm_cmpeq_epi8(v, del)));
+            if m != 0 {
+                return i + m.trailing_zeros() as usize;
+            }
+            i += 16;
+        }
+    }
+    while i < b.len() && b[i] < 0x7F {
+        i += 1;
+    }
+    i
+}
+
 #[inline(always)]
 unsafe fn dumps_compact(
     py: Python<'_>,
     obj: *mut ffi::PyObject,
     as_str: bool,
     opts: &DumpsOpts,
+    wtf8: bool,
 ) -> PyResult<*mut ffi::PyObject> {
-    let mut ser = Serializer::new(as_str, opts, false);
+    let mut ser = Serializer::new(as_str, opts, false, wtf8);
     let start = ser.start();
     let mut end = ser.ser(start, obj, 0, 0);
     if end.is_null() && matches!(ser.err, SerError::NeedGuard) {
         // A native value needs Python code (dataclass, Python tzinfo, ...).
         // Nothing ran yet, so start over in guarded mode.
-        ser = Serializer::new(as_str, opts, true);
+        ser = Serializer::new(as_str, opts, true, wtf8);
         let start = ser.start();
         end = ser.ser(start, obj, 0, 0);
     }
@@ -3657,7 +3818,7 @@ fn string_end_fast(b: &[u8], i: usize) -> usize {
     }
 }
 
-/// Output buffer for `indent_json`: raw writes after one capacity check
+/// Output buffer for `reformat`: raw writes after one capacity check
 /// per token (`need`).
 struct IndentOut {
     v: Vec<u8>,
@@ -3693,6 +3854,92 @@ impl IndentOut {
         ptr::write_bytes(p.add(1), b' ', n);
         self.v.set_len(len + 1 + n);
     }
+}
+
+/// `src` (rjson's compact output) laid out as json.dumps does for `indent`
+/// and `separators`: indented, one item per line, `item_sep` before each
+/// newline and `key_sep` after keys, empty containers as `{}` / `[]`, no
+/// trailing newline (orjson's `OPT_INDENT_2` with a 2-space unit); without
+/// an indent, only the separators change. Runs between structural bytes are
+/// copied in bulk.
+fn reformat(src: &[u8], layout: &Layout) -> Vec<u8> {
+    let unit: &[u8] = layout.indent.as_deref().unwrap_or(b"");
+    let indented = layout.indent.is_some();
+    let spaces = unit.iter().all(|&c| c == b' ');
+    let (item, key) = (&layout.item_sep[..], &layout.key_sep[..]);
+    let mut out = IndentOut { v: Vec::with_capacity(src.len() + src.len() / 2 + 64) };
+    let mut level = 0usize;
+    let (mut i, mut run) = (0usize, 0usize);
+    let n = src.len();
+    // SAFETY (all writes below): each is preceded by `need` for its size.
+    unsafe {
+        let newline = |out: &mut IndentOut, level: usize| {
+            if !indented {
+                return;
+            }
+            out.need(1 + level * unit.len());
+            if spaces {
+                out.newline(level * unit.len());
+            } else {
+                out.byte(b'\n');
+                for _ in 0..level {
+                    out.copy(unit);
+                }
+            }
+        };
+        while i < n {
+            let c = src[i];
+            if !STRUCTURAL[c as usize] {
+                i += 1;
+                continue;
+            }
+            match c {
+                b'"' => {
+                    let e = string_end_fast(src, i);
+                    out.need(e - run);
+                    out.copy(&src[run..e]);
+                    i = e;
+                    run = i;
+                    continue;
+                }
+                b'{' | b'[' => {
+                    let close = if c == b'{' { b'}' } else { b']' };
+                    if i + 1 < n && src[i + 1] == close {
+                        i += 2;
+                        continue; // "{}" / "[]" stay in the run
+                    }
+                    level += 1;
+                    out.need(i + 1 - run);
+                    out.copy(&src[run..=i]);
+                    newline(&mut out, level);
+                }
+                b'}' | b']' => {
+                    level -= 1;
+                    out.need(i - run);
+                    out.copy(&src[run..i]);
+                    newline(&mut out, level);
+                    out.need(1);
+                    out.byte(c);
+                }
+                b',' => {
+                    out.need(i - run + item.len());
+                    out.copy(&src[run..i]);
+                    out.copy(item);
+                    newline(&mut out, level);
+                }
+                _ => {
+                    out.need(i - run + key.len());
+                    out.copy(&src[run..i]);
+                    out.copy(key);
+                }
+            }
+            i += 1;
+            run = i;
+        }
+        out.need(n - run);
+        out.copy(&src[run..]);
+    }
+    out.v
 }
 
 /// `src` (rjson's compact output) indented by `width` spaces per level, the

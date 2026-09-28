@@ -35,7 +35,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyCFunction;
 use std::ptr;
 
-use crate::ser::DumpsOpts;
+use crate::ser::{DumpsOpts, Layout};
 
 unsafe fn loads_body(
     py: Python<'_>,
@@ -226,8 +226,7 @@ unsafe fn dumps_body(
     nargs: ffi::Py_ssize_t,
     kwnames: *mut ffi::PyObject,
 ) -> PyResult<*mut ffi::PyObject> {
-    let (obj, opts) = dumps_args(py, "dumps", args, nargs, kwnames)?;
-    crate::ser::dumps_raw(py, obj, false, &opts)
+    dumps_call(py, "dumps", false, args, nargs, kwnames)
 }
 
 unsafe fn dumps_str_body(
@@ -237,33 +236,50 @@ unsafe fn dumps_str_body(
     nargs: ffi::Py_ssize_t,
     kwnames: *mut ffi::PyObject,
 ) -> PyResult<*mut ffi::PyObject> {
-    let (obj, opts) = dumps_args(py, "dumps_str", args, nargs, kwnames)?;
-    crate::ser::dumps_raw(py, obj, true, &opts)
+    dumps_call(py, "dumps_str", true, args, nargs, kwnames)
 }
 
-/// Parses `(obj, /, *, default=None, passthrough=0, non_str_keys=False)` from
-/// a vectorcall: returns `obj` and the options. `obj` and the `default`
-/// callable (null when absent or None) are borrowed from the call's
-/// arguments, which the caller keeps alive for the whole call.
-///
-/// The common call, one positional argument and no keywords, is a single
-/// compare. Errors follow CPython's argument-clinic wording.
+/// `dumps`/`dumps_str` for a vectorcall. The common call, one positional
+/// argument and no keywords, is a single compare and needs no options value
+/// (which owns a `Layout` when given, so building and dropping one on the hot
+/// path cost ~5 ns); everything else goes through cold `dumps_with_kwargs`.
 #[inline(always)]
-unsafe fn dumps_args(
+unsafe fn dumps_call(
     py: Python<'_>,
     name: &str,
+    as_str: bool,
     args: *const *mut ffi::PyObject,
     nargs: ffi::Py_ssize_t,
     kwnames: *mut ffi::PyObject,
-) -> PyResult<(*mut ffi::PyObject, DumpsOpts)> {
+) -> PyResult<*mut ffi::PyObject> {
     // PY_VECTORCALL_ARGUMENTS_OFFSET may be set in nargs.
     let n = ffi::PyVectorcall_NARGS(nargs as usize);
     if n == 1 && kwnames.is_null() {
-        return Ok((*args, DumpsOpts::NONE));
+        return crate::ser::dumps_raw(py, *args, as_str, &DumpsOpts::NONE);
     }
-    dumps_args_slow(py, name, args, n, kwnames)
+    dumps_with_kwargs(py, name, as_str, args, n, kwnames)
 }
 
+#[cold]
+#[inline(never)]
+unsafe fn dumps_with_kwargs(
+    py: Python<'_>,
+    name: &str,
+    as_str: bool,
+    args: *const *mut ffi::PyObject,
+    n: ffi::Py_ssize_t,
+    kwnames: *mut ffi::PyObject,
+) -> PyResult<*mut ffi::PyObject> {
+    let (obj, opts) = dumps_args_slow(py, name, args, n, kwnames)?;
+    crate::ser::dumps_raw(py, obj, as_str, &opts)
+}
+
+/// Parses `(obj, /, *, default=None, passthrough=0, non_str_keys=False,
+/// indent=None, separators=None, sort_keys=False, ensure_ascii=False,
+/// allow_nan=False)` from a vectorcall: returns `obj` and the options. `obj`
+/// and the `default` callable (null when absent or None) are borrowed from
+/// the call's arguments, which the caller keeps alive for the whole call.
+/// Errors follow CPython's argument-clinic wording.
 #[cold]
 #[inline(never)]
 unsafe fn dumps_args_slow(
@@ -282,8 +298,11 @@ unsafe fn dumps_args_slow(
     let mut default: *mut ffi::PyObject = ptr::null_mut();
     let mut passthrough: u32 = 0;
     let mut non_str_keys = false;
-    let mut indent: i32 = -1;
+    let mut indent: Option<Vec<u8>> = None;
+    let mut separators: Option<(Vec<u8>, Vec<u8>)> = None;
     let mut sort_keys = false;
+    let mut ensure_ascii = false;
+    let mut allow_nan = false;
     let nkw = if kwnames.is_null() {
         0
     } else {
@@ -304,12 +323,15 @@ unsafe fn dumps_args_slow(
                 v => non_str_keys = v == 1,
             }
         } else if ffi::PyUnicode_CompareWithASCIIString(kw, c"indent".as_ptr()) == 0 {
-            indent = indent_width(py, name, value)?;
+            indent = indent_unit(py, name, value)?;
+        } else if ffi::PyUnicode_CompareWithASCIIString(kw, c"separators".as_ptr()) == 0 {
+            separators = separator_pair(py, name, value)?;
         } else if ffi::PyUnicode_CompareWithASCIIString(kw, c"sort_keys".as_ptr()) == 0 {
-            match ffi::PyObject_IsTrue(value) {
-                -1 => return Err(PyErr::fetch(py)),
-                v => sort_keys = v == 1,
-            }
+            sort_keys = truthy(py, value)?;
+        } else if ffi::PyUnicode_CompareWithASCIIString(kw, c"ensure_ascii".as_ptr()) == 0 {
+            ensure_ascii = truthy(py, value)?;
+        } else if ffi::PyUnicode_CompareWithASCIIString(kw, c"allow_nan".as_ptr()) == 0 {
+            allow_nan = truthy(py, value)?;
         } else {
             let kw_str = pyo3::Bound::from_borrowed_ptr(py, kw).to_string();
             return Err(PyTypeError::new_err(format!(
@@ -327,37 +349,106 @@ unsafe fn dumps_args_slow(
             "rjson.{name}() default must be callable, not {tn}"
         )));
     }
+    // json.dumps's defaults: `(",", ": ")` with an indent; rjson stays
+    // compact without one.
+    let layout = match (indent, separators) {
+        (None, None) => None,
+        (None, Some((item, key))) if item == b"," && key == b":" => None,
+        (indent, seps) => {
+            let (item_sep, key_sep) = seps.unwrap_or_else(|| (b",".to_vec(), b": ".to_vec()));
+            Some(Box::new(Layout { indent, item_sep, key_sep }))
+        }
+    };
     Ok((
         *args,
         DumpsOpts {
             default,
             passthrough,
             non_str_keys,
-            indent,
+            layout,
             sort_keys,
+            ensure_ascii,
+            allow_nan,
         },
     ))
 }
 
-/// `indent=`: None (compact) or an int from 0 to 1024 (spaces per level,
-/// as `json.dumps`; 2 gives orjson's `OPT_INDENT_2` layout).
-unsafe fn indent_width(py: Python<'_>, name: &str, value: *mut ffi::PyObject) -> PyResult<i32> {
+/// Truthiness, like json.dumps's flags (runs before serializing).
+unsafe fn truthy(py: Python<'_>, value: *mut ffi::PyObject) -> PyResult<bool> {
+    match ffi::PyObject_IsTrue(value) {
+        -1 => Err(PyErr::fetch(py)),
+        v => Ok(v == 1),
+    }
+}
+
+/// UTF-8 bytes of the `str` `value` (the error names `what`).
+unsafe fn str_utf8(py: Python<'_>, name: &str, what: &str, value: *mut ffi::PyObject) -> PyResult<Vec<u8>> {
+    if ffi::PyUnicode_Check(value) == 0 {
+        let ty = pyo3::Bound::from_borrowed_ptr(py, value).get_type();
+        let tn = ty.name().map(|n| n.to_string()).unwrap_or_default();
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "rjson.{name}() {what} must be str, not {tn}"
+        )));
+    }
+    let mut n: ffi::Py_ssize_t = 0;
+    let p = ffi::PyUnicode_AsUTF8AndSize(value, &mut n);
+    if p.is_null() {
+        return Err(PyErr::fetch(py));
+    }
+    Ok(std::slice::from_raw_parts(p as *const u8, n as usize).to_vec())
+}
+
+/// `separators=`: None or an `(item_separator, key_separator)` pair of
+/// str, as json.dumps.
+unsafe fn separator_pair(
+    py: Python<'_>,
+    name: &str,
+    value: *mut ffi::PyObject,
+) -> PyResult<Option<(Vec<u8>, Vec<u8>)>> {
+    if value == ffi::Py_None() {
+        return Ok(None);
+    }
+    let pair = ffi::PySequence_Tuple(value);
+    if pair.is_null() || ffi::PyTuple_GET_SIZE(pair) != 2 {
+        if pair.is_null() {
+            ffi::PyErr_Clear();
+        } else {
+            ffi::Py_DECREF(pair);
+        }
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "rjson.{name}() separators must be None or an (item_separator, key_separator) pair of str"
+        )));
+    }
+    let seps = str_utf8(py, name, "item_separator", ffi::PyTuple_GET_ITEM(pair, 0)).and_then(|item| {
+        str_utf8(py, name, "key_separator", ffi::PyTuple_GET_ITEM(pair, 1)).map(|key| (item, key))
+    });
+    ffi::Py_DECREF(pair);
+    seps.map(Some)
+}
+
+/// `indent=`: None (one line), an int from 0 to 1024 (spaces per level, as
+/// `json.dumps`; 2 gives orjson's `OPT_INDENT_2` layout) or a str (the unit
+/// per level, e.g. `"\t"`, as `json.dumps`).
+unsafe fn indent_unit(py: Python<'_>, name: &str, value: *mut ffi::PyObject) -> PyResult<Option<Vec<u8>>> {
     use pyo3::exceptions::{PyTypeError, PyValueError};
     if value == ffi::Py_None() {
-        return Ok(-1);
+        return Ok(None);
+    }
+    if ffi::PyUnicode_Check(value) != 0 {
+        return str_utf8(py, name, "indent", value).map(Some);
     }
     if ffi::PyLong_Check(value) == 0 || ffi::PyBool_Check(value) != 0 {
         let ty = pyo3::Bound::from_borrowed_ptr(py, value).get_type();
         let tn = ty.name().map(|n| n.to_string()).unwrap_or_default();
         return Err(PyTypeError::new_err(format!(
-            "rjson.{name}() indent must be None or an int, not {tn}"
+            "rjson.{name}() indent must be None, an int or a str, not {tn}"
         )));
     }
     let v = ffi::PyLong_AsLongLong(value);
     if v == -1 && !ffi::PyErr_Occurred().is_null() {
         ffi::PyErr_Clear();
     } else if (0..=1024).contains(&v) {
-        return Ok(v as i32);
+        return Ok(Some(vec![b' '; v as usize]));
     }
     Err(PyValueError::new_err(format!(
         "rjson.{name}() indent must be between 0 and 1024"
