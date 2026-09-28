@@ -39,6 +39,8 @@ benches/production_benchmark.py, prod_workloads.py   # production-shaped workloa
 benches/fetch_corpus.sh       # download the corpora (sha256-pinned) into benches/data/
 benches/examples_benchmark.py # examples/ as written vs the same code on json/orjson (shim), end to end
 benches/cli_benchmark.py      # rjson CLI vs python -m json.tool, whole processes (docs/cli-benchmark-results.json)
+benches/why_faster.py         # one experiment per design difference vs orjson (memory, escaping, datetimes, str, instructions);
+                              # README "Why it is faster" table, docs/why-faster-results.json; cites orjson 3.12.0 source
 benches/showcase.py           # head-to-head vs orjson on production-shaped workloads (docs/SHOWCASE.md); --fresh: new-process allocator effect
 benches/perf_gate.py          # compare base/head benchmark runs, fail on >5% geomean regression
 benches/make_charts.py        # README charts (docs/img/*.svg) + table from a --json --output-json run

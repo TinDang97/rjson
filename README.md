@@ -415,9 +415,39 @@ Experimental. The API may change before 1.0; pin the version you test against.
   <img alt="Design differences from orjson 3.12. loads: orjson parses into a yyjson tree, then converts the tree to Python objects in a second pass; rjson builds Python objects in one pass (1.09–1.29× faster, 30–37% less peak memory on large files). dumps: orjson starts from a 4 KiB buffer that doubles, escapes with SSE2 or an AVX-512 build and returns bytes; rjson sizes the buffer from recent calls, escapes with AVX-512, AVX2 or SSE2 and writes bytes or str directly (1.12–1.82× faster, as str 1.65–1.99×). Native types: orjson probes three attributes and calls utcoffset() per aware datetime; rjson caches the timezone offset and per-class facts (UTC datetimes 3.17×, datetime/UUID/Enum records 2.34×, slots dataclasses 2.14×)." src="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/architecture-light.svg" width="880">
 </picture>
 
-Both are Rust on the CPython C API, cache dict keys and format floats with zmij.
-Internals rjson relies on are version-gated and self-tested at import (`CLAUDE.md`);
-details in [docs/PERFORMANCE_REVIEW.md](https://github.com/TinDang97/rjson/blob/main/docs/PERFORMANCE_REVIEW.md).
+Both are Rust on the CPython C API with raw `METH_FASTCALL` entry points, a dict-key
+cache and zmij float formatting, so none of that explains the gap. Four design choices do.
+Each row below isolates one of them, is measured head to head with identical output
+([`benches/why_faster.py`](https://github.com/TinDang97/rjson/blob/main/benches/why_faster.py),
+[results](https://github.com/TinDang97/rjson/blob/main/docs/why-faster-results.json);
+CPython 3.13, orjson 3.12.0, x86_64 with AVX-512, PGO wheel), and cites the orjson 3.12.0
+source it describes.
+
+| | orjson 3.12.0 | rjson | measured (rjson vs orjson) |
+|---|---|---|---|
+| **`loads`** | parses into a yyjson document tree, then walks the tree to create Python objects (`src/deserialize/backend/yyjson.rs`) | creates each Python object as it parses: one pass, no tree | 60 MB file: **85 MB vs 183 MB** peak memory above the input (both build the same result, so the ~98 MB difference is what orjson holds while parsing: the tree), 0.68 s vs 1.07 s |
+| **string escaping** | 32-byte AVX-512 blocks, but each escape restarts the block: one load, compare and store per escape (`src/serialize/writer/str/avx512.rs`) | every escape in a block handled from one compare mask; AVX-512, AVX2 or SSE2 chosen at run time | 1 MB of text with an escape every 12 characters: **3.40 vs 0.95 GB/s**, same CPU, both on AVX-512 |
+| **aware datetimes** | for `datetime.timezone.utc`, per value: up to three `hasattr` probes, then a `utcoffset()` call that allocates a `timedelta` (`src/ffi/pydatetimeref.rs`, `slow_offset`) | reads a `timezone`'s offset once and reuses it; date fields read from the C struct | 10,000 UTC datetimes: **28 vs 95 ns** per datetime |
+| **output to `str`** | returns `bytes`; getting a `str` means `.decode()`, a second allocation, copy and UTF-8 validation | writes the `str`'s own storage directly (`dumps_str`) | twitter.json: **1.9 MB vs 3.2 MB** allocated per call, 297 vs 478 µs |
+
+The remaining difference is per-value work. rjson dispatches on exact type pointers, keeps
+the output cursor in a register, and sizes the output buffer from recent calls (orjson
+starts at 4 KiB and doubles, `src/serialize/writer/byteswriter.rs`). Instruction counts
+are deterministic, so host noise can't move them:
+
+| instructions per call (valgrind) | rjson | orjson | orjson ÷ rjson |
+|---|---|---|---|
+| `dumps` small dict | 2,065 | 2,473 | 1.20 |
+| `loads` small dict | 4,555 | 5,025 | 1.10 |
+| `dumps` twitter.json | 2.00 M | 3.17 M | 1.59 |
+| `loads` twitter.json | 10.98 M | 13.08 M | 1.19 |
+
+Where it is *not* different: page faults for large results are the same (the output has
+to be written either way), and `indent=`/`sort_keys=` are still slower than orjson's (a
+second pass over the compact output). Internals rjson relies on are version-gated and
+self-tested at import (`CLAUDE.md`); the full review is in
+[docs/PERFORMANCE_REVIEW.md](https://github.com/TinDang97/rjson/blob/main/docs/PERFORMANCE_REVIEW.md).
+Reproduce with `python benches/why_faster.py` (valgrind for the instruction counts).
 
 ## Contributing
 
@@ -439,7 +469,7 @@ maturin develop --release && python -m pytest tests -q
 | `tests/` | pytest suites |
 | `python/rjson/` | package: `__init__.py`, the command line (`tool.py`, `__main__.py`), type stubs (`__init__.pyi`) |
 | `examples/` | FastAPI, Django, Flask, logging/NDJSON and Redis/Kafka integrations (tested) |
-| `benches/` | `corpus_benchmark.py` (reference), `showcase.py` (vs orjson on production shapes), `production_benchmark.py` (production workloads), `examples_benchmark.py` (the examples on rjson vs json vs orjson), `cli_benchmark.py` (the command line vs `json.tool`), `perf_gate.py`, `make_charts.py` / `make_showcase_charts.py` / `make_demo_svg.py` (README charts, demo), `demo.py` |
+| `benches/` | `corpus_benchmark.py` (reference), `showcase.py` (vs orjson on production shapes), `production_benchmark.py` (production workloads), `examples_benchmark.py` (the examples on rjson vs json vs orjson), `cli_benchmark.py` (the command line vs `json.tool`), `why_faster.py` (each design difference, measured), `perf_gate.py`, `make_charts.py` / `make_showcase_charts.py` / `make_demo_svg.py` (README charts, demo), `demo.py` |
 | `docs/` | showcase, performance review, production readiness report, async guide |
 
 <details>
