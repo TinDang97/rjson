@@ -33,6 +33,7 @@ import sys
 import tempfile
 import textwrap
 import time
+from collections.abc import Callable
 
 import orjson
 import rjson
@@ -41,14 +42,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 LIBS = ("rjson", "orjson")
 
 
-def best_ratio(fns: dict[str, object], rounds: int = 15, target: float = 0.02) -> dict[str, float]:
+def best_ratio(fns: dict[str, Callable[[], object]], rounds: int = 15, target: float = 0.02) -> dict[str, float]:
     """Median time per call for each function, interleaved rounds."""
     n = 1
     first = next(iter(fns.values()))
     while True:
         t0 = time.perf_counter()
         for _ in range(n):
-            first()  # type: ignore[operator]
+            first()
         if time.perf_counter() - t0 > target:
             break
         n *= 2
@@ -58,7 +59,7 @@ def best_ratio(fns: dict[str, object], rounds: int = 15, target: float = 0.02) -
         for name, fn in order:
             t0 = time.perf_counter()
             for _ in range(n):
-                fn()  # type: ignore[operator]
+                fn()
             times[name].append((time.perf_counter() - t0) / n)
     return {k: statistics.median(v) for k, v in times.items()}
 
@@ -67,7 +68,8 @@ def fresh(code: str) -> dict[str, float]:
     """Run `code` in a new interpreter; it prints one JSON object."""
     out = subprocess.run([sys.executable, "-c", textwrap.dedent(code)], capture_output=True,
                          text=True, check=True)
-    return json.loads(out.stdout.strip().splitlines()[-1])
+    result: dict[str, float] = json.loads(out.stdout.strip().splitlines()[-1])
+    return result
 
 
 def exp_loads_memory(big: str) -> dict[str, dict[str, float]]:
@@ -90,7 +92,8 @@ def exp_loads_memory(big: str) -> dict[str, dict[str, float]]:
 def exp_dumps_str(obj: object) -> dict[str, dict[str, float]]:
     import tracemalloc
 
-    fns = {"rjson": lambda: rjson.dumps_str(obj), "orjson": lambda: orjson.dumps(obj).decode()}
+    fns: dict[str, Callable[[], object]] = {
+        "rjson": lambda: rjson.dumps_str(obj), "orjson": lambda: orjson.dumps(obj).decode()}
     assert fns["rjson"]() == fns["orjson"]()
     times = best_ratio(fns)
     out = {}
@@ -109,7 +112,8 @@ def exp_escaping() -> dict[str, dict[str, float]]:
     chunk = 'abcdefghij"\\' + "klmnopqrst\n"
     text = chunk * (1_000_000 // len(chunk))
     doc = [text]
-    fns = {"rjson": lambda: rjson.dumps(doc), "orjson": lambda: orjson.dumps(doc)}
+    fns: dict[str, Callable[[], object]] = {
+        "rjson": lambda: rjson.dumps(doc), "orjson": lambda: orjson.dumps(doc)}
     assert fns["rjson"]() == fns["orjson"]()
     times = best_ratio(fns)
     mb = len(text.encode()) / 1e6
@@ -119,7 +123,8 @@ def exp_escaping() -> dict[str, dict[str, float]]:
 def exp_datetimes() -> dict[str, dict[str, float]]:
     base = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
     events = [base + dt.timedelta(seconds=i) for i in range(10_000)]
-    fns = {"rjson": lambda: rjson.dumps(events), "orjson": lambda: orjson.dumps(events)}
+    fns: dict[str, Callable[[], object]] = {
+        "rjson": lambda: rjson.dumps(events), "orjson": lambda: orjson.dumps(events)}
     assert fns["rjson"]() == fns["orjson"]()
     times = best_ratio(fns)
     return {k: {"ns_per_datetime": v / len(events) * 1e9} for k, v in times.items()}
