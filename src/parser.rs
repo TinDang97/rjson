@@ -2154,6 +2154,9 @@ impl Drop for Input {
     }
 }
 
+// `#[inline(always)]`: with two callers (`loads_impl`, `ndjson_impl`) LLVM
+// stopped inlining it into `loads_impl` (+20 instructions per `loads`).
+#[inline(always)]
 pub(crate) unsafe fn get_input(py: Python<'_>, obj: *mut ffi::PyObject) -> PyResult<Input> {
     if ffi::PyUnicode_Check(obj) != 0 {
         return str_input(py, obj);
@@ -2476,4 +2479,172 @@ pub(crate) unsafe fn parse(
             Err(raise_decode_error(py, msg, buf, epos))
         }
     }
+}
+
+// ============================================================================
+// NDJSON / JSON Lines (`loads_ndjson`)
+// ============================================================================
+
+/// One `loads_ndjson` call: a single parser (value stack, scratch buffer,
+/// GC pause) for every line. Parsed values accumulate on the parser's value
+/// stack and become the result list at its exact size in `finish`.
+///
+/// The fast path (`run`) parses each value in place in the whole buffer and
+/// accepts it only if the value and the rest of its line hold no `\n`, so a
+/// line is accepted exactly when `loads(line)` would accept it. Anything else
+/// (an error, a value spanning lines, two values on a line, whatever lenient
+/// mode hands to `json.loads`) stops `run` at that line, and the caller parses
+/// the line on its own with `loads`; that path decides values and errors.
+pub(crate) struct Lines<'a> {
+    p: Parser<'a>,
+    gc_was_enabled: bool,
+}
+
+impl<'a> Lines<'a> {
+    /// # Safety
+    ///
+    /// As for `parse`: unless `buf` is empty, the byte just past its end must
+    /// be readable and 0, and `buf` must stay valid and unchanged while this
+    /// `Lines` lives.
+    pub(crate) unsafe fn new(buf: &'a [u8], utf8_valid: bool, lenient: bool) -> Self {
+        debug_assert!(buf.is_empty() || *buf.as_ptr().add(buf.len()) == 0);
+        let p = Parser {
+            buf,
+            pos: 0,
+            utf8_valid: utf8_valid || simdutf8::basic::from_utf8(buf).is_ok(),
+            depth: 0,
+            stack: std::mem::take(&mut *ptr::addr_of_mut!(STACK_POOL)),
+            scratch: std::mem::take(&mut *ptr::addr_of_mut!(SCRATCH_POOL)),
+            error: std::cell::Cell::new(("", 0)),
+            lenient,
+        };
+        Lines { p, gc_was_enabled: pause_gc() }
+    }
+
+    /// Parse the lines from byte `from` on (the start of a line, or the
+    /// input's length) until the end of the input: `None`. Stops at the first
+    /// line the fast path does not take and returns its non-blank part as
+    /// `[start, end)`, `end` being its `\n` or the end of the input; nothing
+    /// of that line has been consumed. Blank lines are skipped.
+    pub(crate) fn run(&mut self, from: usize) -> Option<(usize, usize)> {
+        let p = &mut self.p;
+        let buf = p.buf;
+        let len = buf.len();
+        if from >= len {
+            // Also an empty input, whose `buf` has no NUL to peek at.
+            return None;
+        }
+        p.pos = from;
+        loop {
+            p.skip_ws(); // leading whitespace and blank lines
+            if p.pos >= len {
+                return None;
+            }
+            let start = p.pos;
+            let base = p.stack.len();
+            let v = match p.parse_value() {
+                Ok(v) => v,
+                Err(Fail) => {
+                    // Release what the failed value had built so far.
+                    for &o in unsafe { p.stack.get_unchecked(base..) } {
+                        unsafe { ffi::Py_DECREF(o) };
+                    }
+                    p.stack.truncate(base);
+                    p.depth = 0;
+                    return Some((start, find_newline(buf, start, len)));
+                }
+            };
+            let end = p.pos;
+            let mut e = end;
+            // SAFETY: e <= len, and buf[len] is the NUL after the input.
+            while matches!(unsafe { *buf.as_ptr().add(e) }, b' ' | b'\t' | b'\r') {
+                e += 1;
+            }
+            let at_eol = e == len || buf[e] == b'\n';
+            // Whitespace inside the value may hold a `\n` (`{"a":\n1}`), which
+            // `loads(line)` would reject: check the value's bytes.
+            if at_eol && find_newline(buf, start, end) == end {
+                p.stack.push(v);
+                p.pos = e + (e < len) as usize;
+            } else {
+                unsafe { ffi::Py_DECREF(v) };
+                return Some((start, find_newline(buf, start, len)));
+            }
+        }
+    }
+
+    /// Append a value parsed by the caller (a new reference, stolen).
+    pub(crate) fn push(&mut self, v: *mut ffi::PyObject) {
+        self.p.stack.push(v);
+    }
+
+    /// The values as a list (new reference), or NULL with MemoryError set.
+    pub(crate) fn finish(mut self) -> *mut ffi::PyObject {
+        let stack = &mut self.p.stack;
+        unsafe {
+            // Steals the references on success.
+            let list = list_from_items(stack.as_ptr(), stack.len());
+            if list.is_null() {
+                if ffi::PyErr_Occurred().is_null() {
+                    ffi::PyErr_NoMemory();
+                }
+            } else {
+                stack.set_len(0);
+            }
+            list
+        }
+    }
+}
+
+impl Drop for Lines<'_> {
+    fn drop(&mut self) {
+        resume_gc(self.gc_was_enabled);
+        let p = &mut self.p;
+        // Values not handed out by `finish` (an error): release them.
+        for &o in p.stack.iter() {
+            unsafe { ffi::Py_DECREF(o) };
+        }
+        p.stack.clear();
+        unsafe {
+            if p.stack.capacity() <= MAX_POOLED_STACK {
+                *ptr::addr_of_mut!(STACK_POOL) = std::mem::take(&mut p.stack);
+            }
+            if p.scratch.capacity() <= MAX_POOLED_SCRATCH {
+                *ptr::addr_of_mut!(SCRATCH_POOL) = std::mem::take(&mut p.scratch);
+            }
+        }
+    }
+}
+
+/// Index of the first `\n` in `buf[from..to]`, or `to` if there is none.
+#[inline]
+fn find_newline(buf: &[u8], from: usize, to: usize) -> usize {
+    let mut i = from;
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use std::arch::x86_64::*;
+        let nl = _mm_set1_epi8(b'\n' as i8);
+        while i + 16 <= to {
+            let v = _mm_loadu_si128(buf.as_ptr().add(i) as *const __m128i);
+            let m = _mm_movemask_epi8(_mm_cmpeq_epi8(v, nl)) as u32;
+            if m != 0 {
+                return i + m.trailing_zeros() as usize;
+            }
+            i += 16;
+        }
+    }
+    while i < to {
+        if buf[i] == b'\n' {
+            return i;
+        }
+        i += 1;
+    }
+    to
+}
+
+/// JSONDecodeError for `msg` at byte `pos` of `doc` (a position in the whole
+/// input, for errors found by parsing one line on its own).
+#[cold]
+pub(crate) fn decode_error_at(py: Python<'_>, msg: &str, doc: &[u8], pos: usize) -> PyErr {
+    raise_decode_error(py, msg, doc, pos)
 }

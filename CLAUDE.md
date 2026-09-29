@@ -4,7 +4,7 @@
 
 **rjson** is a JSON library for Python written in Rust directly against the CPython C API (PyO3 is used only for module setup and the entry-point trampoline). Goal: beat orjson on every metric while staying correct on every supported CPython version.
 
-- API: `loads(str | bytes | bytearray | memoryview, *, lenient=False)`, `dumps(obj, *, default=None, passthrough=0, non_str_keys=False, indent=None, separators=None, sort_keys=False, ensure_ascii=False, allow_nan=False) -> bytes` (like orjson; the json.dumps options behave as json's), `dumps_str(...) -> str`, `dumps_bytes` = alias of `dumps`; `PASSTHROUGH_DATETIME/_UUID/_DATACLASS/_ENUM` flags; `JSONDecodeError` (= json's), `JSONEncodeError(TypeError, ValueError)`, `__version__`; stub `python/rjson/__init__.pyi` + `py.typed`; command line `rjson` / `python -m rjson` (`python/rjson/tool.py`: json.tool-compatible beautifier, `--in-place`/`--check`/`--validate`, `beautify()`)
+- API: `loads(str | bytes | bytearray | memoryview, *, lenient=False)`, `loads_ndjson(same, *, lenient=False) -> list` (NDJSON/JSON Lines), `dumps(obj, *, default=None, passthrough=0, non_str_keys=False, indent=None, separators=None, sort_keys=False, ensure_ascii=False, allow_nan=False) -> bytes` (like orjson; the json.dumps options behave as json's), `dumps_str(...) -> str`, `dumps_bytes` = alias of `dumps`; `PASSTHROUGH_DATETIME/_UUID/_DATACLASS/_ENUM` flags; `JSONDecodeError` (= json's), `JSONEncodeError(TypeError, ValueError)`, `__version__`; stub `python/rjson/__init__.pyi` + `py.typed`; command line `rjson` / `python -m rjson` (`python/rjson/tool.py`: json.tool-compatible beautifier, `--in-place`/`--check`/`--validate`, `beautify()`)
 - Packaging: PyPI distribution `pyrjson` (the name `rjson` is taken); import name `rjson`. MIT license.
 - Supported: CPython 3.10-3.14 (`requires-python >=3.10`), GIL builds only
 - Status: experimental; APIs may change before 1.0
@@ -15,7 +15,7 @@
 ```
 src/
   lib.rs      # module definition only
-  entry.rs    # raw entry points (loads, dumps, dumps_str, dumps_bytes alias: FASTCALL|KEYWORDS) + registration
+  entry.rs    # raw entry points (loads, loads_ndjson, dumps, dumps_str, dumps_bytes alias: FASTCALL|KEYWORDS) + registration
   parser.rs   # loads: single-pass parser building PyObjects directly
   lemire.rs   # Eisel-Lemire float conversion (vendored from fast-float, MIT/Apache)
   ser.rs      # dumps (bytes) / dumps_str (str): direct serializer writing into the result object
@@ -28,7 +28,7 @@ python/rjson/ # mixed maturin layout (python-source; extension = rjson.rjson): _
               # extension), __init__.pyi stubs + py.typed, tool.py (CLI) + __main__.py; console script `rjson`
 llms.txt      # summary + API + migration map for AI assistants (llmstxt.org); AGENTS.md: short guide for coding agents (points here)
 examples/     # FastAPI, Django, Flask, JSON logging/NDJSON, Redis/Kafka codec (tested by tests/test_examples.py)
-tests/        # test_rjson.py (general + regressions), test_dumps.py (serializer), test_lenient.py (loads lenient=), test_shapes.py (loads shape cache), test_native.py
+tests/        # test_rjson.py (general + regressions), test_dumps.py (serializer), test_lenient.py (loads lenient=), test_shapes.py (loads shape cache), test_ndjson.py (loads_ndjson vs loads per line, CLI chunks), test_native.py
               # (datetime/UUID/dataclass/Enum, differential vs orjson), test_keys.py
               # (non_str_keys, vs json), test_examples.py, test_cli.py (CLI vs json.tool), test_format.py
               # (indent/sort_keys/json.dumps options vs orjson and json), test_fuzz.py (differential fuzzing vs json;
@@ -64,6 +64,7 @@ docs/guides/                  # user-facing guides (faster-json-in-python-servic
 - Hand-written recursive-descent parser over `&[u8]`; one reusable value stack (pooled across calls); lists created at exact size.
 - Dict-key cache (2048 entries, keys ≤ 64 bytes): reuses PyUnicode objects with precomputed hash; byte-compares on hit.
 - Shape cache (`shaped_dict`, 3.11-3.13 via `rjson_dict_direct` + dictiter's self-test + `shape_self_test`): 64 slots keyed by a fold of an object's key pointers (1-64 keys). A shape seen twice in a row becomes the slot's template (keys → `None`, holds the keys so their pointers stay unique); hits are confirmed pointer by pointer against the template's entries, then `PyDict_Copy(template)` + values written into the copy's entries + GC-track if a value is a container. Duplicate-key objects never become templates. Records 15-40% faster, twitter ~10%; unique shapes ≤ 2% slower.
+- `loads_ndjson` (`parser::Lines`, `entry::ndjson_impl`): one `Parser` (pools, GC pause, warm key/shape caches) for all lines; values pile up on its value stack and become the list at exact size. The fast path (`Lines::run`) parses each value in place in the whole buffer and accepts it only if the rest of the line is ` `/`\t`/`\r` up to `\n` and the value holds no `\n` (`find_newline`), i.e. exactly when `loads(line)` would. Any other line (error, value across lines, two values, lenient fallbacks) goes to cold `ndjson_line`, which calls `rjson.loads` through the module attribute (keeps `loads_impl` at one call site) and re-raises a JSONDecodeError at its position in the whole input. A bytearray input is held by a buffer export (`BufferExport`) because that path runs Python code. `get_input` is `#[inline(always)]` since it has two callers (else +20 instructions per `loads`).
 - Numbers: 8-digits-at-a-time ints (big ints exact via PyLong_FromString), floats correctly rounded (exact fast path → Eisel-Lemire → fast_float). The fast path takes up to 19 fraction digits / 19 significant digits (`digits19`, lookahead 48 bytes), so full-precision doubles stay on it; keep its checks branch-free where data mixes shapes (0.0 among other values).
 - Own UTF-8 decoder writing into the final str; bytes input validated once with simdutf8. UCS2 results go through `decode_ucs2` (SSSE3, cfg-gated): 8/16-byte ASCII widening, 5×3-byte blocks via one u64 pattern pre-check + masked compare + shuffles, otherwise two chars per trip. Vector paths only for whole blocks with a constant advance (a data-dependent advance serialized the loop); wide stores only when that many units are left (`nchars`).
 - Cyclic GC paused during parsing on CPython 3.10/3.11 only (`pause_gc`/`resume_gc`).
@@ -110,7 +111,7 @@ docs/guides/                  # user-facing guides (faster-json-in-python-servic
 - `panic = "abort"` is set: a panic kills the interpreter, so do not `unwrap` on Python-derived data.
 
 ### Command line (`python/rjson/tool.py`)
-- Output must stay byte-identical to `python -m json.tool` for every shared option (tests/test_cli.py runs both); json.tool's `json.dumps` arguments map to rjson's in `_dump_opts`. Keep its imports light (startup is most of a small file's time): `typing`/`shutil`/`tempfile` only under `TYPE_CHECKING` or where used.
+- Output must stay byte-identical to `python -m json.tool` for every shared option (tests/test_cli.py runs both); json.tool's `json.dumps` arguments map to rjson's in `_dump_opts`. JSON Lines: `_all_lines` (in memory) and `_stream_lines` (stdin, `read1`) parse 16 KiB chunks with `loads_ndjson` (1 MiB chunks were 40% slower: a chunk's documents should stay in cache), only where its line splitting equals the per-line path's (no lone `\r`/`\x0b`/`\x0c`), and re-run a failing chunk through `_lines` so errors and the documents printed before them are unchanged. Keep its imports light (startup is most of a small file's time): `typing`/`shutil`/`tempfile` only under `TYPE_CHECKING` or where used.
 
 ## Development Workflow
 

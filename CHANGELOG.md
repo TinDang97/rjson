@@ -7,7 +7,16 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
 
 ## [Unreleased]
 
+### Added
+- `rjson.loads_ndjson(data, *, lenient=False)`: newline-delimited JSON (NDJSON / JSON
+  Lines) to a list in one call. Each line gives what `loads(line)` gives, blank lines are
+  skipped, and errors carry their position (`lineno`, `colno`) in the whole input. 1.4–2.6×
+  faster than a per-line loop on orjson, 7–49% faster than one on `rjson.loads`.
+
 ### Changed
+- `rjson --json-lines` parses with `loads_ndjson` in 16 KiB chunks: `--validate` 26%
+  faster, file to file 12–15%, stdin to stdout 6–11% (200k records); output and error
+  messages are unchanged.
 - `loads` is faster on documents whose objects repeat the same keys (API responses, records,
   logs) on CPython 3.11–3.13: a shape cache builds each such dict by copying a template dict
   and filling in the values. Records are 15–40% faster, twitter.json 9–13%; documents

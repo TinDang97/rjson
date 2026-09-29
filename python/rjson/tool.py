@@ -76,7 +76,7 @@ def beautify(
     opts = _dump_opts(indent, sort_keys, ensure_ascii, compact, strict)
     if isinstance(data, str):
         data = data.encode("utf-8", "surrogatepass")
-    docs = _lines(bytes(data).splitlines(), not strict) if json_lines else [_load(data, not strict)]
+    docs = _all_lines(bytes(data), not strict) if json_lines else [_load(data, not strict)]
     return b"".join(rjson.dumps(doc, **opts) + b"\n" for doc in docs)
 
 
@@ -109,10 +109,11 @@ def _load(data: bytes | bytearray | memoryview, lenient: bool) -> Any:
         raise ValueError(f"document nested too deep: {exc}") from None
 
 
-def _lines(lines: Iterable[bytes], lenient: bool) -> Iterator[Any]:
+def _lines(lines: Iterable[bytes], lenient: bool, first: int = 1) -> Iterator[Any]:
     """Documents of JSON Lines input; blank lines are skipped. Errors name
-    the line of the input, not of the document."""
-    for lineno, line in enumerate(lines, 1):
+    the line of the input (``first`` is the number of the first one), not of
+    the document."""
+    for lineno, line in enumerate(lines, first):
         if not line.strip():
             continue
         try:
@@ -121,6 +122,77 @@ def _lines(lines: Iterable[bytes], lenient: bool) -> Iterator[Any]:
             raise rjson.JSONDecodeError(
                 f"{exc.msg} (JSON Lines input, line {lineno})", exc.doc, exc.pos
             ) from None
+
+
+def _all_lines(data: bytes, lenient: bool) -> Iterator[Any]:
+    """Documents of JSON Lines input already in memory, parsed by
+    ``rjson.loads_ndjson`` in chunks of about ``_CHUNK`` bytes (cut after a
+    newline, so documents are held one chunk at a time). Only when it splits
+    the input as ``bytes.splitlines()`` does: lines end with ``\n`` or
+    ``\r\n`` (no lone ``\r``) and blank lines hold only spaces and tabs (no
+    ``\x0b``/``\x0c``). Otherwise, and from a chunk with any error on, the
+    lines go through ``_lines``, whose per-line parse names the bad line after
+    yielding the documents before it (json.tool prints those first)."""
+    if b"\x0b" in data or b"\x0c" in data or data.count(b"\r") != data.count(b"\r\n"):
+        yield from _lines(data.splitlines(), lenient)
+        return
+    view = memoryview(data)
+    start = 0
+    while start < len(data):
+        end = data.find(b"\n", start + _CHUNK)
+        end = len(data) if end < 0 else end + 1
+        try:
+            docs = rjson.loads_ndjson(view[start:end], lenient=lenient)
+        except (ValueError, RecursionError):
+            yield from _lines(data[start:].splitlines(), lenient, data.count(b"\n", 0, start) + 1)
+            return
+        yield from docs
+        start = end
+
+
+_CHUNK = 16 << 10  # small: documents of one chunk stay in cache (1 MiB chunks were 40% slower)
+
+
+def _stream_lines(stream: IO[bytes], lenient: bool) -> Iterator[Any]:
+    """Documents of JSON Lines read from a stream (stdin). Takes whatever
+    input is available (``read1``, up to ``_CHUNK`` bytes, so documents are
+    written as their lines arrive) and parses its complete lines with one
+    ``rjson.loads_ndjson`` call. Same documents and errors as ``_lines`` over
+    the stream's lines (split at ``\n`` only), which parses any block with an
+    error, or with ``\x0b``/``\x0c`` (blank for ``bytes.strip``), line by line."""
+    read1 = getattr(stream, "read1", None)
+    if read1 is None:
+        yield from _lines(stream, lenient)
+        return
+    rest = b""
+    lineno = 1
+    while True:
+        chunk = read1(_CHUNK)
+        data = rest + chunk if rest else chunk
+        cut = len(data) if not chunk else data.rfind(b"\n") + 1
+        if cut:
+            block, rest = data[:cut], data[cut:]
+            yield from _block_lines(block, lenient, lineno)
+            lineno += block.count(b"\n")
+        else:
+            rest = data
+        if not chunk:
+            return
+
+
+def _block_lines(block: bytes, lenient: bool, first: int) -> Iterator[Any]:
+    """``_stream_lines``: the documents of one block of complete lines."""
+    if b"\x0b" not in block and b"\x0c" not in block:
+        try:
+            docs = rjson.loads_ndjson(block, lenient=lenient)
+        except (ValueError, RecursionError):
+            pass
+        else:
+            yield from docs
+            return
+    import io
+
+    yield from _lines(io.BytesIO(block), lenient, first)
 
 
 def _can_color(stream: IO[Any], when: str) -> bool:
@@ -274,7 +346,7 @@ def _files_mode(args: argparse.Namespace, opts: dict[str, Any]) -> int:
         name = "<stdin>" if path == "-" else path
         try:
             data = _read(path)
-            docs = _lines(data.splitlines(), lenient) if args.json_lines else [_load(data, lenient)]
+            docs = _all_lines(data, lenient) if args.json_lines else [_load(data, lenient)]
             if args.validate:
                 for _ in docs:
                     pass
@@ -324,10 +396,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.json_lines and infile == "-" and outfile == "-":
-            docs: Iterable[Any] = _lines(sys.stdin.buffer, lenient)  # streamed
+            docs: Iterable[Any] = _stream_lines(sys.stdin.buffer, lenient)
         else:
             data = _read(infile)
-            docs = _lines(data.splitlines(), lenient) if args.json_lines else [_load(data, lenient)]
+            docs = _all_lines(data, lenient) if args.json_lines else [_load(data, lenient)]
         if outfile != "-":
             # Everything is read already, so outfile may be infile (as json.tool).
             out = b"".join(rjson.dumps(doc, **opts) + b"\n" for doc in docs)

@@ -43,6 +43,11 @@ CHILD = textwrap.dedent(
         elif what == "loads_lenient_beyond_limit":  # > 1024: the json.loads fallback
             n = depth + 1100
             rjson.loads(b"[" * n + b"]" * n, lenient=True)
+        elif what == "loads_ndjson":  # the fast path, then loads() on the line
+            rjson.loads_ndjson(b"1\n" + b"[" * depth + b"]" * depth + b"\n2")
+        elif what == "loads_ndjson_lenient_beyond_limit":
+            n = depth + 1100
+            rjson.loads_ndjson(b"1\n" + b"[" * n + b"]" * n, lenient=True)
         else:
             x = Opaque() if what.startswith("dumps_default") else []
             for _ in range(depth):
@@ -107,6 +112,8 @@ SMALL_STACKS = [
         ("loads_dict", 1024),
         ("loads_lenient", 1000),
         ("loads_lenient_beyond_limit", 0),
+        ("loads_ndjson", 1024),
+        ("loads_ndjson_lenient_beyond_limit", 0),
         ("dumps_default", 250),  # + default() call + its dict = 252 levels
         # 3.14 checks the C stack before running Python code (default=) and
         # aborted the process when rjson had recursed too close to the end.
@@ -118,14 +125,14 @@ def test_deep_nesting_on_small_stack_raises_instead_of_crashing(stack, what, dep
     # Before: SIGSEGV on 64-128 KiB stacks (musl/Alpine thread default,
     # threading.stack_size); json.loads crashes the same way on 3.12/3.13.
     outcome = run_child(stack, what, depth)
-    if what == "loads_lenient_beyond_limit":
+    if what.endswith("lenient_beyond_limit"):
         # rjson's depth error, or on 3.14 json.loads's own (stack-checked) result.
         assert outcome in ("JSONDecodeError", "RecursionError", "ok")
     else:
         assert outcome in ("RecursionError", "ok")
 
 
-@pytest.mark.parametrize("what,depth", [("loads_list", 1024), ("loads_dict", 1024),
+@pytest.mark.parametrize("what,depth", [("loads_list", 1024), ("loads_dict", 1024), ("loads_ndjson", 1024),
                                         ("dumps_default", 250), ("dumps_str", 126)])
 @pytest.mark.skipif(bool(os.environ.get("RJSON_SANITIZER")),
                     reason="sanitizer red zones make every stack frame larger")

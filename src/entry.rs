@@ -51,7 +51,7 @@ unsafe fn loads_body(
     let lenient = if n == 1 && kwnames.is_null() {
         false
     } else {
-        loads_args_slow(py, n, args, kwnames)?
+        loads_args_slow(py, n, args, kwnames, "loads")?
     };
     loads_impl(py, *args, lenient)
 }
@@ -179,8 +179,8 @@ fn error_pos(py: Python<'_>, e: &PyErr) -> i64 {
         .unwrap_or(-1)
 }
 
-/// `loads(data, /, *, lenient=False)` arguments other than the plain
-/// one-positional call.
+/// `loads(data, /, *, lenient=False)` (and `loads_ndjson`, same signature)
+/// arguments other than the plain one-positional call.
 #[cold]
 #[inline(never)]
 unsafe fn loads_args_slow(
@@ -188,11 +188,12 @@ unsafe fn loads_args_slow(
     n: ffi::Py_ssize_t,
     args: *const *mut ffi::PyObject,
     kwnames: *mut ffi::PyObject,
+    name: &str,
 ) -> PyResult<bool> {
     use pyo3::exceptions::PyTypeError;
     if n != 1 {
         return Err(PyTypeError::new_err(format!(
-            "rjson.loads() takes exactly one positional argument ({n} given)"
+            "rjson.{name}() takes exactly one positional argument ({n} given)"
         )));
     }
     let mut lenient = false;
@@ -212,11 +213,199 @@ unsafe fn loads_args_slow(
         } else {
             let kw_str = pyo3::Bound::from_borrowed_ptr(py, kw).to_string();
             return Err(PyTypeError::new_err(format!(
-                "rjson.loads() got an unexpected keyword argument '{kw_str}'"
+                "rjson.{name}() got an unexpected keyword argument '{kw_str}'"
             )));
         }
     }
     Ok(lenient)
+}
+
+// ---------------------------------------------------------------------------
+// loads_ndjson
+// ---------------------------------------------------------------------------
+
+unsafe fn loads_ndjson_body(
+    py: Python<'_>,
+    module: *mut ffi::PyObject,
+    args: *const *mut ffi::PyObject,
+    nargs: ffi::Py_ssize_t,
+    kwnames: *mut ffi::PyObject,
+) -> PyResult<*mut ffi::PyObject> {
+    let n = ffi::PyVectorcall_NARGS(nargs as usize);
+    let lenient = if n == 1 && kwnames.is_null() {
+        false
+    } else {
+        loads_args_slow(py, n, args, kwnames, "loads_ndjson")?
+    };
+    ndjson_impl(py, module, *args, lenient)
+}
+
+/// `loads_ndjson`: the list of the documents of newline-delimited JSON, one
+/// per line; blank lines are skipped. Each line gives exactly what
+/// `loads(line, lenient=...)` gives, and errors carry their position in the
+/// whole input (so `lineno` is the input's line).
+///
+/// All lines are parsed by one `parser::Lines` (no per-line call, slicing or
+/// input setup). A line its fast path does not take goes through
+/// `ndjson_line`, which calls `loads` on that line.
+#[inline(never)]
+unsafe fn ndjson_impl(
+    py: Python<'_>,
+    module: *mut ffi::PyObject,
+    arg: *mut ffi::PyObject,
+    lenient: bool,
+) -> PyResult<*mut ffi::PyObject> {
+    let input = match crate::parser::get_input(py, arg) {
+        Ok(input) => input,
+        // A str with lone surrogates (only lenient mode accepts them).
+        Err(e) if lenient && ffi::PyUnicode_Check(arg) != 0 && is_decode_error(py, &e) => {
+            return ndjson_split(py, module, arg);
+        }
+        Err(e) => return Err(e),
+    };
+    // `ndjson_line` may run Python code (`json.loads` in lenient mode, a
+    // finalizer); hold an export of a bytearray so nothing can resize it
+    // under the parser. (bytes and str are immutable; a memoryview input is
+    // held or copied by `get_input`.)
+    let _export = BufferExport::new(py, arg)?;
+    let buf: &[u8] = if input.len == 0 {
+        &[]
+    } else {
+        std::slice::from_raw_parts(input.ptr, input.len)
+    };
+    // json.loads decodes bytes with a UTF-8 BOM as utf-8-sig (as `loads`).
+    let mut from = if lenient && !input.utf8_valid && buf.starts_with(b"\xEF\xBB\xBF") { 3 } else { 0 };
+    let is_str = input.utf8_valid;
+    let mut lines = crate::parser::Lines::new(buf, input.utf8_valid, lenient);
+    while let Some((start, end)) = lines.run(from) {
+        lines.push(ndjson_line(py, module, buf, is_str, start, end, lenient)?);
+        from = end + 1;
+    }
+    let list = lines.finish();
+    if list.is_null() {
+        return Err(PyErr::fetch(py));
+    }
+    Ok(list)
+}
+
+/// One line that `Lines::run` did not take (`buf[start..end]`, without its
+/// `\n`): parsed by `rjson.loads` on its own, so values and errors are
+/// exactly `loads`'s. A JSONDecodeError is raised again with its position in
+/// the whole input.
+#[cold]
+#[inline(never)]
+unsafe fn ndjson_line(
+    py: Python<'_>,
+    module: *mut ffi::PyObject,
+    buf: &[u8],
+    is_str: bool,
+    start: usize,
+    end: usize,
+    lenient: bool,
+) -> PyResult<*mut ffi::PyObject> {
+    let line = &buf[start..end];
+    let obj = if is_str {
+        // Valid UTF-8 (the str's own encoding), cut at ASCII bytes.
+        ffi::PyUnicode_DecodeUTF8(line.as_ptr() as *const _, line.len() as ffi::Py_ssize_t, c"strict".as_ptr())
+    } else {
+        ffi::PyBytes_FromStringAndSize(line.as_ptr() as *const _, line.len() as ffi::Py_ssize_t)
+    };
+    let obj = Bound::from_owned_ptr_or_err(py, obj)?;
+    match call_loads(py, module, &obj, lenient) {
+        Ok(v) => Ok(v.into_ptr()),
+        Err(e) if is_decode_error(py, &e) => {
+            let msg: String = e.value(py).getattr("msg")?.extract()?;
+            // `pos` counts characters of the line: the byte offset where that
+            // character starts (characters start at non-continuation bytes).
+            let chars = error_pos(py, &e).max(0) as usize;
+            let off = line
+                .iter()
+                .enumerate()
+                .filter(|&(_, &b)| (b & 0xC0) != 0x80)
+                .nth(chars)
+                .map_or(line.len(), |(i, _)| i);
+            Err(crate::parser::decode_error_at(py, &msg, buf, start + off))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// `rjson.loads(obj)` / `rjson.loads(obj, lenient=True)` through the module
+/// attribute: keeps `loads_impl` at one call site (see `loads_body`).
+#[cold]
+unsafe fn call_loads<'py>(
+    py: Python<'py>,
+    module: *mut ffi::PyObject,
+    obj: &Bound<'py, PyAny>,
+    lenient: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    let loads = Bound::from_borrowed_ptr(py, module).getattr("loads")?;
+    if lenient {
+        let kw = pyo3::types::PyDict::new(py);
+        kw.set_item("lenient", true)?;
+        loads.call((obj,), Some(&kw))
+    } else {
+        loads.call1((obj,))
+    }
+}
+
+/// Lenient mode, a str that is not valid UTF-8 (lone surrogates): split it
+/// into lines in Python and parse each with `loads(line, lenient=True)`.
+#[cold]
+#[inline(never)]
+unsafe fn ndjson_split(
+    py: Python<'_>,
+    module: *mut ffi::PyObject,
+    arg: *mut ffi::PyObject,
+) -> PyResult<*mut ffi::PyObject> {
+    let text = Bound::from_borrowed_ptr(py, arg);
+    let out = pyo3::types::PyList::empty(py);
+    let mut offset: usize = 0; // characters before the current line
+    for line in text.call_method1("split", ("\n",))?.try_iter()? {
+        let line = line?;
+        let n: usize = line.len()?;
+        let blank = line.call_method1("strip", (" \t\r",))?.len()? == 0;
+        if !blank {
+            match call_loads(py, module, &line, true) {
+                Ok(v) => out.append(v)?,
+                Err(e) if is_decode_error(py, &e) => {
+                    let msg: String = e.value(py).getattr("msg")?.extract()?;
+                    let pos = offset + error_pos(py, &e).max(0) as usize;
+                    let ty = crate::parser::decode_error_type(py)?.bind(py);
+                    return Err(PyErr::from_type(ty.clone(), (msg, text.clone().unbind(), pos)));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        offset += n + 1;
+    }
+    Ok(out.into_ptr())
+}
+
+/// A buffer export of a `bytearray` argument for the duration of a call
+/// (none for other types), so it cannot be resized meanwhile.
+struct BufferExport(Option<Box<ffi::Py_buffer>>);
+
+impl BufferExport {
+    unsafe fn new(py: Python<'_>, obj: *mut ffi::PyObject) -> PyResult<Self> {
+        if ffi::PyByteArray_Check(obj) == 0 {
+            return Ok(BufferExport(None));
+        }
+        let mut view: Box<ffi::Py_buffer> = Box::new(std::mem::zeroed());
+        if ffi::PyObject_GetBuffer(obj, &mut *view, ffi::PyBUF_SIMPLE) != 0 {
+            return Err(PyErr::fetch(py));
+        }
+        Ok(BufferExport(Some(view)))
+    }
+}
+
+impl Drop for BufferExport {
+    fn drop(&mut self) {
+        if let Some(view) = self.0.as_mut() {
+            // SAFETY: obtained by PyObject_GetBuffer, released once, GIL held.
+            unsafe { ffi::PyBuffer_Release(&mut **view) };
+        }
+    }
 }
 
 unsafe fn dumps_body(
@@ -496,6 +685,18 @@ unsafe extern "C" fn loads(
     )
 }
 
+/// `loads_ndjson(data, /, *, lenient=False) -> list`
+unsafe extern "C" fn loads_ndjson(
+    module: *mut ffi::PyObject,
+    args: *const *mut ffi::PyObject,
+    nargs: ffi::Py_ssize_t,
+    kwnames: *mut ffi::PyObject,
+) -> *mut ffi::PyObject {
+    pyo3::impl_::trampoline::get_trampoline_function!(fastcall_cfunction_with_keywords, loads_ndjson_body)(
+        module, args, nargs, kwnames,
+    )
+}
+
 /// `dumps(obj, /, *, default=None) -> bytes` (UTF-8, like `orjson.dumps`);
 /// also exported as `dumps_bytes`, its name before `dumps` switched from
 /// `str` to `bytes`.
@@ -530,7 +731,7 @@ unsafe extern "C" fn dumps_str(
 
 /// `PyMethodDef`s must outlive the function objects created from them.
 /// Wrapped so the raw pointers inside can live in a `static`.
-struct MethodDefs([ffi::PyMethodDef; 4]);
+struct MethodDefs([ffi::PyMethodDef; 5]);
 // SAFETY: the table is immutable after construction and only read by CPython.
 unsafe impl Sync for MethodDefs {}
 
@@ -540,6 +741,12 @@ static METHODS: MethodDefs = MethodDefs([
         ml_meth: ffi::PyMethodDefPointer { PyCFunctionFastWithKeywords: loads },
         ml_flags: ffi::METH_FASTCALL | ffi::METH_KEYWORDS,
         ml_doc: c"loads(data, /, *, lenient=False)\n--\n\nDeserialize JSON (str, bytes, bytearray or memoryview) to Python objects.\n\nlenient: also accept what json.loads accepts (NaN/Infinity, a UTF-8 BOM on bytes, numbers overflowing to inf, lone surrogates, UTF-16/32 bytes); the result then equals json.loads's.".as_ptr(),
+    },
+    ffi::PyMethodDef {
+        ml_name: c"loads_ndjson".as_ptr(),
+        ml_meth: ffi::PyMethodDefPointer { PyCFunctionFastWithKeywords: loads_ndjson },
+        ml_flags: ffi::METH_FASTCALL | ffi::METH_KEYWORDS,
+        ml_doc: c"loads_ndjson(data, /, *, lenient=False)\n--\n\nDeserialize newline-delimited JSON (NDJSON / JSON Lines: one document per line) to a list, in one call.\n\nEach line gives what loads(line) gives; blank lines are skipped; lines end with \\n or \\r\\n. An error's position (pos, lineno, colno) is in the whole input.\nlenient: as in loads.".as_ptr(),
     },
     ffi::PyMethodDef {
         ml_name: c"dumps".as_ptr(),
@@ -566,7 +773,7 @@ static METHODS: MethodDefs = MethodDefs([
 /// that does `from .rjson import *` and copies `__all__`, so a name missing
 /// here (notably the underscore-prefixed `__version__`) would not be
 /// reachable as `rjson.<name>`. Keep in sync with `rjson.pyi`.
-const ALL: [&str; 11] = [
+const ALL: [&str; 12] = [
     "JSONDecodeError",
     "JSONEncodeError",
     "PASSTHROUGH_DATACLASS",
@@ -578,6 +785,7 @@ const ALL: [&str; 11] = [
     "dumps_bytes",
     "dumps_str",
     "loads",
+    "loads_ndjson",
 ];
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
