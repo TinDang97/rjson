@@ -24,6 +24,7 @@ mod stack;
 fn rjson(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     compat::self_test(py)?;
     ser::init(py);
+    parser::init(); // after ser::init: uses dictiter's self-test result
     if !native::init() {
         return Err(PyErr::fetch(py));
     }

@@ -23,6 +23,9 @@
 //! * Object keys go through a direct-mapped cache (`KEY_CACHE`) keyed on the
 //!   raw key bytes. Cached keys are reused across calls, carry a precomputed
 //!   hash, and are compared byte-for-byte on lookup (no false hits).
+//! * Objects whose keys repeat in the same order (records) are built from a
+//!   template dict of that shape on 3.11-3.13 (`shaped_dict`): one
+//!   `PyDict_Copy` plus the values written into its entries.
 //! * Numbers: a fast path for `-?d{1,15}(.d{1,15})?(e[+-]?d{1,4})?` with
 //!   <= 19 digits (scalar integer part, 8-byte SWAR fraction words), Clinger's
 //!   exact path or Eisel-Lemire (`crate::lemire`); everything else, and every
@@ -461,7 +464,7 @@ impl<'a> Parser<'a> {
         self.depth -= 1;
         let n = (self.stack.len() - base) / 2;
         unsafe {
-            let dict = build_dict(self.stack.as_ptr().add(base), n);
+            let dict = make_dict(self.stack.as_ptr().add(base), n);
             for &o in self.stack.get_unchecked(base..) {
                 ffi::Py_DECREF(o);
             }
@@ -1572,6 +1575,256 @@ unsafe fn build_dict(kv: *const *mut ffi::PyObject, n: usize) -> *mut ffi::PyObj
         }
     }
     dict
+}
+
+/// Build the dict for an object's `n` key/value pairs at `kv` (borrowed):
+/// through the shape cache where it is enabled, else `build_dict`.
+#[inline(always)]
+unsafe fn make_dict(kv: *const *mut ffi::PyObject, n: usize) -> *mut ffi::PyObject {
+    #[cfg(rjson_dict_direct)]
+    if SHAPES_ENABLED && n.wrapping_sub(1) < SHAPE_MAX_KEYS {
+        return shaped_dict(kv, n);
+    }
+    build_dict(kv, n)
+}
+
+// ============================================================================
+// Shape cache
+// ============================================================================
+//
+// Record-shaped JSON repeats the same keys in the same order in every object.
+// The key cache already hands out the same key objects for them, so an
+// object's shape is the sequence of its key pointers. Once a shape has been
+// seen twice in a row in its slot, the slot keeps a template dict with those
+// keys and `None` values. An object of that shape is then built by
+// `PyDict_Copy(template)` (one allocation and a memcpy of the key table,
+// no hashing or probing) and its values are written straight into the
+// copy's entries, instead of one `PyDict_SetItem` per key.
+//
+// Writing the entries relies on the private dict keys layout, so it is gated
+// like `dumps`' direct iteration (`rjson_dict_direct`: CPython 3.11-3.13 GIL
+// builds, plus `ser::dictiter`'s import-time self-test) and on `shape_self_test`.
+
+/// Number of shape slots (direct-mapped by the shape's signature).
+#[cfg(rjson_dict_direct)]
+const SHAPE_SLOTS: usize = 64;
+#[cfg(rjson_dict_direct)]
+const _: () = assert!(SHAPE_SLOTS.is_power_of_two());
+/// Objects with more keys are built by `build_dict`.
+#[cfg(rjson_dict_direct)]
+const SHAPE_MAX_KEYS: usize = 64;
+
+#[cfg(rjson_dict_direct)]
+#[derive(Clone, Copy)]
+struct ShapeSlot {
+    /// Signature of the template's shape (0: no template).
+    sig: u64,
+    /// Strong reference: a dict with the shape's keys and `None` values, one
+    /// entry per key in document order (so it also keeps the keys alive and
+    /// their pointers unique), or null.
+    template: *mut ffi::PyObject,
+    /// Signature of the last shape that missed in this slot; seeing it again
+    /// right away makes it the slot's template. A single odd object thus
+    /// doesn't evict a template, and a false match only costs an adoption.
+    candidate: u64,
+}
+
+/// Only touched with the GIL held, like `KEY_CACHE`.
+#[cfg(rjson_dict_direct)]
+static mut SHAPES: [ShapeSlot; SHAPE_SLOTS] =
+    [ShapeSlot { sig: 0, template: ptr::null_mut(), candidate: 0 }; SHAPE_SLOTS];
+
+#[cfg(rjson_dict_direct)]
+static mut SHAPES_ENABLED: bool = false;
+
+/// Enable the shape cache if dict entries can be written directly here.
+/// Called once at import, after `ser::init` (which runs dictiter's test).
+pub(crate) fn init() {
+    #[cfg(rjson_dict_direct)]
+    unsafe {
+        SHAPES_ENABLED = crate::ser::dictiter::ENABLED && shape_self_test();
+    }
+}
+
+/// `build_dict` through the shape cache (see above). `1 <= n <= SHAPE_MAX_KEYS`.
+#[cfg(rjson_dict_direct)]
+#[inline(never)]
+unsafe fn shaped_dict(kv: *const *mut ffi::PyObject, n: usize) -> *mut ffi::PyObject {
+    // Order-sensitive fold of the key pointers (only picks the slot and
+    // filters; a hit is confirmed pointer by pointer).
+    let mut h = n as u64;
+    for i in 0..n {
+        h = h.rotate_left(7) ^ (*kv.add(2 * i) as u64);
+    }
+    let sig = h.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    // Top bits of the signature pick the slot (SHAPE_SLOTS is a power of two).
+    let slot = &mut *ptr::addr_of_mut!(SHAPES[(sig >> (64 - SHAPE_SLOTS.trailing_zeros())) as usize]);
+    if slot.sig == sig {
+        if let Some(d) = clone_template(slot.template, kv, n) {
+            return d;
+        }
+    }
+    let d = build_dict(kv, n);
+    if d.is_null() {
+        return d;
+    }
+    if slot.candidate == sig {
+        // `d` has exactly `n` entries only if its keys are distinct; a shape
+        // with duplicate keys can't be a template (the last value wins).
+        if (*(d as *mut ffi::PyDictObject)).ma_used as usize == n {
+            let t = new_template(kv, n);
+            if !t.is_null() {
+                if !slot.template.is_null() {
+                    ffi::Py_DECREF(slot.template);
+                }
+                slot.template = t;
+                slot.sig = sig;
+            }
+        }
+        slot.candidate = 0;
+    } else {
+        slot.candidate = sig;
+    }
+    d
+}
+
+/// A dict with the `n` distinct keys at `kv` (stride 2) mapped to `None`, one
+/// entry per key in order, or null (no exception set) if that can't be built.
+#[cfg(rjson_dict_direct)]
+#[cold]
+unsafe fn new_template(kv: *const *mut ffi::PyObject, n: usize) -> *mut ffi::PyObject {
+    let t = ffi::PyDict_New();
+    if t.is_null() {
+        ffi::PyErr_Clear();
+        return t;
+    }
+    for i in 0..n {
+        // Exact str keys with a cached hash: runs no Python code.
+        if ffi::PyDict_SetItem(t, *kv.add(2 * i), ffi::Py_None()) != 0 {
+            ffi::PyErr_Clear();
+            ffi::Py_DECREF(t);
+            return ptr::null_mut();
+        }
+    }
+    match crate::ser::dictiter::entries(t) {
+        Some((_, m, _)) if m == n => t,
+        _ => {
+            ffi::Py_DECREF(t);
+            ptr::null_mut()
+        }
+    }
+}
+
+/// If the keys at `kv` are exactly the template's (same objects, same
+/// order), a new dict with those keys and the values at `kv`: `Some(dict)`,
+/// or `Some(null)` with an exception set. `None` if the shape differs.
+#[cfg(rjson_dict_direct)]
+#[inline(always)]
+unsafe fn clone_template(
+    t: *mut ffi::PyObject,
+    kv: *const *mut ffi::PyObject,
+    n: usize,
+) -> Option<*mut ffi::PyObject> {
+    let (tk, m, ts) = crate::ser::dictiter::entries(t)?;
+    if m != n {
+        return None;
+    }
+    for i in 0..n {
+        if *tk.add(i * ts) != *kv.add(2 * i) {
+            return None;
+        }
+    }
+    // The template is combined and has no deleted entries, so the copy
+    // clones its key table: the same entries, in the same order.
+    let d = ffi::PyDict_Copy(t);
+    if d.is_null() {
+        return Some(d);
+    }
+    let (dk, ds) = match crate::ser::dictiter::entries(d) {
+        Some((dk, m, ds)) if m == n => (dk, ds),
+        _ => {
+            ffi::Py_DECREF(d);
+            return None;
+        }
+    };
+    let mut gc = false;
+    for i in 0..n {
+        // SAFETY: entry i of `d` is live (no deleted entries) and holds the
+        // copy's own reference to `None`, which is replaced by a new
+        // reference to the value. Nobody has seen `d` yet, so no lookup
+        // cache or dict watcher can observe the change.
+        let slot = dk.add(i * ds + 1) as *mut *mut ffi::PyObject;
+        let v = *kv.add(2 * i + 1);
+        gc |= ffi::PyType_IS_GC(ffi::Py_TYPE(v)) != 0;
+        ffi::Py_INCREF(v);
+        let old = *slot;
+        *slot = v;
+        ffi::Py_DECREF(old);
+    }
+    // The template holds no container, so its copy is untracked; track it
+    // when a value is one, as `PyDict_SetItem` would (else a cycle through
+    // it could never be collected).
+    if gc && ffi::PyObject_GC_IsTracked(d) == 0 {
+        ffi::PyObject_GC_Track(d as *mut _);
+    }
+    Some(d)
+}
+
+/// Build a template and one dict from it, and check the dict against the
+/// C API (size, order, values, GC tracking). Runs once at import.
+#[cfg(rjson_dict_direct)]
+fn shape_self_test() -> bool {
+    unsafe {
+        let mut objs: Vec<*mut ffi::PyObject> = Vec::new();
+        let ok = (|| {
+            let mut kv = [ptr::null_mut(); 6];
+            for (i, name) in [c"a", c"bb", c"ccc"].iter().enumerate() {
+                let k = ffi::PyUnicode_FromString(name.as_ptr());
+                let v = if i == 1 { ffi::PyList_New(0) } else { ffi::PyLong_FromLong(i as _) };
+                objs.push(k);
+                objs.push(v);
+                if k.is_null() || v.is_null() || ffi::PyObject_Hash(k) == -1 {
+                    return false;
+                }
+                kv[2 * i] = k;
+                kv[2 * i + 1] = v;
+            }
+            let t = new_template(kv.as_ptr(), 3);
+            if t.is_null() {
+                return false;
+            }
+            objs.push(t);
+            let d = match clone_template(t, kv.as_ptr(), 3) {
+                Some(d) if !d.is_null() => d,
+                _ => return false,
+            };
+            objs.push(d);
+            if ffi::PyDict_Size(d) != 3 || ffi::PyObject_GC_IsTracked(d) == 0 {
+                return false;
+            }
+            let (mut pos, mut i) = (0, 0);
+            let (mut k, mut v) = (ptr::null_mut(), ptr::null_mut());
+            while ffi::PyDict_Next(d, &mut pos, &mut k, &mut v) != 0 {
+                if i >= 3
+                    || k != kv[2 * i]
+                    || v != kv[2 * i + 1]
+                    || ffi::PyDict_GetItem(d, kv[2 * i]) != kv[2 * i + 1]
+                {
+                    return false;
+                }
+                i += 1;
+            }
+            // The template itself is unchanged.
+            i == 3 && ffi::PyDict_GetItem(t, kv[2]) == ffi::Py_None()
+        })();
+        for o in objs {
+            if !o.is_null() {
+                ffi::Py_DECREF(o);
+            }
+        }
+        ffi::PyErr_Clear();
+        ok
+    }
 }
 
 // ============================================================================

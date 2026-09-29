@@ -450,7 +450,7 @@ self-tested at import (`CLAUDE.md`); the full review is in
 Reproduce with `python benches/why_faster.py` (valgrind for the instruction counts).
 
 **The full design, stage by stage:** [docs/ARCHITECTURE.md](https://github.com/TinDang97/rjson/blob/main/docs/ARCHITECTURE.md) walks both pipelines
-function by function (input handling, the key cache, number parsing, string decoding, the
+function by function (input handling, the key and shape caches, number parsing, string decoding, the
 output-buffer policy, escaping kernels, the dict walk, native types, guarded mode and the
 safety checks), with the reason and the measured effect of each choice.
 
