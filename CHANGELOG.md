@@ -18,6 +18,10 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
   benchmark's unicode strings 0.81× → 0.61×; pure CJK unchanged. Their speed
   also no longer changes from one PGO build to the next (PGO wheels decoded
   such text up to 20% slower than plain builds).
+- `dumps_str` widens the ASCII runs and strings of a non-ASCII result with
+  explicit SSE4.1 steps instead of an auto-vectorized loop, whose shape the
+  PGO profile decided: a first 0.4.1 build filled twitter.json's result 5–8%
+  slower than 0.4.0 with the same instruction count; now at 0.4.0's speed.
 
 ### Changed
 
