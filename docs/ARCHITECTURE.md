@@ -526,8 +526,9 @@ This rule exists because an early version hard-coded the str data offset: it cra
   size (~20% of a call's instructions). Small outputs (recent peak ≤ 4 KiB) now go
   through a per-thread scratch buffer and are copied into an exact-size result: no
   growth, and no unused allocation left in the result **[R]**.
-- **Non-x86 CPUs**: the scalar/SWAR fallbacks are correct and tested on aarch64, but NEON
-  kernels aren't written yet (issue #25).
+- **Non-x86 CPUs**: aarch64 has NEON versions of the SSE2 scans and escape kernels (issue
+  #25, `src/neon.rs`), tested under emulation; their speed on real ARM hardware is not
+  measured yet, and the UTF-8 block decoders and `str` widening are still scalar there.
 
 ---
 

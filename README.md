@@ -576,8 +576,8 @@ maturin develop --release && python -m pytest tests -q
 
 - An incremental NDJSON decoder for sockets and a streaming encoder for async I/O;
   free-threading and subinterpreter support ([docs/ASYNC.md](https://github.com/TinDang97/rjson/blob/main/docs/ASYNC.md#roadmap))
-- Performance: NEON kernels for aarch64; `indent=`/`sort_keys=` written by the serializer
-  itself
+- Performance: measured NEON speedups on ARM hardware, and NEON UTF-8 decoders;
+  `indent=`/`sort_keys=` written by the serializer itself
 
 ## License
 

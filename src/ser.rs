@@ -750,6 +750,14 @@ unsafe fn count_escapes(src: *const u8, len: usize) -> usize {
             i += 16;
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    {
+        use crate::neon;
+        while i + 16 <= len {
+            n += neon::count(neon::special(neon::load(src.add(i)))) as usize;
+            i += 16;
+        }
+    }
     while i < len {
         n += *NEEDS_ESCAPE.get_unchecked(*src.add(i) as usize) as usize;
         i += 1;
@@ -786,7 +794,39 @@ unsafe fn copy_upto32(dst: *mut u8, src: *const u8, n: usize) {
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+/// `len >= 16`: the SSE2 path of `escape_long_impl` with NEON.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn escape_long(mut dst: *mut u8, mut src: *const u8, len: usize) -> *mut u8 {
+    use crate::neon;
+    let end = src.add(len);
+    while end.offset_from(src) >= 16 {
+        let v = neon::load(src);
+        let m = neon::special(v);
+        if !neon::any(m) {
+            neon::store(dst, v);
+            dst = dst.add(16);
+        } else {
+            dst = escape_block(dst, src, 16, neon::movemask(m));
+        }
+        src = src.add(16);
+    }
+    // Tail (< 16 bytes): test the last 16 input bytes (in bounds since
+    // len >= 16), keeping only the bits of the not-yet-written bytes.
+    let rem = end.offset_from(src) as usize;
+    if rem != 0 {
+        let m = neon::movemask(neon::special(neon::load(end.sub(16)))) >> (16 - rem);
+        if m == 0 {
+            copy_small(dst, src, rem);
+            dst = dst.add(rem);
+        } else {
+            dst = escape_block(dst, src, rem, m);
+        }
+    }
+    dst
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 #[inline(always)]
 unsafe fn escape_long(mut dst: *mut u8, src: *const u8, len: usize) -> *mut u8 {
     let mut i = 0;
@@ -953,10 +993,58 @@ unsafe fn kind_needs_escape(kind: u32, data: *const u8, n: usize) -> bool {
             _ => kscan::scan::<4>(data, bytes),
         };
     }
+    #[cfg(target_arch = "aarch64")]
+    if bytes >= 16 * kind as usize {
+        return match kind {
+            1 => kscan_neon::scan::<1>(data, bytes),
+            2 => kscan_neon::scan::<2>(data, bytes),
+            _ => kscan_neon::scan::<4>(data, bytes),
+        };
+    }
     match kind {
         1 => units_need_escape(data, n),
         2 => units_need_escape(data as *const u16, n),
         _ => units_need_escape(data as *const u32, n),
+    }
+}
+
+/// NEON scans for `kind_needs_escape`: 16 units per step, narrowed to bytes
+/// with saturating narrows (a unit above 0xff becomes 0xff, which never
+/// needs escaping), then one overlapping step for the rest.
+#[cfg(target_arch = "aarch64")]
+mod kscan_neon {
+    use crate::neon;
+    use std::arch::aarch64::*;
+
+    /// 16 `K`-byte units at `p` as 16 bytes with the same escape status.
+    #[inline(always)]
+    unsafe fn units16<const K: usize>(p: *const u8) -> uint8x16_t {
+        if K == 1 {
+            neon::load(p)
+        } else if K == 2 {
+            let p = p as *const u16;
+            vcombine_u8(vqmovn_u16(vld1q_u16(p)), vqmovn_u16(vld1q_u16(p.add(8))))
+        } else {
+            let p = p as *const u32;
+            let lo = vcombine_u16(vqmovn_u32(vld1q_u32(p)), vqmovn_u32(vld1q_u32(p.add(4))));
+            let hi = vcombine_u16(vqmovn_u32(vld1q_u32(p.add(8))), vqmovn_u32(vld1q_u32(p.add(12))));
+            vcombine_u8(vqmovn_u16(lo), vqmovn_u16(hi))
+        }
+    }
+
+    /// `bytes >= 16 * K`, a multiple of `K`.
+    pub unsafe fn scan<const K: usize>(p: *const u8, bytes: usize) -> bool {
+        let step = 16 * K;
+        let mut acc = vdupq_n_u8(0);
+        let mut i = 0;
+        while i + step <= bytes {
+            acc = vorrq_u8(acc, neon::special(units16::<K>(p.add(i))));
+            i += step;
+        }
+        if i < bytes {
+            acc = vorrq_u8(acc, neon::special(units16::<K>(p.add(bytes - step))));
+        }
+        neon::any(acc)
     }
 }
 
@@ -1207,6 +1295,7 @@ unsafe fn widen_escaped<S: Unit, D: Unit>(src: *const S, dst: *mut D, n: usize) 
 /// `_mm_shuffle_epi8` controls for `write_short_ascii`: 16 bytes starting at
 /// `16 - len` move the last `len` bytes of a vector to the front and zero
 /// the rest (0x80 lanes).
+#[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
 static SHIFT_TAB: [u8; 32] = {
     let mut t = [0x80u8; 32];
     let mut i = 0;
@@ -3341,7 +3430,13 @@ impl StrUnit for u16 {
             let v = _mm_loadu_si128(p as *const __m128i);
             _mm_cvtsi128_si64(_mm_packus_epi16(v, v)) as u64
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        {
+            use std::arch::aarch64::*;
+            // Unsigned saturation: > 0xFF becomes 0xFF, as the scalar version.
+            vget_lane_u64::<0>(vreinterpret_u64_u8(vqmovn_u16(vld1q_u16(p))))
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             let mut w = 0u64;
             for k in 0..8 {
@@ -3368,7 +3463,13 @@ impl StrUnit for u32 {
             let w = _mm_packs_epi32(a, b);
             _mm_cvtsi128_si64(_mm_packus_epi16(w, w)) as u64
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(target_arch = "aarch64")]
+        {
+            use std::arch::aarch64::*;
+            let w = vcombine_u16(vqmovn_u32(vld1q_u32(p)), vqmovn_u32(vld1q_u32(p.add(4))));
+            vget_lane_u64::<0>(vreinterpret_u64_u8(vqmovn_u16(w)))
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
         {
             let mut w = 0u64;
             for k in 0..8 {

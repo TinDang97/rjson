@@ -8,6 +8,7 @@
 //! - `native.rs`: datetime/UUID/dataclass/Enum support for `dumps` (type lookup, formatting).
 //! - `entry.rs`: raw entry points and module registration.
 //! - `stack.rs`: thread stack headroom checks for deep nesting.
+//! - `neon.rs`: NEON versions of the SSE2 primitives (aarch64).
 
 use pyo3::prelude::*;
 
@@ -15,6 +16,8 @@ mod compat;
 mod entry;
 mod lemire;
 mod native;
+#[cfg(target_arch = "aarch64")]
+mod neon;
 mod parser;
 mod ser;
 mod stack;

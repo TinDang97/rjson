@@ -23,6 +23,11 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
   grew. It now encodes in chunks that fit, like the ASCII path. 417 → 0 page
   faults per call on that case; the regression test for it no longer depends
   on transparent huge pages happening to cover the buffer.
+- aarch64 (Graviton, Ampere, Apple Silicon): NEON versions of the string
+  scans and escape kernels in `loads` and `dumps`, which used scalar or
+  8-byte SWAR loops there (#25). Same results, checked under emulation with
+  the full test suite and the fuzzer; the speedup on ARM hardware is not
+  measured yet.
 
 ## [0.4.1] - 2026-09-30
 
