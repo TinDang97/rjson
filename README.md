@@ -139,6 +139,7 @@ rjson.dumps({"price": Decimal("9.99")}, default=str)             # convert the r
 | name | kind | notes |
 |---|---|---|
 | `loads(data, *, lenient=False)` | function → object | `data`: `str`, `bytes`, `bytearray` or `memoryview` (any layout) |
+| `loads_ndjson(data, *, lenient=False)` | function → `list` | NDJSON / JSON Lines, one document per line, in one call |
 | `dumps(obj, *, default=None, passthrough=0, non_str_keys=False, indent=None, separators=None, sort_keys=False, ensure_ascii=False, allow_nan=False)` | function → `bytes` | UTF-8 JSON, like `orjson.dumps` |
 | `dumps_str(...)` | function → `str` | same options; like `json.dumps(obj, ensure_ascii=False, separators=(",", ":"))` |
 | `dumps_bytes(...)` | function → `bytes` | alias of `dumps`, kept for compatibility |
@@ -154,6 +155,12 @@ The wheel ships type stubs (`py.typed`), so mypy and pyright check calls to rjso
   `inf` are parsed natively (no speed cost); lone surrogates (`"\ud83d"`, sent by
   JavaScript clients that cut an emoji in half), UTF-16/UTF-32 bytes and nesting deeper
   than 1024 go through `json.loads`. The default stays strict, like orjson.
+- **`loads_ndjson` (NDJSON / JSON Lines):** `rjson.loads_ndjson(data)` is
+  `[rjson.loads(line) for line in data.split(b"\n") if line.strip()]` in one call: each line
+  gives what `loads(line)` gives (the same errors too), blank lines are skipped, `\r\n`
+  works, and an error's `lineno`/`colno` are those of the whole input. It parses all lines
+  with one warm parser, without slicing the input into a `bytes` per line: 1.4–2.6× faster
+  than the same loop on orjson, 7–49% faster than on `rjson.loads`.
 - **Types:** `dict` (str keys), `list`, `tuple`, `str`, `int` (any size), `float`, `bool`,
   `None`, and their subclasses (`IntEnum`, `str` enums, `OrderedDict`, `namedtuple`, …).
 - **Native types, byte-identical to orjson:** `datetime` (RFC 3339: `2024-05-01T09:30:00`,

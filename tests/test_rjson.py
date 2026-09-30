@@ -1088,6 +1088,7 @@ PUBLIC_NAMES = {
     "dumps_bytes",
     "dumps_str",
     "loads",
+    "loads_ndjson",
 }
 
 

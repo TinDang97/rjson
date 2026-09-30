@@ -16,6 +16,7 @@ __all__ = [
     "dumps_bytes",
     "dumps_str",
     "loads",
+    "loads_ndjson",
 ]
 
 __version__: str
@@ -36,6 +37,15 @@ def loads(data: str | bytes | bytearray | memoryview, /, *, lenient: bool = Fals
     lenient: also accept what json.loads accepts (NaN/Infinity, a UTF-8 BOM on
     bytes, numbers overflowing to inf, lone surrogates, UTF-16/32 bytes); the
     result then equals json.loads's.
+    """
+
+def loads_ndjson(data: str | bytes | bytearray | memoryview, /, *, lenient: bool = False) -> list[Any]:
+    """Deserialize newline-delimited JSON (NDJSON / JSON Lines) to a list, one
+    document per line, in one call; blank lines are skipped.
+
+    Each line gives what loads(line, lenient=lenient) gives. Lines end with
+    "\n" (a "\r" before it is whitespace). A JSONDecodeError's pos, lineno and
+    colno are positions in the whole input.
     """
 
 def dumps(

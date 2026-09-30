@@ -221,7 +221,31 @@ disable the collector for the duration of `loads` there, and restore its previou
 CPython 3.12+ already defers collection until the call returns, so rjson leaves it alone
 there.
 
-### 3.7 Compared with orjson
+### 3.7 NDJSON: one parser for every line
+
+`rjson.loads_ndjson` (`parser::Lines`, `entry::ndjson_impl`) parses newline-delimited JSON
+in one call. The usual loop, `[loads(line) for line in data.splitlines()]`, pays per line
+for a `bytes` object, a call, input setup, a GC pause and a list append. `Lines` keeps one
+`Parser` (pooled stacks, GC pause, warm key and shape caches) for the whole input, and the
+values pile up on its value stack until the list is built at its exact size.
+
+Each value is parsed in place in the whole buffer, so the parser's NUL-terminator
+guarantee still holds. A value is accepted only when `loads(line)` would accept that line:
+
+- after it, only spaces, tabs and `\r` up to the `\n` (or the end);
+- no `\n` inside it (whitespace between tokens may hold one; `find_newline` checks).
+
+Any other line goes to a cold path (`ndjson_line`): an error, a value spanning lines, two
+values on a line, or anything lenient mode passes to `json.loads`. That path calls
+`rjson.loads` on the line alone and moves an error's position into the whole input, so
+values and error messages are `loads`'s by construction, and `lineno` is the input's line.
+
+- **vs orjson:** 1.4–2.6× faster than the same loop on orjson.
+- **vs `rjson.loads` in a loop:** 7–49% faster **[R]**.
+
+The command line uses it in 16 KiB chunks (§5).
+
+### 3.8 Compared with orjson
 
 orjson hands the text to yyjson, which builds its own document tree
 (`src/deserialize/backend/yyjson.rs`), and then walks that tree to create Python objects.
@@ -396,6 +420,14 @@ options; differential tests cover both (`tests/test_format.py`). The command-lin
 thin argparse layer over this. Its output is byte-identical to `python -m json.tool`
 (`tests/test_cli.py` runs both), and it imports `typing`, `shutil` and `tempfile` only when
 needed, because process start is most of the time for a small file.
+
+`--json-lines` parses with `loads_ndjson` (§3.7) in chunks of 16 KiB cut at a newline, both
+for input in memory and for streamed stdin (`read1`, so documents are still written as
+their lines arrive). Small chunks matter: with 1 MiB chunks it was 40% slower, because each
+chunk's documents were built together and fell out of cache before they were written. A
+chunk falls back to the per-line path when the two would split lines differently (a lone
+`\r`, `\x0b` or `\x0c`), and on any error, so the documents printed before an error and
+the error message stay those of `json.tool`.
 
 ---
 

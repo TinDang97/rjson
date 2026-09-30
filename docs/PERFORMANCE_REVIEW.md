@@ -170,6 +170,20 @@ Second round (branch `wip-loads`, results in §1):
     Memory: copies have the compact str-key table that `json.loads`'s dicts have. On 3.11/3.12 objects with more than 8 keys used to get `_PyDict_NewPresized`'s generic table; results with 12 and 30 keys per record are now 16% smaller (a 12-key dict: 632 → 464 B). Nothing is larger than before.
 
     Tried first and dropped: copying the template and then setting each value with `PyDict_SetItem`, which was 7–9% faster on records but 8–15% slower on twitter/citm/github; and a single-slot cache, which kept replacing its template on mixed documents (twitter/citm up to 13% slower).
+13. **`loads_ndjson`** (design in ARCHITECTURE.md §3.7). NDJSON was parsed with a Python loop, `[loads(line) for line in data.splitlines()]`, which pays per line for a `bytes` object, a call, input setup and a GC pause: 60-byte event lines took ~650 ns each, about half of it overhead. One call now parses every line with one parser, and anything unusual goes through `loads(line)` itself, so results and errors are unchanged.
+
+    rjson ÷ orjson time, each library's per-line loop vs `loads_ndjson` (plain builds, best of 15; 200-byte log lines ×50k, 60-byte events ×100k, 700-byte API records ×8k, mixed shapes ×60k):
+
+    | case | loop 3.11 | ndjson 3.11 | loop 3.12 | ndjson 3.12 | loop 3.13 | ndjson 3.13 |
+    |---|---|---|---|---|---|---|
+    | logs | 0.70 | 0.46 | 0.72 | 0.44 | 0.75 | 0.47 |
+    | events | 0.73 | 0.40 | 0.76 | 0.41 | 0.76 | 0.39 |
+    | API records | 0.44 | 0.41 | 0.79 | 0.53 | 0.82 | 0.70 |
+    | mixed shapes | 0.78 | 0.46 | 0.83 | 0.52 | 0.76 | 0.51 |
+
+    `loads_ndjson` is as fast as parsing the same records as one JSON array; what is left is building the objects. Plain `loads` is unchanged. `get_input` got a second caller, and LLVM stopped inlining it into `loads` (+20 instructions per call, valgrind); with `#[inline(always)]` `bytes` input is back to +4 (within 0.2%) and `str` input 72 instructions faster than before.
+
+    The command line's `--json-lines` uses it in 16 KiB chunks. On 200k records (CPython 3.11, whole process, best of 5): `--validate` 0.23 → 0.17 s, file to file 0.48 → 0.42 s, stdin to stdout 0.58 → 0.52–0.57 s, with identical output. Chunk size mattered more than the call itself: 1 MiB chunks made the streamed path 15% *slower* than the per-line loop, because each chunk's ~7,000 documents were built together and were out of cache by the time they were written and freed. Parsing time by chunk: 4 KiB 116 ms, 16 KiB 117 ms, 64 KiB 140 ms, 256 KiB 151 ms, 1 MiB 203 ms (per-line loop: 175 ms).
 
 ### dumps (`src/ser.rs`)
 
