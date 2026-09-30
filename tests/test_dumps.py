@@ -171,6 +171,45 @@ class TestDirectUtf8Encoding:
             for obj in (s, [s, {"k": s}], {s: s}):
                 assert rjson.dumps(obj) == self.expected(obj)
 
+    def test_chunked_encoding_of_long_strings(self):
+        # Long UCS2/UCS4 strings are encoded in chunks the buffer surely
+        # holds (6 bytes per unit worst case), and near the end with a
+        # per-unit bound, instead of reserving 6x the whole string up front.
+        import threading
+
+        units = ["日", "😀", "é", "a", '"', "\\", "\n", "\x01", "\x1f", "߿", "ࠀ", "\U0010ffff"]
+        cases = []
+        for n in (256, 4095, 4096, 4097, 8193, 30000):
+            for k, u in enumerate(units):
+                base = (units[(k + 1) % len(units)] + u) * (n // 2 + 1)
+                cases.append(base[:n] + "😀")  # UCS4
+                cases.append(base[:n].replace("😀", "日").replace("\U0010ffff", "日"))
+
+        def run():
+            outs = []
+            for s in cases:
+                rjson.dumps({"small": 1})  # a small previous result: small buffer
+                outs.append((s, rjson.dumps(s), rjson.dumps([s, {"k": s}])))
+            return outs
+
+        results = []
+        t = threading.Thread(target=lambda: results.extend(run()))
+        t.start()
+        t.join()
+        for s, one, nested in results:
+            assert one == self.expected(s)
+            assert nested == self.expected([s, {"k": s}])
+
+    def test_lone_surrogate_after_the_buffer_grew(self):
+        # A lone surrogate found in a later chunk still raises the same
+        # error, and ensure_ascii still writes it as json does.
+        for n in (300, 5000, 20000):
+            for s in ("日" * n + "\ud800", "😀" * n + "\udc00" + "x" * 10):
+                with pytest.raises(UnicodeEncodeError):
+                    rjson.dumps(s)
+                assert rjson.dumps(s, ensure_ascii=True) == json.dumps(s).encode()
+                assert rjson.dumps_str([s]) == json.dumps([s], ensure_ascii=False, separators=(",", ":"))
+
     def test_every_unit_at_every_offset(self):
         # Each character kind (incl. escapes) at every offset of the 8-unit
         # ASCII blocks, in strings long enough for the direct encoder.

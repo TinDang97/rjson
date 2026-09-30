@@ -16,6 +16,13 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
   went from 1.02× to 1.31× orjson's speed, 1,000 small responses from 1.16×
   to 1.54×, with 19% fewer instructions per call. Small results also hold no
   unused allocation (a kept 145-byte result: 382 → 187 bytes).
+- Repeated `dumps` of a long non-ASCII (UCS-2/UCS-4) string no longer maps
+  and page-faults a fresh 32 MiB buffer on every call: the direct UTF-8
+  encoder reserved 6 bytes per character up front (2.4 MB for 400,000 emoji,
+  whose result is 1.6 MB), so a buffer sized from the previous result always
+  grew. It now encodes in chunks that fit, like the ASCII path. 417 → 0 page
+  faults per call on that case; the regression test for it no longer depends
+  on transparent huge pages happening to cover the buffer.
 
 ## [0.4.1] - 2026-09-30
 

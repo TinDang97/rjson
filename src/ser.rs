@@ -2199,24 +2199,17 @@ impl Serializer {
             ffi::Py_DECREF(b);
             return q;
         }
-        // Worst case 6 output bytes per character (an escape; UTF-8 needs at
-        // most 4), two quotes, and 8 bytes for the blind escape-table store.
-        let q = self.reserve(p, len * 6 + 2 + 8);
         let data = crate::compat::PyUnicode_DATA(obj);
-        *q = b'"';
         let end = if kind == 2 {
-            encode_utf8_escaped(q.add(1), data as *const u16, len)
+            self.encode_utf8_chunked(p, data as *const u16, len)
         } else {
-            encode_utf8_escaped(q.add(1), data as *const u32, len)
+            self.encode_utf8_chunked(p, data as *const u32, len)
         };
         match end {
-            Some(e) => {
-                *e = b'"';
-                e.add(1)
-            }
+            Ok(e) => e,
             // A lone surrogate: let CPython's encoder raise the same
             // UnicodeEncodeError as before (nothing past `q` is kept).
-            None => {
+            Err(q) => {
                 let (src, n) = match utf8_of(obj) {
                     Ok(v) => v,
                     Err(_) if self.wtf8 => return self.write_wtf8(q, obj),
@@ -2225,6 +2218,47 @@ impl Serializer {
                 self.write_utf8(q, src, n, 0, 0)
             }
         }
+    }
+
+    /// Writes `"<escaped UTF-8 of len units>"` at `p`: `Ok(end)`, or at a
+    /// lone surrogate `Err(q)` with `q` the cursor at the opening quote
+    /// (nothing written past it is kept).
+    ///
+    /// A unit takes at most 6 output bytes (an escape; UTF-8 needs at most 4),
+    /// but reserving that for the whole string made a buffer sized from the
+    /// previous result grow on every call: 400,000 emoji reserved 2.4 MB for
+    /// a 1.6 MB result, so each call took the large-growth path and mapped
+    /// (and page-faulted) a fresh 32 MiB block. As `escape_chunked` does for
+    /// UTF-8, encode as much as the room surely holds, and near the end
+    /// reserve a per-unit bound for the rest.
+    unsafe fn encode_utf8_chunked<T: StrUnit>(&mut self, p: Cur, src: *const T, len: usize) -> Result<Cur, Cur> {
+        // The opening quote, plus 8 bytes of slack for the blind escape-table store.
+        let q = self.reserve(p, 1 + 8);
+        *q = b'"';
+        let start = self.offset(q);
+        let mut cur = q.add(1);
+        let mut off = 0;
+        while off < len {
+            let mut n = len - off;
+            let room = self.room(cur);
+            if room < n * 6 + 8 {
+                let safe = room.saturating_sub(8) / 6;
+                if safe >= 4096 {
+                    n = safe;
+                } else {
+                    n = n.min(4096);
+                    cur = self.reserve(cur, utf8_escaped_bound(src.add(off), n) + 8);
+                }
+            }
+            match encode_utf8_escaped(cur, src.add(off), n) {
+                Some(e) => cur = e,
+                None => return Err(self.buf.as_mut_ptr().add(start)),
+            }
+            off += n;
+        }
+        let cur = self.reserve(cur, 1);
+        *cur = b'"';
+        Ok(cur.add(1))
     }
 
     /// `str` output: record the non-ASCII string instead of encoding it.
@@ -3343,6 +3377,27 @@ impl StrUnit for u32 {
             w
         }
     }
+}
+
+/// Output bytes `encode_utf8_escaped` can write for these `n` units: 6 for a
+/// control character (`\\u00XX`), 2 for other ASCII (at most a 2-byte escape)
+/// and for U+0080..U+07FF, 3 up to U+FFFF, 4 above.
+#[inline]
+unsafe fn utf8_escaped_bound<T: StrUnit>(src: *const T, n: usize) -> usize {
+    let mut total = 0;
+    for k in 0..n {
+        let c = (*src.add(k)).get();
+        total += if c < 0x20 {
+            6
+        } else if c < 0x800 {
+            2
+        } else if c < 0x10000 {
+            3
+        } else {
+            4
+        };
+    }
+    total
 }
 
 /// Encodes `len` units of native str data as escaped UTF-8 at `dst` (the
