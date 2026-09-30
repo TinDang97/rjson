@@ -7,6 +7,27 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
 
 ## [Unreleased]
 
+### Performance
+
+- `loads` decodes non-ASCII strings 16 bytes per step with SIMD instead of
+  branching on each character's length, for all three string kinds:
+  accented Latin text 0.53× → 0.31× of orjson's time, Cyrillic and Greek
+  ~0.73× → 0.55×, hangul 0.88× → 0.72×, emoji-only text 1.1× → 0.67×, the
+  benchmark's unicode strings 0.81× → 0.61×; pure CJK unchanged. Their speed
+  also no longer changes from one PGO build to the next (PGO wheels decoded
+  such text up to 20% slower than plain builds).
+
+### Changed
+
+- PGO builds are reproducible: `scripts/pgo_train.py` makes a fixed number of
+  calls per training step instead of running each for 0.2 s, and
+  `scripts/build_pgo.sh` trains with `PYTHONHASHSEED=0` and, on Linux, address
+  randomization off (the `loads` shape cache picks slots from object
+  addresses). Two builds of the same commit now give a byte-identical
+  extension module; before, their speed on single cases differed by up to 20%.
+  `RJSON_PGO_SECONDS` is replaced by `RJSON_PGO_SCALE`; `PROFILE_DIR=` keeps
+  the merged profiles.
+
 ## [0.4.0] - 2026-09-30
 
 ### Added

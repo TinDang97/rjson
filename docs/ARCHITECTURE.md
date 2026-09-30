@@ -189,9 +189,17 @@ the same pass notes whether any byte was non-ASCII. Then:
 
 - **ASCII, no escapes** (most strings): `PyUnicode_New(len, 127)` plus one `memcpy`.
 - **Non-ASCII**: decoded from UTF-8 straight into the final UCS1, UCS2 or UCS4 buffer: one
-  counting pass, one writing pass, no temporary. For UCS2 text (CJK, Cyrillic),
-  `decode_ucs2` widens 8/16 ASCII bytes per step and handles 5 three-byte characters per
-  step with shuffles (SSSE3). CJK `loads` went from 1.3× to 0.55–0.91× **[R]**.
+  counting pass, one writing pass, no temporary. Each kind has a block decoder (SSSE3,
+  `decode_ucs1/2/4_ssse3`): per 16-byte block, the code point each byte would have as the
+  end of a character (its payload plus up to 3 earlier payloads, combined with
+  multiply-adds and shifts), then the bytes where a character really ends packed 8 lanes
+  at a time through a shuffle table. The cursor always advances by 16, so no step waits
+  on a branch or on the previous one; all-ASCII blocks, runs of five 3-byte characters
+  (CJK, UCS2) and of four 4-byte ones (emoji, UCS4) take shorter paths. A branch per
+  character (the previous design) mispredicted on words with accents or between spaces,
+  and its speed moved with code layout between PGO builds. Against orjson on 120-character
+  strings: Latin-1 0.53× → 0.31×, Cyrillic 0.71× → 0.55×, pure CJK unchanged (0.74×),
+  emoji 1.1× → 0.67×; unicode_strings `loads` 0.81× → 0.61× **[R]**.
 - **Escapes**: a 32-byte block kernel (SSE2, or AVX2 detected at run time) handles every
   escape of a block from one bitmask and decodes `\u` escapes and surrogate pairs inline.
   escaped_strings went 1.40 → 0.90 **[R]**.
@@ -498,7 +506,9 @@ This rule exists because an early version hard-coded the str data offset: it cra
   Building for `native`/v3 also made zmij ~1.6× slower on the benchmark host, because of the
   BMI2 code it generates **[R]**.
 - **PGO wheels.** `scripts/build_pgo.sh` builds instrumented, trains on synthetic documents
-  that share no data with any benchmark, then rebuilds. Worth 0–4%. An earlier profile
+  that share no data with any benchmark, then rebuilds. Worth 0–4%. Training makes a fixed
+  number of calls per case, with a fixed hash seed and (Linux) no address randomization, so
+  two builds of a commit give the same binary. An earlier profile
   trained on the benchmark itself showed 7–10% and was discarded as dishonest **[R]**.
 - **`panic = "abort"`**, and no `unwrap` on data that comes from Python.
 

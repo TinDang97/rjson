@@ -20,6 +20,8 @@
 #                 file extension`) and does not need to: with fat LTO rustc does
 #                 all codegen, so the linker does not affect the profile.
 #   MATURIN       maturin command (default: maturin)
+#   PROFILE_DIR   keep each merged profile as $PROFILE_DIR/<cpXY>.profdata, e.g. to
+#                 compare two builds (llvm-profdata overlap)
 #
 # The PGO flags go into CARGO_TARGET_<TRIPLE>_RUSTFLAGS, not RUSTFLAGS: RUSTFLAGS
 # replaces the rustflags from .cargo/config.toml (target-cpu=x86-64-v2 on
@@ -58,6 +60,12 @@ if [[ -z "$PROFDATA" ]]; then
     exit 1
 fi
 
+# Address randomization off for the training run where possible (Linux).
+NORAND=()
+if [[ "$(uname -s)" == Linux ]] && setarch "$(uname -m)" -R true 2>/dev/null; then
+    NORAND=(setarch "$(uname -m)" -R)
+fi
+
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
@@ -74,10 +82,17 @@ for PY in "$@"; do
     VPY="$run/venv/bin/python"
     [[ -x "$VPY" ]] || VPY="$run/venv/Scripts/python.exe"
     "$VPY" -m pip install -q --no-index --no-deps "$run"/wheels-gen/*.whl
-    "$VPY" "$ROOT/scripts/pgo_train.py"
+    # Fixed call counts (pgo_train.py) make the profile the same on every run,
+    # except for the loads shape cache: its slots are picked from object
+    # addresses. With address randomization off (and a fixed hash seed) two
+    # runs give identical profiles and so identical wheels.
+    PYTHONHASHSEED=0 ${NORAND[@]+"${NORAND[@]}"} "$VPY" "$ROOT/scripts/pgo_train.py"
 
     echo "==> [$tag] merge profiles"
     "$PROFDATA" merge -o "$run/merged.profdata" "$run/profraw"
+    if [[ -n "${PROFILE_DIR:-}" ]]; then
+        mkdir -p "$PROFILE_DIR" && cp "$run/merged.profdata" "$PROFILE_DIR/$tag.profdata"
+    fi
 
     echo "==> [$tag] optimized build"
     env "$FLAGS_VAR=$BASE_FLAGS -Cprofile-use=$(native "$run/merged.profdata") -Cllvm-args=-pgo-warn-missing-function=false" \

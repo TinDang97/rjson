@@ -19,7 +19,15 @@ different data and shapes:
 - subclasses (IntEnum, OrderedDict, str subclass, tuples, namedtuples)
 - error paths, touched a few times so they are laid out as cold
 
-``RJSON_PGO_SECONDS`` sets the time spent per (document, function) pair.
+Every training step (a document with dumps, dumps_str, or loads of one of its
+JSON texts) runs a fixed number of calls from ``CALLS``, never a time budget:
+with 0.2 s per step, the call counts (up to 32% apart between two runs), the
+profile and with it the optimized code layout changed with host load; two
+builds of one commit differed by 18% on a benchmark case (PERFORMANCE_REVIEW.md
+§4 item 19). ``CALLS`` keeps the weights of that time budget: it holds the
+median counts of ``python scripts/pgo_train.py --calibrate`` (3 time-budgeted
+runs on an instrumented build, see ``calibrate``); regenerate it when documents
+change. ``RJSON_PGO_SCALE`` (default 1) multiplies every count.
 """
 
 import collections
@@ -32,7 +40,98 @@ import time
 
 import rjson
 
-SECONDS_PER_CASE = float(os.environ.get("RJSON_PGO_SECONDS", "0.2"))
+SCALE = float(os.environ.get("RJSON_PGO_SCALE", "1"))
+CALIBRATE_SECONDS = 0.2  # per step, the former time budget
+
+# Calls per training step: median of 3 `--calibrate` runs on an instrumented
+# CPython 3.13 x86-64 build (0.4.0), i.e. what 0.2 s per step did on that host.
+CALLS = {
+    ('orders', 'dumps'): 249,
+    ('orders', 'dumps_str'): 248,
+    ('orders', 'loads_compact'): 57,
+    ('orders', 'loads_indent'): 50,
+    ('orders', 'loads_ascii'): 71,
+    ('orders', 'loads_bytes'): 73,
+    ('logs', 'dumps'): 263,
+    ('logs', 'dumps_str'): 279,
+    ('logs', 'loads_compact'): 73,
+    ('logs', 'loads_indent'): 64,
+    ('logs', 'loads_bytes'): 72,
+    ('users', 'dumps'): 984,
+    ('users', 'dumps_str'): 619,
+    ('users', 'loads_compact'): 124,
+    ('users', 'loads_indent'): 114,
+    ('users', 'loads_ascii'): 135,
+    ('users', 'loads_bytes'): 156,
+    ('metrics', 'dumps'): 489,
+    ('metrics', 'dumps_str'): 478,
+    ('metrics', 'loads_compact'): 212,
+    ('metrics', 'loads_indent'): 166,
+    ('metrics', 'loads_bytes'): 218,
+    ('geometry', 'dumps'): 130,
+    ('geometry', 'dumps_str'): 130,
+    ('geometry', 'loads_compact'): 68,
+    ('geometry', 'loads_indent'): 58,
+    ('geometry', 'loads_bytes'): 71,
+    ('unique_keys', 'dumps'): 2099,
+    ('unique_keys', 'dumps_str'): 1954,
+    ('unique_keys', 'loads_compact'): 327,
+    ('unique_keys', 'loads_indent'): 311,
+    ('unique_keys', 'loads_bytes'): 327,
+    ('wide', 'dumps'): 29198,
+    ('wide', 'dumps_str'): 29010,
+    ('wide', 'loads_compact'): 6902,
+    ('wide', 'loads_indent'): 6099,
+    ('wide', 'loads_bytes'): 6821,
+    ('numbers', 'dumps'): 161,
+    ('numbers', 'dumps_str'): 164,
+    ('numbers', 'loads_compact'): 96,
+    ('numbers', 'loads_indent'): 82,
+    ('numbers', 'loads_bytes'): 92,
+    ('texts', 'dumps'): 3616,
+    ('texts', 'dumps_str'): 3615,
+    ('texts', 'loads_compact'): 931,
+    ('texts', 'loads_indent'): 855,
+    ('texts', 'loads_bytes'): 1010,
+    ('intl_texts', 'dumps'): 3603,
+    ('intl_texts', 'dumps_str'): 1201,
+    ('intl_texts', 'loads_compact'): 288,
+    ('intl_texts', 'loads_indent'): 271,
+    ('intl_texts', 'loads_ascii'): 273,
+    ('intl_texts', 'loads_bytes'): 422,
+    ('nested', 'dumps'): 1675,
+    ('nested', 'dumps_str'): 1648,
+    ('nested', 'loads_compact'): 433,
+    ('nested', 'loads_indent'): 331,
+    ('nested', 'loads_bytes'): 432,
+    ('tiny_obj', 'dumps'): 996901,
+    ('tiny_obj', 'dumps_str'): 1017291,
+    ('tiny_obj', 'loads_compact'): 691034,
+    ('tiny_obj', 'loads_indent'): 640021,
+    ('tiny_obj', 'loads_bytes'): 663080,
+    ('tiny_list', 'dumps'): 1054247,
+    ('tiny_list', 'dumps_str'): 1043899,
+    ('tiny_list', 'loads_compact'): 818056,
+    ('tiny_list', 'loads_indent'): 635713,
+    ('tiny_list', 'loads_bytes'): 760034,
+    ('empties', 'dumps'): 750349,
+    ('empties', 'dumps_str'): 736897,
+    ('empties', 'loads_compact'): 447087,
+    ('empties', 'loads_indent'): 397760,
+    ('empties', 'loads_bytes'): 432578,
+    ('scalar_str', 'dumps'): 1219968,
+    ('scalar_str', 'dumps_str'): 1143981,
+    ('scalar_str', 'loads_compact'): 1087373,
+    ('scalar_str', 'loads_indent'): 1179588,
+    ('scalar_str', 'loads_bytes'): 1113693,
+    ('scalar_int', 'dumps'): 1252106,
+    ('scalar_int', 'dumps_str'): 1247999,
+    ('scalar_int', 'loads_compact'): 1118947,
+    ('scalar_int', 'loads_indent'): 1220951,
+    ('scalar_int', 'loads_bytes'): 1199155,
+    ('subclasses', 'dumps'): 80692,
+    ('subclasses', 'dumps_str'): 77644,
+}
 
 rng = random.Random(0x5EED)
 
@@ -213,28 +312,63 @@ def inputs(obj):
     return out
 
 
-def run(fn, arg):
-    end = time.perf_counter() + SECONDS_PER_CASE
-    while time.perf_counter() < end:
-        fn(arg)
-
-
-def main():
-    docs = documents()
-    t0 = time.perf_counter()
+def steps(docs):
+    """(key, function, argument) of every training step, in a fixed order."""
     for name, obj in docs.items():
         for fn in (rjson.dumps, rjson.dumps_str):
-            run(fn, obj)
+            yield (name, fn.__name__), fn, obj
         if name == "subclasses":
             continue
         texts = inputs(obj)
-        for t in texts:
-            run(rjson.loads, t)
-        b = texts[0].encode()
+        for kind, t in zip(("compact", "indent", "ascii"), texts):
+            yield (name, "loads_" + kind), rjson.loads, t
         # bytes is the common non-str input; the others share its code path
-        run(rjson.loads, b)
-        rjson.loads(bytearray(b))
-        rjson.loads(memoryview(b))
+        yield (name, "loads_bytes"), rjson.loads, texts[0].encode()
+
+
+def fallback_calls(fn, arg):
+    """Calls for a step missing from CALLS (a new document before the next
+    --calibrate): a deterministic size-based estimate."""
+    size = len(rjson.dumps(arg)) if fn is not rjson.loads else len(arg)
+    budget, fixed = (44 << 20, 64) if fn is rjson.loads else (144 << 20, 160)
+    return max(5, round(budget / (size + fixed)))
+
+
+def calibrate(runs=3):
+    """Print CALLS: for each step, the median over `runs` runs of the calls
+    made in CALIBRATE_SECONDS. Run it on an instrumented build (the calls are
+    what `scripts/build_pgo.sh` trains with), on an otherwise idle host."""
+    counts = {}
+    for _ in range(runs):
+        rng.seed(0x5EED)
+        for key, fn, arg in steps(documents()):
+            n, end = 0, time.perf_counter() + CALIBRATE_SECONDS
+            while time.perf_counter() < end:
+                fn(arg)
+                n += 1
+            counts.setdefault(key, []).append(n)
+    print("CALLS = {")
+    for key, ns in counts.items():
+        print(f"    {key!r}: {sorted(ns)[len(ns) // 2]},")
+    print("}")
+
+
+def main():
+    if sys.argv[1:2] == ["--calibrate"]:
+        calibrate()
+        return
+    docs = documents()
+    t0 = time.perf_counter()
+    for key, fn, arg in steps(docs):
+        n = CALLS.get(key)
+        if n is None:
+            n = fallback_calls(fn, arg)
+            print(f"pgo_train: {key} not in CALLS, using {n} calls (run --calibrate)", file=sys.stderr)
+        for _ in range(max(1, round(n * SCALE))):
+            fn(arg)
+        if key[1] == "loads_bytes":
+            rjson.loads(bytearray(arg))
+            rjson.loads(memoryview(arg))
     for _ in range(3):
         for bad in ("[1,", '{"a" 1}', "nan", "[1] x", '"\\ud800', "", "[" * 2000, '{"a":tru}', b"\xff"):
             try:
