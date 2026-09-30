@@ -1,61 +1,61 @@
 {
   "python": "3.13.12",
-  "rjson": "0.2.0",
+  "rjson": "0.4.0",
   "results": [
     {
       "case": "twitter.json (0.6 MB)",
-      "json_tool_s": 0.08508351199998287,
-      "rjson_s": 0.040584915000181354,
-      "speedup": 2.096431937817356,
+      "json_tool_s": 0.08089469100013957,
+      "rjson_s": 0.03779194499975347,
+      "speedup": 2.1405273266741704,
       "same_output": true
     },
     {
       "case": "citm_catalog.json (1.7 MB)",
-      "json_tool_s": 0.15046027500011405,
-      "rjson_s": 0.04690696700072294,
-      "speedup": 3.2076317148750015,
+      "json_tool_s": 0.13816694599972834,
+      "rjson_s": 0.04260599100007312,
+      "speedup": 3.2428994786083307,
       "same_output": true
     },
     {
       "case": "canada.json (2.2 MB, floats)",
-      "json_tool_s": 0.38041785299992625,
-      "rjson_s": 0.06929618000049231,
-      "speedup": 5.489737717103938,
+      "json_tool_s": 0.35971393500039994,
+      "rjson_s": 0.06593882800007123,
+      "speedup": 5.455267342634773,
       "same_output": true
     },
     {
       "case": "github.json (55 KB)",
-      "json_tool_s": 0.03561839599933592,
-      "rjson_s": 0.03474893800012069,
-      "speedup": 1.0250211387528507,
+      "json_tool_s": 0.033765088000109245,
+      "rjson_s": 0.032614572000056796,
+      "speedup": 1.035276133626725,
       "same_output": true
     },
     {
       "case": "60 MB file, pretty-print",
-      "json_tool_s": 4.493189332999464,
-      "rjson_s": 0.915882946000238,
-      "speedup": 4.905855439957385,
+      "json_tool_s": 4.6070461900003465,
+      "rjson_s": 0.8410163869998541,
+      "speedup": 5.477950562217934,
       "same_output": true
     },
     {
       "case": "60 MB file, --sort-keys",
-      "json_tool_s": 4.471431281999685,
-      "rjson_s": 0.868009585999971,
-      "speedup": 5.15136163715113,
+      "json_tool_s": 4.2417398530001265,
+      "rjson_s": 0.6801407970001492,
+      "speedup": 6.236561417443094,
       "same_output": true
     },
     {
       "case": "60 MB file, --compact",
-      "json_tool_s": 4.040091721999488,
-      "rjson_s": 0.4731767409994063,
-      "speedup": 8.53822973941265,
+      "json_tool_s": 3.9006249549997847,
+      "rjson_s": 0.49695089099986944,
+      "speedup": 7.849115527596084,
       "same_output": true
     },
     {
       "case": "200k JSON Lines, --compact",
-      "json_tool_s": 4.4953380309998465,
-      "rjson_s": 0.45411529499961034,
-      "speedup": 9.89911170246689,
+      "json_tool_s": 4.269779644000209,
+      "rjson_s": 0.4300129100001868,
+      "speedup": 9.929421988745302,
       "same_output": true
     }
   ]

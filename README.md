@@ -6,63 +6,128 @@
 [![Python 3.10–3.14](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue.svg)](#compatibility)
 [![Status: experimental](https://img.shields.io/badge/status-experimental-orange.svg)](#status)
 
-**Fast JSON for Python, written in Rust directly against the CPython C API.** A faster
-alternative to [orjson](https://github.com/ijl/orjson) and the standard library `json` for
-web APIs (FastAPI, Django, Flask), logging and NDJSON, caches and message queues; switching is
-mostly a find-and-replace ([migration guide](#migrating-from-json-or-orjson)).
+**Fast JSON for Python, written in Rust directly against the CPython C API.**
+rjson is a drop-in replacement for [orjson](https://github.com/ijl/orjson) and the standard
+library `json`: orjson's exact output, `json`'s errors and options, and less CPU for every
+request, log line and message you handle.
 
-- **Faster than orjson** on 18 of the 20 cases of the reference benchmark (geomean `loads`
-  1.17×, `dumps` 1.36×) and on 21 of 22 production-shaped workloads (1.52×); 3.5× / 14×
-  faster than `json`.
-- **Same output as orjson**, byte for byte, including `datetime`, `UUID`, dataclasses and
-  `Enum`; `dumps_str` returns a `str` directly.
-- **Hardened for untrusted input:** differential fuzzing against `json`, an
-  AddressSanitizer CI build, and stack checks for deeply nested documents.
-- **A JSON beautifier on the command line:** `rjson` is a drop-in `python -m json.tool`
-  (same output) that is 2–10× faster on real files, with in-place formatting and a CI
-  `--check` ([command line](#command-line-json-beautifier)).
-- CPython 3.10–3.14 wheels for Linux (glibc and musl), macOS and Windows. MIT licensed.
+| | vs orjson | vs `json` |
+|---|---|---|
+| `loads` (parse) | **1.23× faster** | **3.80× faster** |
+| `dumps` (serialize) | **1.47× faster** | **15.2× faster** |
+| NDJSON / JSON Lines | **1.4–2.6× faster** (`loads_ndjson`) | **2.3–9.3× faster** |
+| compatibility | byte-identical output to `orjson.dumps` | `json.JSONDecodeError`, every `json.dumps` option |
 
-<img alt="Terminal: python benches/demo.py. rjson vs orjson with the same output: twitter.json loads 1.16x faster, twitter.json dumps 1.84x, github.json dumps 1.89x, 2k events with datetime and UUID 2.04x, twitter.json as str 1.77x." src="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/demo.svg" width="820">
+<sub>Geometric mean over the 10 cases of the [reference benchmark](#benchmarks), CPython 3.13.12,
+orjson 3.12.0, PGO wheels as published. NDJSON: 60–700-byte lines, CPython 3.11–3.13.</sub>
+
+## Quick start
+
+```bash
+pip install pyrjson          # the PyPI name; you still `import rjson`
+```
+
+```python
+import rjson
+from datetime import datetime
+from uuid import uuid4
+
+data = rjson.loads(b'{"name": "rjson", "tags": ["fast", "safe"]}')
+payload = rjson.dumps({"at": datetime(2024, 5, 1, 9, 30), "id": uuid4(), **data})  # -> bytes
+text = rjson.dumps_str(data)                  # -> str, without a .decode() copy
+events = rjson.loads_ndjson(b'{"a": 1}\n{"a": 2}\n')   # -> [{'a': 1}, {'a': 2}]
+```
+
+Coming from orjson or `json`? Most code switches with a find-and-replace:
+[migration guide](#migrating-from-json-or-orjson).
+
+## Why rjson
+
+- **Faster where services spend time.** Record-shaped data (API pages, DB rows, events) is
+  where rjson leads most: `loads` of records is 1.40× faster than orjson, `dumps`
+  1.63×. Datetimes, UUIDs and Enums serialize 2.3–3.2× faster than orjson, with no `default=`.
+- **Drop-in, verified.** `dumps` output is byte-identical to orjson's, including `datetime`,
+  `UUID`, dataclasses and `Enum`. Errors are `json.JSONDecodeError` with `json`'s positions.
+  Every `json.dumps` option (`indent`, `separators`, `sort_keys`, `ensure_ascii`,
+  `allow_nan`) has an exact equivalent, and `lenient=True` accepts exactly what `json.loads`
+  accepts.
+- **More than a parser.** `loads_ndjson` for NDJSON and JSON Lines, `dumps_str` for code
+  that needs a `str`, and an `rjson` command line that replaces `python -m json.tool`
+  (same output, 2–10× faster on real files).
+- **Hardened for untrusted input.** Differential fuzzing against `json`, an
+  AddressSanitizer CI job, nesting and thread-stack limits, and every CPython internal it
+  uses gated by version and self-tested at import.
+- **Ready to install.** PGO-optimized wheels for CPython 3.10–3.14 on Linux (glibc and
+  musl, x86_64 and aarch64), macOS and Windows, with build provenance attestations.
+  MIT licensed.
+
+<img alt="Terminal: python benches/demo.py. rjson vs orjson with the same output: twitter.json loads 1.38x faster, twitter.json dumps 1.71x, github.json dumps 1.92x, 2k events with datetime and UUID 2.21x, twitter.json as str 1.76x." src="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/demo.svg" width="820">
 
 If rjson saves you CPU time, a ⭐ on [GitHub](https://github.com/TinDang97/rjson) helps
 other people find it.
 
+## rjson, orjson and `json` compared
+
+| | `json` (stdlib) | orjson | **rjson** |
+|---|---|---|---|
+| `loads` / `dumps` speed vs `json` | 1× / 1× | 3.08× / 10.4× | **3.80× / 15.2×** |
+| `dumps` returns | `str` | `bytes` | `bytes`, or `str` with `dumps_str` (no decode copy) |
+| `datetime`, `UUID`, dataclass, `Enum` | via `default=` | native | native, byte-identical to orjson |
+| NDJSON / JSON Lines in one call | no | no | `loads_ndjson` |
+| `indent`, `separators`, `sort_keys`, `ensure_ascii`, `allow_nan` | all | `indent=2` and `sort_keys` only | all, with `json`'s output |
+| accepts `NaN`, a BOM, lone surrogates | yes | no | with `lenient=True` |
+| non-`str` dict keys | int, float, bool, None | `OPT_NON_STR_KEYS` | `non_str_keys=True` |
+| decode errors | `JSONDecodeError` | `JSONDecodeError` (subclass) | `json.JSONDecodeError` itself, `json`'s positions |
+| command-line formatter | `python -m json.tool` | no | `rjson`: same output, 2–10× faster |
+| type stubs | yes | yes | yes |
+
+## What's new in 0.4.0
+
+- **Records parse up to 40% faster.** A shape cache recognizes objects that repeat the same
+  keys in the same order and builds each dict by copying a template, instead of inserting
+  key by key. On CPython 3.11/3.12 those dicts also use about 16% less memory.
+- **`rjson.loads_ndjson`** parses newline-delimited JSON in one call, 1.4–2.6× faster than
+  a per-line loop on orjson, with `loads`'s exact results and errors.
+- **`rjson --json-lines`** uses it: `--validate` is 26% faster.
+
+Full list: [CHANGELOG.md](https://github.com/TinDang97/rjson/blob/main/CHANGELOG.md).
+
+## Benchmarks
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/headline-dark.svg">
-  <img alt="Geometric-mean speedups on CPython 3.13: loads 1.17× faster than orjson, dumps 1.36× faster than orjson, loads 3.53× and dumps 14.2× faster than the standard library json." src="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/headline-light.svg" width="880">
+  <img alt="Geometric-mean speedups on CPython 3.13.12: loads 1.23× faster than orjson, dumps 1.47× faster than orjson, loads 3.80× and dumps 15.2× faster than the standard library json." src="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/headline-light.svg" width="880">
 </picture>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/vs-orjson-dark.svg">
-  <img alt="Per-case speed relative to orjson. loads: 1.09× to 1.33× faster on nine cases, 0.95× on citm_catalog. dumps: 1.03× to 3.19× faster on nine cases, 0.93× on the float array." src="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/vs-orjson-light.svg" width="880">
+  <img alt="Per-case speed relative to orjson. loads: 1.01× to 1.56× faster on 10 cases. dumps: 1.11× to 2.81× faster on 9 cases, 0.99× on int array." src="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/vs-orjson-light.svg" width="880">
 </picture>
 
-<details>
-<summary>Numbers behind the charts, and how they were measured</summary>
+rjson is faster than orjson on 19 of the 20 `loads`/`dumps` cases. The other one is at parity within this host's run-to-run noise: int array `dumps` (0.99×; per-run 0.99–1.02×).
 
-Speedup = other library's time ÷ rjson's time (**higher is better**). Median time per call
-over 5 runs, CPython 3.13.12, orjson 3.12.0, x86_64 (Xeon), PGO build
+<details>
+<summary>All numbers, and how they were measured</summary>
+
+Speedup = the other library's time ÷ rjson's time (**higher is better**). Median time per
+call over 5 runs, CPython 3.13.12, orjson 3.12.0, x86_64 (Xeon, 4 cores), PGO build
 (`scripts/build_pgo.sh`, as the published wheels are built). `loads` parses the documents'
 UTF-8 `bytes`; `dumps` returns `bytes` in both rjson and orjson. Raw results, with each
 case's per-run range: [docs/img/benchmark-results.json](https://github.com/TinDang97/rjson/blob/main/docs/img/benchmark-results.json).
 
 | case | loads vs orjson | dumps vs orjson | loads vs json | dumps vs json |
 |---|---|---|---|---|
-| twitter.json | 1.20× | 1.71× | 3.23× | 12.9× |
-| citm_catalog.json | 0.95× | 1.12× | 2.23× | 6.06× |
-| canada.json | 1.09× | 1.10× | 4.34× | 17.7× |
-| github.json | 1.33× | 1.89× | 2.98× | 18.0× |
-| small dict | 1.27× | 1.27× | 6.37× | 18.5× |
-| records | 1.12× | 1.34× | 2.17× | 11.8× |
-| unicode strings | 1.12× | 1.05× | 1.80× | 54.0× |
-| escaped strings | 1.22× | 3.19× | 5.14× | 5.38× |
-| int array | 1.16× | 1.03× | 3.33× | 11.1× |
-| float array | 1.26× | 0.93× | 7.53× | 18.6× |
-| **geomean** | **1.17×** | **1.36×** | **3.53×** | **14.2×** |
-
-The two cases below 1× are within this host's run-to-run noise (citm `loads` ranged
-0.87–1.17×, float array `dumps` 0.88–1.16× over the 5 runs).
+| twitter.json | 1.20× | 1.58× | 3.13× | 13.4× |
+| citm_catalog.json | 1.18× | 1.38× | 2.69× | 9.95× |
+| canada.json | 1.09× | 1.25× | 4.77× | 19.3× |
+| github.json | 1.48× | 1.86× | 3.07× | 17.5× |
+| small dict | 1.56× | 1.45× | 7.47× | 18.4× |
+| records | 1.40× | 1.63× | 2.61× | 13.6× |
+| unicode strings | 1.29× | 1.11× | 2.24× | 49.1× |
+| escaped strings | 1.10× | 2.81× | 4.85× | 5.70× |
+| int array | 1.14× | 0.99× | 3.28× | 11.1× |
+| float array | 1.01× | 1.30× | 7.40× | 19.1× |
+| **geomean** | **1.23×** | **1.47×** | **3.80×** | **15.2×** |
 
 Reproduce and redraw:
 
@@ -73,207 +138,49 @@ python benches/corpus_benchmark.py --json --repeat 11 --output-json results.json
 python benches/make_charts.py results.json                # -> docs/img/*.svg + this table
 ```
 
-`dumps_str` (returns `str`) is faster than orjson's `dumps` on 6 of 10 cases (geomean 1.13×);
-it trails on twitter.json and unicode strings, because a `str` holding emoji must be stored
-at 4 bytes per character, and is at parity on citm_catalog and the float array (1.01, 1.05). `loads` of the same large non-ASCII `str` object over and
-over is 1.1–1.5× slower than orjson (twitter, citm, unicode strings): orjson keeps a UTF-8
-copy attached to that string, which rjson deliberately does not (it would double the string's
-memory, [#10](https://github.com/TinDang97/rjson/issues/10)); with `bytes` or a new `str` per
-call, as a server gets, rjson is faster. In plain (non-PGO) builds single cases move by up
-to 1.5× with code layout (canada `dumps`), which PGO removes.
-Methodology, per-version results and the roadmap:
-[docs/PERFORMANCE_REVIEW.md](https://github.com/TinDang97/rjson/blob/main/docs/PERFORMANCE_REVIEW.md).
+- **`dumps_str`** (returns `str`) is faster than orjson's `dumps` + `.decode()` on real
+  documents (1.71–1.91× in the [showcase](https://github.com/TinDang97/rjson/blob/main/docs/SHOWCASE.md)). Against
+  orjson's `bytes` alone it trails on emoji-heavy text, because a `str` holding emoji stores
+  4 bytes per character.
+- **`loads` of the same large non-ASCII `str` object, over and over,** is slower than
+  orjson: orjson keeps a UTF-8 copy attached to that string, which rjson deliberately does
+  not (it would double the string's memory,
+  [#10](https://github.com/TinDang97/rjson/issues/10)). With `bytes`, or a new `str` per
+  call as a server gets, rjson is faster.
+- Methodology, per-version results and the roadmap:
+  [docs/PERFORMANCE_REVIEW.md](https://github.com/TinDang97/rjson/blob/main/docs/PERFORMANCE_REVIEW.md).
 
 </details>
+
+### NDJSON / JSON Lines
+
+rjson ÷ orjson time (lower is better), each library's per-line loop vs `rjson.loads_ndjson`
+(plain release builds, best of 15):
+
+| NDJSON input | `rjson.loads` per line | `rjson.loads_ndjson` |
+|---|---|---|
+| log lines, 200 B × 50k | 0.70–0.75 | **0.44–0.47** |
+| events, 60 B × 100k | 0.72–0.76 | **0.39–0.41** |
+| API records, 700 B × 8k | 0.44–0.82 | **0.41–0.70** |
+| mixed shapes × 60k | 0.76–0.83 | **0.46–0.52** |
+
+Ranges span CPython 3.11, 3.12 and 3.13. Details:
+[PERFORMANCE_REVIEW.md, loads item 13](https://github.com/TinDang97/rjson/blob/main/docs/PERFORMANCE_REVIEW.md).
 
 ### On production-shaped workloads
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/showcase-dark.svg">
-  <img alt="Speed relative to orjson on 22 production-shaped workloads: rjson faster in 21, geomean 1.52×. Application types 1.09× to 3.17× (UTC datetimes), output as str 1.65× to 1.99×, web API 1.24× to 1.78×, escaped strings 1.40× and 1.56× with per-record NDJSON at 0.92×, standard corpora 1.09× to 1.82×." src="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/showcase-light.svg" width="880">
+  <img alt="Speed relative to orjson on 22 production-shaped workloads: rjson faster in 21 and at parity on one, geomean 1.60×. Application types 1.24× to 3.20× (UTC datetimes), output as str 1.71× to 1.91×, web API 1.19× to 1.70×, escaped strings 1.65× and 1.72× with per-record NDJSON at 1.00×, standard corpora 1.10× to 1.73×." src="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/showcase-light.svg" width="880">
 </picture>
 
-Identical output is checked before timing. FastAPI, logging, NDJSON and Redis/Kafka numbers for the
-[examples](https://github.com/TinDang97/rjson/tree/main/examples):
+API responses and request bodies, log records, application types and `str` output, each
+checked for identical output before timing:
+[docs/SHOWCASE.md](https://github.com/TinDang97/rjson/blob/main/docs/SHOWCASE.md) (`python benches/showcase.py`). The
+examples below, measured end to end:
 [Faster JSON in Python services](https://github.com/TinDang97/rjson/blob/main/docs/guides/faster-json-in-python-services.md).
-Numbers, method and the one slower case:
-[docs/SHOWCASE.md](https://github.com/TinDang97/rjson/blob/main/docs/SHOWCASE.md) (`python benches/showcase.py`).
 
-## Installation
-
-The PyPI distribution is **`pyrjson`** (the name `rjson` on PyPI belongs to an unrelated
-project). You still `import rjson`.
-
-```bash
-pip install pyrjson        # or: uv add pyrjson
-```
-
-Wheels are PGO-optimized builds for CPython 3.10–3.14 on Linux (manylinux and musllinux,
-x86_64 and aarch64), macOS (arm64 and x86_64) and Windows (x86_64), with build provenance
-attestations (`gh attestation verify <wheel> --repo TinDang97/rjson`). Elsewhere pip builds
-from the sdist, which needs a Rust toolchain. The development version:
-
-```bash
-pip install "git+https://github.com/TinDang97/rjson"
-# or, from a checkout:
-pip install maturin && maturin develop --release
-```
-
-## Usage
-
-```python
-from datetime import datetime
-from decimal import Decimal
-from uuid import uuid4
-
-import rjson
-
-data = rjson.loads('{"name": "rjson", "tags": ["fast", "safe"], "stars": 1e3}')
-payload = rjson.dumps(data)        # b'{"name":"rjson","tags":["fast","safe"],"stars":1000.0}'
-text = rjson.dumps_str(data)       # the same JSON as a str
-
-rjson.dumps({"at": datetime(2024, 5, 1, 9, 30), "id": uuid4()})  # datetime, UUID, dataclass, Enum: native
-rjson.dumps({"price": Decimal("9.99")}, default=str)             # convert the rest with default=
-```
-
-| name | kind | notes |
-|---|---|---|
-| `loads(data, *, lenient=False)` | function → object | `data`: `str`, `bytes`, `bytearray` or `memoryview` (any layout) |
-| `loads_ndjson(data, *, lenient=False)` | function → `list` | NDJSON / JSON Lines, one document per line, in one call |
-| `dumps(obj, *, default=None, passthrough=0, non_str_keys=False, indent=None, separators=None, sort_keys=False, ensure_ascii=False, allow_nan=False)` | function → `bytes` | UTF-8 JSON, like `orjson.dumps` |
-| `dumps_str(...)` | function → `str` | same options; like `json.dumps(obj, ensure_ascii=False, separators=(",", ":"))` |
-| `dumps_bytes(...)` | function → `bytes` | alias of `dumps`, kept for compatibility |
-| `PASSTHROUGH_DATETIME`, `_UUID`, `_DATACLASS`, `_ENUM` | `int` flags | for `passthrough=`, combine with `\|` |
-| `JSONDecodeError` | exception | `json.JSONDecodeError` itself (a `ValueError`) |
-| `JSONEncodeError` | exception | subclass of **both** `TypeError` and `ValueError`, like `orjson.JSONEncodeError` |
-| `__version__` | `str` | package version |
-
-The wheel ships type stubs (`py.typed`), so mypy and pyright check calls to rjson.
-
-- **`lenient=True` (`loads`):** accepts everything `json.loads` accepts, with the same
-  result: `NaN`/`Infinity`/`-Infinity`, a UTF-8 BOM on bytes and numbers overflowing to
-  `inf` are parsed natively (no speed cost); lone surrogates (`"\ud83d"`, sent by
-  JavaScript clients that cut an emoji in half), UTF-16/UTF-32 bytes and nesting deeper
-  than 1024 go through `json.loads`. The default stays strict, like orjson.
-- **`loads_ndjson` (NDJSON / JSON Lines):** `rjson.loads_ndjson(data)` is
-  `[rjson.loads(line) for line in data.split(b"\n") if line.strip()]` in one call: each line
-  gives what `loads(line)` gives (the same errors too), blank lines are skipped, `\r\n`
-  works, and an error's `lineno`/`colno` are those of the whole input. It parses all lines
-  with one warm parser, without slicing the input into a `bytes` per line: 1.4–2.6× faster
-  than the same loop on orjson, 7–49% faster than on `rjson.loads`.
-- **Types:** `dict` (str keys), `list`, `tuple`, `str`, `int` (any size), `float`, `bool`,
-  `None`, and their subclasses (`IntEnum`, `str` enums, `OrderedDict`, `namedtuple`, …).
-- **Native types, byte-identical to orjson:** `datetime` (RFC 3339: `2024-05-01T09:30:00`,
-  `.ffffff` only when non-zero, `+HH:MM` when aware), `date`, `time`, `uuid.UUID`
-  (lowercase, hyphenated), dataclasses (as objects; `_`-prefixed names skipped, as in
-  orjson) and `Enum` members (their value). Subclasses of `datetime`/`date`/`time`/`UUID`
-  go to `default=`. Three orjson bugs are not copied: a `tzinfo` whose `utcoffset()`
-  raises, or a deleted `__slots__` field, raise the Python error (orjson crashes);
-  `utcoffset()` returning `None` gives no offset, as in `isoformat()` (orjson writes
-  `+00:00`); an offset whose seconds round up to a whole hour carries into the hour
-  (orjson writes `+00:60`).
-- **`passthrough=`:** `rjson.PASSTHROUGH_*` flags send those kinds to `default=` (or make
-  them raise) instead, e.g. to tag them for an exact round trip
-  ([`examples/codec.py`](https://github.com/TinDang97/rjson/blob/main/examples/codec.py)), like orjson's `OPT_PASSTHROUGH_*`.
-- **`non_str_keys=True`:** dict keys may be `int` (any size), `float`, `bool`, `None`
-  (written exactly as `json.dumps` writes them: `"1"`, `"1e-07"`, `"NaN"`, `"true"`,
-  `"null"`), `Enum` members (their value), and `datetime`/`date`/`time`/`UUID` (their
-  native text, like orjson's `OPT_NON_STR_KEYS`). Other key types raise; `default=` is not
-  called for keys. Like `json` and orjson, a coerced key can duplicate a str key
-  (`{1: …, "1": …}` writes `"1"` twice). Off by default: a non-str key raises.
-- **`indent=` / `sort_keys=`:** `indent=2` and `sort_keys=True` give exactly the bytes of
-  orjson's `OPT_INDENT_2` and `OPT_SORT_KEYS` (keys sorted by code point; dataclass fields
-  keep their order); other widths (`indent=4`, `indent=0`) lay out like
-  `json.dumps(indent=n)`. Compact calls pay nothing for them; the options themselves are
-  not yet as fast as orjson's (twitter.json: `sort_keys` 0.78×, `indent=2` 0.48×).
-- **`json.dumps` options:** `indent` also takes a str (`indent="\t"`), and `separators=`,
-  `ensure_ascii=True` (non-ASCII and DEL as `\uXXXX`, surrogate pairs above U+FFFF) and
-  `allow_nan=True` (`NaN`/`Infinity`/`-Infinity`) behave as in `json.dumps`, so any
-  `json.dumps` call has an exact equivalent (numbers aside, see floats below 1e-4). Only
-  the defaults differ: compact, non-ASCII kept, NaN raises. With `ensure_ascii=True`,
-  `dumps` also writes lone surrogates (as `\udXXX`, like `json`).
-- **`default=`:** called with each value rjson cannot serialize; its return value is
-  serialized in its place (and passed to `default` again if still unsupported), as in
-  `json.dumps` and orjson. Exceptions it raises propagate unchanged. It is not called for
-  NaN/Infinity or dict keys (see `non_str_keys=`), which still raise. Supported values never reach it, so
-  native data runs at full speed.
-- **Errors:** `loads` raises `JSONDecodeError` with `pos`/`lineno`/`colno` matching `json`.
-  `dumps`/`dumps_str` raise `JSONEncodeError` for unsupported types, non-str keys (unless
-  `non_str_keys=True`),
-  NaN/Infinity, and nesting deeper than 254 (which also catches circular references), so
-  both `except TypeError` and `except ValueError` catch it. A lone surrogate raises
-  `UnicodeEncodeError` in `dumps`; `dumps_str` passes it through.
-- **Precision:** floats round-trip exactly (shortest representation, e.g. `1e+16`), and
-  integers of any size are exact in both directions. `loads` accepts nesting up to 1024.
-
-## Command line: JSON beautifier
-
-`pip install pyrjson` also installs `rjson`, a faster drop-in for `python -m json.tool`: the
-same options and byte-for-byte the same output (checked against `json.tool` on the whole
-benchmark corpus), plus a formatter mode for files and CI.
-
-```console
-$ curl -s https://api.github.com/repos/TinDang97/rjson | rjson --sort-keys --no-ensure-ascii
-$ rjson data.json pretty.json            # beautify (indent 4, like json.tool)
-$ rjson --compact data.json min.json     # minify (also --minify)
-$ rjson --tab / --indent 2 / --no-indent # other layouts
-$ rjson --json-lines --compact < events.jsonl   # JSON Lines / NDJSON, streamed
-$ rjson -i --indent 2 config/*.json      # reformat files in place (only changed ones)
-$ rjson --check --indent 2 config/*.json # CI: exit 1 if a file is invalid or not formatted
-$ rjson --validate *.json                # exit 1 if a file is not valid JSON
-```
-
-Syntax colors on a terminal (`--color auto|always|never`; honors `NO_COLOR`,
-`FORCE_COLOR`, `PYTHON_COLORS`), NaN/Infinity accepted like `json.tool` (`--strict`
-rejects them), errors as `json.tool` prints them (JSON Lines errors name the input line),
-atomic in-place writes that keep file permissions. Also `python -m rjson` and
-`python -m rjson.tool`, and `rjson.tool.beautify(text, indent=4, ...)` from Python.
-
-End to end, process start included (CPython 3.13, median of 5; [`benches/cli_benchmark.py`](https://github.com/TinDang97/rjson/blob/main/benches/cli_benchmark.py),
-[results](https://github.com/TinDang97/rjson/blob/main/docs/cli-benchmark-results.json)):
-
-| input | `python -m json.tool` | `rjson` | speedup |
-|---|---|---|---|
-| github.json (55 KB) | 36 ms | 35 ms | 1.0× (process start dominates) |
-| twitter.json (0.6 MB) | 85 ms | 41 ms | 2.1× |
-| citm_catalog.json (1.7 MB) | 150 ms | 47 ms | 3.2× |
-| canada.json (2.2 MB, floats) | 380 ms | 69 ms | 5.5× |
-| 60 MB file, pretty-print | 4.5 s | 0.92 s | 4.9× |
-| 60 MB file, `--compact` | 4.0 s | 0.47 s | 8.5× |
-| 200k JSON Lines, `--compact` | 4.5 s | 0.45 s | 9.9× |
-
-The only output difference from `json.tool`: floats below 1e-4 are written in shortest form
-(`1e-7`; `json` writes `1e-07`, the same value). `json.tool --json-lines FILE` fails on
-CPython 3.13+ ("I/O operation on closed file"); `rjson --json-lines FILE` works.
-
-## Migrating from `json` or orjson
-
-Most code migrates with a find-and-replace:
-
-| you wrote | with rjson |
-|---|---|
-| `json.loads(s)` / `orjson.loads(s)` | `rjson.loads(s)` |
-| `orjson.dumps(obj)` | `rjson.dumps(obj)` (same bytes) |
-| `json.dumps(obj, separators=(",", ":"), ensure_ascii=False)` | `rjson.dumps_str(obj)` |
-| `json.dumps(obj).encode()` | `rjson.dumps(obj)` |
-| `except json.JSONDecodeError` / `orjson.JSONDecodeError` | `except rjson.JSONDecodeError` |
-| `except TypeError` / `orjson.JSONEncodeError` around `dumps` | `except rjson.JSONEncodeError` (`TypeError` keeps working) |
-| `json.dumps(obj, default=f)` / `orjson.dumps(obj, default=f)` | `rjson.dumps(obj, default=f)` |
-| `orjson.dumps(datetime/UUID/dataclass/Enum)` | the same bytes |
-| `json.dumps({1: "a", None: "b"})` / `orjson.dumps(obj, option=OPT_NON_STR_KEYS)` | `rjson.dumps(obj, non_str_keys=True)` (key text as `json` writes it) |
-| `orjson.dumps(obj, option=OPT_INDENT_2 \| OPT_SORT_KEYS)` | `rjson.dumps(obj, indent=2, sort_keys=True)` (same bytes) |
-| `json.dumps(obj, indent=4, sort_keys=True)` | `rjson.dumps_str(obj, indent=4, sort_keys=True, ensure_ascii=True)` (drop `ensure_ascii` to keep non-ASCII) |
-| `json.dumps(obj)` (all defaults) | `rjson.dumps_str(obj, separators=(", ", ": "), ensure_ascii=True, allow_nan=True)` (same text) |
-| `python -m json.tool` | `rjson` / `python -m rjson` (same options, same output; [command line](#command-line-json-beautifier)) |
-| `orjson.dumps(obj, option=OPT_PASSTHROUGH_DATETIME)` | `rjson.dumps(obj, passthrough=rjson.PASSTHROUGH_DATETIME)` (also `_UUID`, `_DATACLASS`, `_ENUM`) |
-| `json.dumps(obj, default=lambda o: o.isoformat())` for datetimes | `rjson.dumps(obj)` (the same text, except UTC offsets with a seconds part, which are rounded to the minute) |
-
-What does **not** carry over yet, and how to handle it:
-
-| feature | status | workaround |
-|---|---|---|
-| NaN / Infinity | by design | `dumps` raises unless `allow_nan=True` (then `NaN`, as `json`; orjson writes `null`) |
-| floats below 1e-4 | by design | `1e-7`, same as orjson; `json` writes `1e-07` (same value, different bytes) |
+## Use it in your stack
 
 ### FastAPI
 
@@ -293,11 +200,11 @@ def items() -> RJSONResponse:
     return RJSONResponse([{"id": 1, "name": "widget"}])
 ```
 
-Return `RJSONResponse(...)` directly for dicts and lists. Measured on whole requests
-through the app, against stock FastAPI's own fast path (a return type, serialized by
-Pydantic's `dump_json`): a 50-row page is 1.25–1.4× faster, 1.8–1.9× with UUID/datetime/Enum
-fields, and a 1,000-row export 3.0–3.2× faster; against an endpoint without a return type,
-9–74× ([numbers](https://github.com/TinDang97/rjson/blob/main/examples/README.md#measured-gains)). Don't set it as
+Return `RJSONResponse(...)` directly for dicts and lists. Measured on whole requests through
+the app, against stock FastAPI's own fast path (a return type, serialized by Pydantic's
+`dump_json`): a 50-row page is 1.25–1.4× faster, 1.8–1.9× with UUID/datetime/Enum fields,
+and a 1,000-row export 3.0–3.2× faster; against an endpoint without a return type, 9–74×
+([numbers](https://github.com/TinDang97/rjson/blob/main/examples/README.md#measured-gains)). Don't set it as
 `default_response_class`: endpoints that return Pydantic models already go through
 `dump_json`. [`examples/fastapi_app.py`](https://github.com/TinDang97/rjson/blob/main/examples/fastapi_app.py) adds a fallback for
 Decimal, Pydantic models and dataclasses, and rjson-parsed request bodies.
@@ -334,24 +241,217 @@ and [`examples/flask_json.py`](https://github.com/TinDang97/rjson/blob/main/exam
 add a fallback for Decimal, sets and dataclasses, and a request-body parser that turns
 invalid JSON into a 400 with the error position.
 
-### Logging, NDJSON, Redis and Kafka
+### Logs, NDJSON, Redis and Kafka
+
+```python
+records = rjson.loads_ndjson(body)                       # NDJSON in memory: one call
+line = rjson.dumps(record) + b"\n"                        # one JSON object per log line
+producer = KafkaProducer(value_serializer=rjson.dumps)    # bytes in, bytes out
+```
 
 - [`examples/json_logging.py`](https://github.com/TinDang97/rjson/blob/main/examples/json_logging.py): a `logging.Formatter` writing one
   JSON object per line (2.2–2.5 µs per record, 2.4–2.7× faster than the same formatter on
-  `json`), plus NDJSON read/write (writing 12.5× faster, reading 2.5–2.8×).
+  `json`), plus streamed NDJSON read/write (writing 12.5× faster, reading 2.5–2.8×).
 - [`examples/codec.py`](https://github.com/TinDang97/rjson/blob/main/examples/codec.py): a versioned bytes codec for Redis/Kafka with
   typed round trips, and `value_serializer`/`value_deserializer` callables. Round trips of
   JSON-native payloads are 4.1–4.6× faster than the same codec on `json`, and faster than
   `pickle`.
 - [`docs/ASYNC.md`](https://github.com/TinDang97/rjson/blob/main/docs/ASYNC.md): aiohttp, httpx, asyncpg, `redis.asyncio` and aiokafka
-  one-liners.
+  one-liners, and how to keep large payloads from blocking the event loop.
+
+## Migrating from `json` or orjson
+
+| you wrote | with rjson |
+|---|---|
+| `json.loads(s)` / `orjson.loads(s)` | `rjson.loads(s)` |
+| `[json.loads(l) for l in data.splitlines() if l.strip()]` | `rjson.loads_ndjson(data)` |
+| `orjson.dumps(obj)` | `rjson.dumps(obj)` (same bytes) |
+| `json.dumps(obj, separators=(",", ":"), ensure_ascii=False)` | `rjson.dumps_str(obj)` |
+| `json.dumps(obj).encode()` | `rjson.dumps(obj)` |
+| `except json.JSONDecodeError` / `orjson.JSONDecodeError` | `except rjson.JSONDecodeError` |
+| `except TypeError` / `orjson.JSONEncodeError` around `dumps` | `except rjson.JSONEncodeError` (`TypeError` keeps working) |
+| `json.dumps(obj, default=f)` / `orjson.dumps(obj, default=f)` | `rjson.dumps(obj, default=f)` |
+| `orjson.dumps(datetime/UUID/dataclass/Enum)` | the same bytes |
+| `json.dumps({1: "a", None: "b"})` / `orjson.dumps(obj, option=OPT_NON_STR_KEYS)` | `rjson.dumps(obj, non_str_keys=True)` (key text as `json` writes it) |
+| `orjson.dumps(obj, option=OPT_INDENT_2 \| OPT_SORT_KEYS)` | `rjson.dumps(obj, indent=2, sort_keys=True)` (same bytes) |
+| `json.dumps(obj, indent=4, sort_keys=True)` | `rjson.dumps_str(obj, indent=4, sort_keys=True, ensure_ascii=True)` (drop `ensure_ascii` to keep non-ASCII) |
+| `json.dumps(obj)` (all defaults) | `rjson.dumps_str(obj, separators=(", ", ": "), ensure_ascii=True, allow_nan=True)` (same text) |
+| `json.loads(s)` of input with `NaN`, a BOM or lone surrogates | `rjson.loads(s, lenient=True)` (the same result) |
+| `python -m json.tool` | `rjson` / `python -m rjson` (same options, same output; [command line](#command-line-json-beautifier)) |
+| `orjson.dumps(obj, option=OPT_PASSTHROUGH_DATETIME)` | `rjson.dumps(obj, passthrough=rjson.PASSTHROUGH_DATETIME)` (also `_UUID`, `_DATACLASS`, `_ENUM`) |
+| `json.dumps(obj, default=lambda o: o.isoformat())` for datetimes | `rjson.dumps(obj)` (the same text, except UTC offsets with a seconds part, which are rounded to the minute) |
+
+Two differences are by design: `dumps` raises on NaN/Infinity unless `allow_nan=True`
+(then `NaN`, as `json` writes it; orjson writes `null`), and floats below 1e-4 are written
+in shortest form (`1e-7`, as orjson; `json` writes `1e-07`, the same value).
+
+## API
+
+| name | kind | notes |
+|---|---|---|
+| `loads(data, *, lenient=False)` | function → object | `data`: `str`, `bytes`, `bytearray` or `memoryview` (any layout) |
+| `loads_ndjson(data, *, lenient=False)` | function → `list` | NDJSON / JSON Lines, one document per line, in one call |
+| `dumps(obj, *, default=None, passthrough=0, non_str_keys=False, indent=None, separators=None, sort_keys=False, ensure_ascii=False, allow_nan=False)` | function → `bytes` | UTF-8 JSON, like `orjson.dumps` |
+| `dumps_str(...)` | function → `str` | same options; like `json.dumps(obj, ensure_ascii=False, separators=(",", ":"))` |
+| `dumps_bytes(...)` | function → `bytes` | alias of `dumps`, kept for compatibility |
+| `PASSTHROUGH_DATETIME`, `_UUID`, `_DATACLASS`, `_ENUM` | `int` flags | for `passthrough=`, combine with `\|` |
+| `JSONDecodeError` | exception | `json.JSONDecodeError` itself (a `ValueError`) |
+| `JSONEncodeError` | exception | subclass of **both** `TypeError` and `ValueError`, like `orjson.JSONEncodeError` |
+| `__version__` | `str` | package version |
+
+The wheel ships type stubs (`py.typed`), so mypy and pyright check calls to rjson.
+
+<details>
+<summary>Options and behavior in detail</summary>
+
+- **`lenient=True` (`loads`, `loads_ndjson`):** accepts everything `json.loads` accepts,
+  with the same result: `NaN`/`Infinity`/`-Infinity`, a UTF-8 BOM on bytes and numbers
+  overflowing to `inf` are parsed natively (no speed cost); lone surrogates (`"\ud83d"`,
+  sent by JavaScript clients that cut an emoji in half), UTF-16/UTF-32 bytes and nesting
+  deeper than 1024 go through `json.loads`. The default stays strict, like orjson.
+- **`loads_ndjson`:** `[rjson.loads(line) for line in data.split(b"\n") if line.strip()]`
+  in one call: each line gives what `loads(line)` gives (the same errors too), blank lines
+  are skipped, `\r\n` works, and an error's `lineno`/`colno` are those of the whole input.
+  For a very large input, call it on chunks of about 16 KiB cut after a newline, so each
+  chunk's documents are used while they are still in the CPU cache.
+- **Types:** `dict` (str keys), `list`, `tuple`, `str`, `int` (any size), `float`, `bool`,
+  `None`, and their subclasses (`IntEnum`, `str` enums, `OrderedDict`, `namedtuple`, …).
+- **Native types, byte-identical to orjson:** `datetime` (RFC 3339: `2024-05-01T09:30:00`,
+  `.ffffff` only when non-zero, `+HH:MM` when aware), `date`, `time`, `uuid.UUID`
+  (lowercase, hyphenated), dataclasses (as objects; `_`-prefixed names skipped, as in
+  orjson) and `Enum` members (their value). Subclasses of `datetime`/`date`/`time`/`UUID`
+  go to `default=`. Three orjson bugs are not copied: a `tzinfo` whose `utcoffset()`
+  raises, or a deleted `__slots__` field, raise the Python error (orjson crashes);
+  `utcoffset()` returning `None` gives no offset, as in `isoformat()` (orjson writes
+  `+00:00`); an offset whose seconds round up to a whole hour carries into the hour
+  (orjson writes `+00:60`).
+- **`passthrough=`:** `rjson.PASSTHROUGH_*` flags send those kinds to `default=` (or make
+  them raise) instead, e.g. to tag them for an exact round trip
+  ([`examples/codec.py`](https://github.com/TinDang97/rjson/blob/main/examples/codec.py)), like orjson's `OPT_PASSTHROUGH_*`.
+- **`non_str_keys=True`:** dict keys may be `int` (any size), `float`, `bool`, `None`
+  (written exactly as `json.dumps` writes them: `"1"`, `"1e-07"`, `"NaN"`, `"true"`,
+  `"null"`), `Enum` members (their value), and `datetime`/`date`/`time`/`UUID` (their
+  native text, like orjson's `OPT_NON_STR_KEYS`). Other key types raise; `default=` is not
+  called for keys. Like `json` and orjson, a coerced key can duplicate a str key
+  (`{1: …, "1": …}` writes `"1"` twice). Off by default: a non-str key raises.
+- **`indent=` / `sort_keys=`:** `indent=2` and `sort_keys=True` give exactly the bytes of
+  orjson's `OPT_INDENT_2` and `OPT_SORT_KEYS` (keys sorted by code point; dataclass fields
+  keep their order); other widths (`indent=4`, `indent=0`) lay out like
+  `json.dumps(indent=n)`. Compact calls pay nothing for them; the options themselves are
+  not yet as fast as orjson's (twitter.json: `sort_keys` 0.78×, `indent=2` 0.48×).
+- **`json.dumps` options:** `indent` also takes a str (`indent="\t"`), and `separators=`,
+  `ensure_ascii=True` (non-ASCII and DEL as `\uXXXX`, surrogate pairs above U+FFFF) and
+  `allow_nan=True` (`NaN`/`Infinity`/`-Infinity`) behave as in `json.dumps`, so any
+  `json.dumps` call has an exact equivalent (numbers aside, see floats below 1e-4). Only
+  the defaults differ: compact, non-ASCII kept, NaN raises. With `ensure_ascii=True`,
+  `dumps` also writes lone surrogates (as `\udXXX`, like `json`).
+- **`default=`:** called with each value rjson cannot serialize; its return value is
+  serialized in its place (and passed to `default` again if still unsupported), as in
+  `json.dumps` and orjson. Exceptions it raises propagate unchanged. It is not called for
+  NaN/Infinity or dict keys (see `non_str_keys=`), which still raise. Supported values
+  never reach it, so native data runs at full speed.
+- **Errors:** `loads` raises `JSONDecodeError` with `pos`/`lineno`/`colno` matching `json`.
+  `dumps`/`dumps_str` raise `JSONEncodeError` for unsupported types, non-str keys (unless
+  `non_str_keys=True`), NaN/Infinity, and nesting deeper than 254 (which also catches
+  circular references), so both `except TypeError` and `except ValueError` catch it. A
+  lone surrogate raises `UnicodeEncodeError` in `dumps`; `dumps_str` passes it through.
+- **Precision:** floats round-trip exactly (shortest representation, e.g. `1e+16`), and
+  integers of any size are exact in both directions. `loads` accepts nesting up to 1024.
+
+</details>
+
+## Command line: JSON beautifier
+
+`pip install pyrjson` also installs `rjson`, a faster drop-in for `python -m json.tool`: the
+same options and byte-for-byte the same output (checked against `json.tool` on the whole
+benchmark corpus), plus a formatter mode for files and CI.
+
+```console
+$ curl -s https://api.github.com/repos/TinDang97/rjson | rjson --sort-keys --no-ensure-ascii
+$ rjson data.json pretty.json            # beautify (indent 4, like json.tool)
+$ rjson --compact data.json min.json     # minify (also --minify)
+$ rjson --tab / --indent 2 / --no-indent # other layouts
+$ rjson --json-lines --compact < events.jsonl   # JSON Lines / NDJSON, streamed
+$ rjson -i --indent 2 config/*.json      # reformat files in place (only changed ones)
+$ rjson --check --indent 2 config/*.json # CI: exit 1 if a file is invalid or not formatted
+$ rjson --validate *.json                # exit 1 if a file is not valid JSON
+```
+
+End to end, process start included (CPython 3.13.12, median of 5;
+[`benches/cli_benchmark.py`](https://github.com/TinDang97/rjson/blob/main/benches/cli_benchmark.py),
+[results](https://github.com/TinDang97/rjson/blob/main/docs/cli-benchmark-results.json)):
+
+| input | `python -m json.tool` | `rjson` | speedup |
+|---|---|---|---|
+| twitter.json (0.6 MB) | 81 ms | 38 ms | 2.1× |
+| citm_catalog.json (1.7 MB) | 138 ms | 43 ms | 3.2× |
+| canada.json (2.2 MB, floats) | 360 ms | 66 ms | 5.5× |
+| github.json (55 KB) | 34 ms | 33 ms | 1.0× (process start dominates) |
+| 60 MB file, pretty-print | 4.61 s | 841 ms | 5.5× |
+| 60 MB file, `--sort-keys` | 4.24 s | 680 ms | 6.2× |
+| 60 MB file, `--compact` | 3.90 s | 497 ms | 7.8× |
+| 200k JSON Lines, `--compact` | 4.27 s | 430 ms | 9.9× |
+
+Syntax colors on a terminal (`--color auto|always|never`; honors `NO_COLOR`,
+`FORCE_COLOR`, `PYTHON_COLORS`), NaN/Infinity accepted like `json.tool` (`--strict`
+rejects them), errors as `json.tool` prints them (JSON Lines errors name the input line),
+atomic in-place writes that keep file permissions. Also `python -m rjson`,
+`python -m rjson.tool`, and `rjson.tool.beautify(text, indent=4, ...)` from Python. The
+only output difference from `json.tool`: floats below 1e-4 are written in shortest form
+(`1e-7`; `json` writes `1e-07`, the same value). `json.tool --json-lines FILE` fails on
+CPython 3.13+ ("I/O operation on closed file"); `rjson --json-lines FILE` works.
+
+## Why it is faster than orjson
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/architecture-dark.svg">
+  <img alt="Design differences from orjson 3.12. loads: orjson parses into a yyjson tree, then converts the tree to Python objects in a second pass; rjson builds Python objects in one pass (1.10–1.50× faster, 30–37% less peak memory on large files). dumps: orjson starts from a 4 KiB buffer that doubles, escapes with SSE2 or an AVX-512 build and returns bytes; rjson sizes the buffer from recent calls, escapes with AVX-512, AVX2 or SSE2 and writes bytes or str directly (1.19–1.73× faster, as str 1.71–1.91×). Native types: orjson probes three attributes and calls utcoffset() per aware datetime; rjson caches the timezone offset and per-class facts (UTC datetimes 3.20×, datetime/UUID/Enum records 2.26×, slots dataclasses 2.15×)." src="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/architecture-light.svg" width="880">
+</picture>
+
+Both are Rust on the CPython C API with raw `METH_FASTCALL` entry points, a dict-key
+cache and zmij float formatting, so none of that explains the gap. These design choices do.
+Each row isolates one of them, is measured head to head with identical output
+([`benches/why_faster.py`](https://github.com/TinDang97/rjson/blob/main/benches/why_faster.py),
+[results](https://github.com/TinDang97/rjson/blob/main/docs/why-faster-results.json);
+CPython 3.13, orjson 3.12.0, x86_64 with AVX-512, PGO wheel), and cites the orjson 3.12.0
+source it describes.
+
+| | orjson 3.12.0 | rjson | measured (rjson vs orjson) |
+|---|---|---|---|
+| **`loads`** | parses into a yyjson document tree, then walks the tree to create Python objects (`src/deserialize/backend/yyjson.rs`) | creates each Python object as it parses: one pass, no tree | 60 MB file: **85 MB vs 183 MB** peak memory above the input (both build the same result, so the ~99 MB difference is what orjson holds while parsing: the tree), 0.19 s vs 0.29 s |
+| **string escaping** | 32-byte AVX-512 blocks, but each escape restarts the block: one load, compare and store per escape (`src/serialize/writer/str/avx512.rs`) | every escape in a block handled from one compare mask; AVX-512, AVX2 or SSE2 chosen at run time | 1 MB of text with an escape every 12 characters: **3.39 vs 0.96 GB/s**, same CPU, both on AVX-512 |
+| **aware datetimes** | for `datetime.timezone.utc`, per value: up to three `hasattr` probes, then a `utcoffset()` call that allocates a `timedelta` (`src/ffi/pydatetimeref.rs`, `slow_offset`) | reads a `timezone`'s offset once and reuses it; date fields read from the C struct | 10,000 UTC datetimes: **28 vs 94 ns** per datetime |
+| **output to `str`** | returns `bytes`; getting a `str` means `.decode()`, a second allocation, copy and UTF-8 validation | writes the `str`'s own storage directly (`dumps_str`) | twitter.json: **1.9 MB vs 3.2 MB** allocated per call, 277 vs 474 µs |
+| **records** (0.4.0) | creates each dict and inserts its keys one by one (`src/deserialize/backend/yyjson.rs`) | recognizes objects that repeat a key set and copies a template dict (CPython 3.11–3.13) | records `loads`: **0.90 → 0.71** of orjson's time with the shape cache (0.3.0 → 0.4.0) |
+
+The remaining difference is per-value work. rjson dispatches on exact type pointers, keeps
+the output cursor in a register, and sizes the output buffer from recent calls (orjson
+starts at 4 KiB and doubles, `src/serialize/writer/byteswriter.rs`). Instruction counts
+are deterministic, so host noise can't move them:
+
+| instructions per call (valgrind) | rjson | orjson | orjson ÷ rjson |
+|---|---|---|---|
+| `dumps` small dict | 2,182 | 2,606 | 1.19 |
+| `loads` small dict | 3,994 | 4,967 | 1.24 |
+| `dumps` twitter.json | 2.01 M | 3.15 M | 1.56 |
+| `loads` twitter.json | 10.19 M | 13.19 M | 1.29 |
+
+Where it is *not* different: page faults for large results are the same (the output has
+to be written either way), and `indent=`/`sort_keys=` are still slower than orjson's (a
+second pass over the compact output). Reproduce with `python benches/why_faster.py`
+(valgrind for the instruction counts). **The full design, stage by stage:**
+[docs/ARCHITECTURE.md](https://github.com/TinDang97/rjson/blob/main/docs/ARCHITECTURE.md) walks both pipelines function by function
+(input handling, the key and shape caches, number parsing, string decoding, the
+output-buffer policy, escaping kernels, the dict walk, native types, guarded mode and the
+safety checks), with the reason and the measured effect of each choice.
 
 ## Production use
 
 The full report, with every number and how it was measured:
 [docs/PRODUCTION_READINESS.md](https://github.com/TinDang97/rjson/blob/main/docs/PRODUCTION_READINESS.md).
 In short, rjson is ready for services whose payloads are JSON-native (dicts, lists,
-strings, numbers), and not yet a drop-in for code that relies on orjson's options.
+strings, numbers, datetimes, UUIDs), and not yet a drop-in for code that relies on
+orjson-only options.
 
 <details>
 <summary>FAQ</summary>
@@ -405,61 +505,35 @@ exactly what `json.loads` accepts.
 
 </details>
 
+## Installation
+
+The PyPI distribution is **`pyrjson`** (the name `rjson` on PyPI belongs to an unrelated
+project). You still `import rjson`.
+
+```bash
+pip install pyrjson        # or: uv add pyrjson
+```
+
+Wheels are PGO-optimized builds for CPython 3.10–3.14 on Linux (manylinux and musllinux,
+x86_64 and aarch64), macOS (arm64 and x86_64) and Windows (x86_64), with build provenance
+attestations (`gh attestation verify <wheel> --repo TinDang97/rjson`). Elsewhere pip builds
+from the sdist, which needs a Rust toolchain. The development version:
+
+```bash
+pip install "git+https://github.com/TinDang97/rjson"
+# or, from a checkout:
+pip install maturin && maturin develop --release
+```
+
 ## Compatibility
 
-- **CPython 3.10–3.14** on Linux x86_64/aarch64, macOS arm64 and Windows (CI). x86_64
-  builds target x86-64-v2 and select AVX2/AVX-512 kernels at runtime.
+- **CPython 3.10–3.14** on Linux x86_64/aarch64 (glibc and musl), macOS arm64 and Windows
+  (CI). x86_64 builds target x86-64-v2 and select AVX2/AVX-512 kernels at runtime.
 - **Not supported:** PyPy, GraalPy, free-threaded (no-GIL) builds, subinterpreters.
 
 ### Status
 
 Experimental. The API may change before 1.0; pin the version you test against.
-
-## Why it is faster than orjson
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/architecture-dark.svg">
-  <img alt="Design differences from orjson 3.12. loads: orjson parses into a yyjson tree, then converts the tree to Python objects in a second pass; rjson builds Python objects in one pass (1.09–1.29× faster, 30–37% less peak memory on large files). dumps: orjson starts from a 4 KiB buffer that doubles, escapes with SSE2 or an AVX-512 build and returns bytes; rjson sizes the buffer from recent calls, escapes with AVX-512, AVX2 or SSE2 and writes bytes or str directly (1.12–1.82× faster, as str 1.65–1.99×). Native types: orjson probes three attributes and calls utcoffset() per aware datetime; rjson caches the timezone offset and per-class facts (UTC datetimes 3.17×, datetime/UUID/Enum records 2.34×, slots dataclasses 2.14×)." src="https://raw.githubusercontent.com/TinDang97/rjson/main/docs/img/architecture-light.svg" width="880">
-</picture>
-
-Both are Rust on the CPython C API with raw `METH_FASTCALL` entry points, a dict-key
-cache and zmij float formatting, so none of that explains the gap. Four design choices do.
-Each row below isolates one of them, is measured head to head with identical output
-([`benches/why_faster.py`](https://github.com/TinDang97/rjson/blob/main/benches/why_faster.py),
-[results](https://github.com/TinDang97/rjson/blob/main/docs/why-faster-results.json);
-CPython 3.13, orjson 3.12.0, x86_64 with AVX-512, PGO wheel), and cites the orjson 3.12.0
-source it describes.
-
-| | orjson 3.12.0 | rjson | measured (rjson vs orjson) |
-|---|---|---|---|
-| **`loads`** | parses into a yyjson document tree, then walks the tree to create Python objects (`src/deserialize/backend/yyjson.rs`) | creates each Python object as it parses: one pass, no tree | 60 MB file: **85 MB vs 183 MB** peak memory above the input (both build the same result, so the ~98 MB difference is what orjson holds while parsing: the tree), 0.68 s vs 1.07 s |
-| **string escaping** | 32-byte AVX-512 blocks, but each escape restarts the block: one load, compare and store per escape (`src/serialize/writer/str/avx512.rs`) | every escape in a block handled from one compare mask; AVX-512, AVX2 or SSE2 chosen at run time | 1 MB of text with an escape every 12 characters: **3.40 vs 0.95 GB/s**, same CPU, both on AVX-512 |
-| **aware datetimes** | for `datetime.timezone.utc`, per value: up to three `hasattr` probes, then a `utcoffset()` call that allocates a `timedelta` (`src/ffi/pydatetimeref.rs`, `slow_offset`) | reads a `timezone`'s offset once and reuses it; date fields read from the C struct | 10,000 UTC datetimes: **28 vs 95 ns** per datetime |
-| **output to `str`** | returns `bytes`; getting a `str` means `.decode()`, a second allocation, copy and UTF-8 validation | writes the `str`'s own storage directly (`dumps_str`) | twitter.json: **1.9 MB vs 3.2 MB** allocated per call, 297 vs 478 µs |
-
-The remaining difference is per-value work. rjson dispatches on exact type pointers, keeps
-the output cursor in a register, and sizes the output buffer from recent calls (orjson
-starts at 4 KiB and doubles, `src/serialize/writer/byteswriter.rs`). Instruction counts
-are deterministic, so host noise can't move them:
-
-| instructions per call (valgrind) | rjson | orjson | orjson ÷ rjson |
-|---|---|---|---|
-| `dumps` small dict | 2,065 | 2,473 | 1.20 |
-| `loads` small dict | 4,555 | 5,025 | 1.10 |
-| `dumps` twitter.json | 2.00 M | 3.17 M | 1.59 |
-| `loads` twitter.json | 10.98 M | 13.08 M | 1.19 |
-
-Where it is *not* different: page faults for large results are the same (the output has
-to be written either way), and `indent=`/`sort_keys=` are still slower than orjson's (a
-second pass over the compact output). Internals rjson relies on are version-gated and
-self-tested at import (`CLAUDE.md`); the full review is in
-[docs/PERFORMANCE_REVIEW.md](https://github.com/TinDang97/rjson/blob/main/docs/PERFORMANCE_REVIEW.md).
-Reproduce with `python benches/why_faster.py` (valgrind for the instruction counts).
-
-**The full design, stage by stage:** [docs/ARCHITECTURE.md](https://github.com/TinDang97/rjson/blob/main/docs/ARCHITECTURE.md) walks both pipelines
-function by function (input handling, the key and shape caches, number parsing, string decoding, the
-output-buffer policy, escaping kernels, the dict walk, native types, guarded mode and the
-safety checks), with the reason and the measured effect of each choice.
 
 ## Contributing
 
@@ -475,8 +549,8 @@ maturin develop --release && python -m pytest tests -q
 
 | path | contents |
 |---|---|
-| `src/parser.rs`, `src/lemire.rs` | `loads` |
-| `src/ser.rs` | `dumps` / `dumps_str` |
+| `src/parser.rs`, `src/lemire.rs` | `loads`, `loads_ndjson` |
+| `src/ser.rs`, `src/native.rs` | `dumps` / `dumps_str`, native types |
 | `src/entry.rs`, `src/compat.rs` | C-API entry points, version-portable helpers |
 | `tests/` | pytest suites |
 | `python/rjson/` | package: `__init__.py`, the command line (`tool.py`, `__main__.py`), type stubs (`__init__.pyi`) |
@@ -497,8 +571,10 @@ maturin develop --release && python -m pytest tests -q
 
 ## Roadmap
 
-- Streaming decoder/encoder for async I/O; free-threading and subinterpreter support ([docs/ASYNC.md](https://github.com/TinDang97/rjson/blob/main/docs/ASYNC.md#roadmap))
-- Performance: NEON kernels for aarch64
+- An incremental NDJSON decoder for sockets and a streaming encoder for async I/O;
+  free-threading and subinterpreter support ([docs/ASYNC.md](https://github.com/TinDang97/rjson/blob/main/docs/ASYNC.md#roadmap))
+- Performance: NEON kernels for aarch64; `indent=`/`sort_keys=` written by the serializer
+  itself; deterministic PGO training (fixed iteration counts)
 
 ## License
 
