@@ -7,6 +7,14 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
 
 ## [Unreleased]
 
+### Performance
+
+- `loads` of strings with a character beyond U+FFFF (emoji) decodes 16 bytes
+  per step with SIMD instead of branching on each character's length:
+  the benchmark's unicode strings `loads` 0.81× → 0.59× of orjson's time,
+  CJK text with emoji 1.12× → 0.86×. Its speed also no longer changes from
+  one PGO build to the next.
+
 ### Changed
 
 - PGO builds are reproducible: `scripts/pgo_train.py` makes a fixed number of

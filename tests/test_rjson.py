@@ -755,6 +755,34 @@ class TestLoadsParser:
             assert rjson.loads('"' + s + '"') == s
             assert rjson.loads(('"' + s + '"').encode()) == s
 
+    def test_ucs4_block_decoder(self):
+        # UCS4 strings (one character beyond U+FFFF) are decoded 16 bytes at
+        # a time, with lookback into the previous block and a scalar tail:
+        # every length and every offset of each sequence length across a
+        # block boundary, random mixes, and the escape path (decoded from a
+        # scratch buffer).
+        import json
+        import random
+        chars = ["a", " ", "é", "ÿ", "Ω", "ж", "日", "한", "￿", "😀", "\U00010348", "\U0010ffff"]
+        cases = []
+        for n in range(0, 80):
+            cases.append("😀" + "a" * n)
+            cases.append("a" * n + "😀")
+            for c in ("é", "日", "😀"):
+                cases.append("x" * n + c + "😀" + "y" * (n % 7))
+        rng = random.Random(4)
+        for _ in range(400):
+            s = "".join(rng.choice(chars) for _ in range(rng.randint(1, 120)))
+            cases.append(s + "😀")
+        for s in cases:
+            assert rjson.loads(json.dumps(s, ensure_ascii=False).encode()) == s, s
+            assert rjson.loads(json.dumps(s, ensure_ascii=False)) == s, s
+        for s in cases[::7]:
+            doc = json.dumps("\\n" + s, ensure_ascii=False)
+            assert rjson.loads(doc) == json.loads(doc)
+            doc = json.dumps(s + "\t", ensure_ascii=False)
+            assert rjson.loads(doc) == json.loads(doc)
+
     def test_lists_are_normal_lists(self):
         # Lists get a PyMem_Malloc'd item array attached to an empty list;
         # they must behave (grow, shrink, free) like any other list.

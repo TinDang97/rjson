@@ -191,7 +191,12 @@ the same pass notes whether any byte was non-ASCII. Then:
 - **Non-ASCII**: decoded from UTF-8 straight into the final UCS1, UCS2 or UCS4 buffer: one
   counting pass, one writing pass, no temporary. For UCS2 text (CJK, Cyrillic),
   `decode_ucs2` widens 8/16 ASCII bytes per step and handles 5 three-byte characters per
-  step with shuffles (SSSE3). CJK `loads` went from 1.3× to 0.55–0.91× **[R]**.
+  step with shuffles (SSSE3). CJK `loads` went from 1.3× to 0.55–0.91× **[R]**. For UCS4 text
+  (any emoji), `decode_ucs4_ssse3` decodes 16-byte blocks without a branch per character:
+  each byte's value as the end of a character (its payload plus up to 3 earlier payloads,
+  combined with multiply-adds), then the real ends packed 4 lanes at a time through a
+  shuffle table. unicode_strings `loads` went from 0.81× to 0.59×, and no longer moves with
+  code layout between PGO builds **[R]**.
 - **Escapes**: a 32-byte block kernel (SSE2, or AVX2 detected at run time) handles every
   escape of a block from one bitmask and decodes `\u` escapes and surrogate pairs inline.
   escaped_strings went 1.40 → 0.90 **[R]**.
