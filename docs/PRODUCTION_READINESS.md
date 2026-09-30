@@ -5,7 +5,7 @@ answers that question for the four workloads we tested: web APIs, logs and event
 pipelines with large files, and cache or message-queue payloads. Everything in it was
 measured or checked by running code; nothing is taken from docs or assumed.
 
-*Scope: rjson 0.3.0 (PyPI distribution `pyrjson`), CPython 3.10–3.14, orjson 3.12.0 as
+*Scope: rjson 0.4.0 (PyPI distribution `pyrjson`), CPython 3.10–3.14, orjson 3.12.0 as
 the reference. Measured on a 4-core x86_64 VM (noise ±10%) with PGO builds from
 `scripts/build_pgo.sh`, as the published wheels are built, on `main` after PR #11; the
 before/after tables under [Performance fixes](#performance-fixes) were measured per change
@@ -29,11 +29,11 @@ each is tracked as an issue.
 |---|---|
 | Faster than `json`? | Yes: 2.9–29× on `dumps`, 1.7–5.8× on `loads` (28× on tiny documents). |
 | Faster than orjson? | Yes on most shapes: geomean `dumps` 0.67×, `loads` 0.83×, round trip 0.78× (rjson ÷ orjson time). CJK text (0.59–0.91×) and full-precision float arrays (0.89–0.95×) now load faster than orjson; see [Performance](#performance). |
-| Correct? | 0 mismatches. 1119 tests, fuzzing against `json`, and output byte-identical to orjson. |
+| Correct? | 0 mismatches. 1306 tests, fuzzing against `json`, and output byte-identical to orjson. |
 | Memory? | Better on large `loads`: peak RSS 30–37% below orjson. Retained small results cost ~400 B instead of ~8 KB each. |
 | Safe for async services? | Yes, but each call blocks the event loop, and `to_thread` doesn't help. See [ASYNC.md](ASYNC.md). |
 | Compress / go binary? | Compress at the transport, and only payloads of a few KB and up. Use Arrow/Polars only for columnar data. See [Transfer size](#transfer-size-compression-and-binary-formats). |
-| Installable? | Yes: `pip install pyrjson` (0.3.0), PGO wheels for CPython 3.10–3.14 on Linux (glibc and musl, x86_64 and aarch64), macOS and Windows, published with trusted publishing and provenance attestations. |
+| Installable? | Yes: `pip install pyrjson` (0.4.0), PGO wheels for CPython 3.10–3.14 on Linux (glibc and musl, x86_64 and aarch64), macOS and Windows, published with trusted publishing and provenance attestations. |
 | Stable API? | No: 0.x, experimental. |
 
 ## Workload results
@@ -76,6 +76,7 @@ dominates). Details and the logging/NDJSON/codec results:
 | encode log records and keep the lines (NDJSON join) | **0.05** (orjson allocates ~8 KB per result) |
 | encode freshly built log records | 0.81 |
 | parse NDJSON line by line | 0.78–0.94 |
+| parse NDJSON with `rjson.loads_ndjson` (0.4.0; vs orjson line by line, plain builds, 3.11–3.13) | 0.39–0.70 |
 | stdlib `logging` formatter ([`examples/json_logging.py`](../examples/json_logging.py)) | 2.4 µs per record vs 5.2 µs with `json.dumps(default=str)` |
 
 ### Data pipelines and large files

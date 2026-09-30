@@ -68,6 +68,20 @@ A JSON log formatter runs on every log call. `examples/json_logging.py` has a
 
 (Speedup over `json`.)
 
+When the NDJSON is already in memory (a file read at once, a request body, a queue batch),
+`rjson.loads_ndjson(data)` parses every line in one call instead of a Python loop. It gives
+what `loads(line)` gives for each line (the same errors too, with `lineno` counted in the
+whole input) and skips blank lines:
+
+```python
+records = rjson.loads_ndjson(body)           # instead of [rjson.loads(l) for l in body.splitlines() if l.strip()]
+```
+
+On 60–700-byte lines it takes 0.39–0.70× orjson's time for the same loop (1.4–2.6× faster),
+and 7–49% less than the loop on `rjson.loads` (CPython 3.11–3.13). For a very large input,
+call it on chunks of about 16 KiB cut after a newline (as the `rjson --json-lines` command
+line does): a chunk's documents are then used while they are still in the CPU cache.
+
 ## Redis and Kafka payloads
 
 `examples/codec.py` is a bytes codec with a schema-version envelope. It round-trips
