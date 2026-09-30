@@ -1,62 +1,65 @@
 {
-  "python": "3.13.12",
-  "rjson": "0.4.0",
-  "results": [
-    {
-      "case": "twitter.json (0.6 MB)",
-      "json_tool_s": 0.08089469100013957,
-      "rjson_s": 0.03779194499975347,
-      "speedup": 2.1405273266741704,
-      "same_output": true
-    },
-    {
-      "case": "citm_catalog.json (1.7 MB)",
-      "json_tool_s": 0.13816694599972834,
-      "rjson_s": 0.04260599100007312,
-      "speedup": 3.2428994786083307,
-      "same_output": true
-    },
-    {
-      "case": "canada.json (2.2 MB, floats)",
-      "json_tool_s": 0.35971393500039994,
-      "rjson_s": 0.06593882800007123,
-      "speedup": 5.455267342634773,
-      "same_output": true
-    },
-    {
-      "case": "github.json (55 KB)",
-      "json_tool_s": 0.033765088000109245,
-      "rjson_s": 0.032614572000056796,
-      "speedup": 1.035276133626725,
-      "same_output": true
-    },
-    {
-      "case": "60 MB file, pretty-print",
-      "json_tool_s": 4.6070461900003465,
-      "rjson_s": 0.8410163869998541,
-      "speedup": 5.477950562217934,
-      "same_output": true
-    },
-    {
-      "case": "60 MB file, --sort-keys",
-      "json_tool_s": 4.2417398530001265,
-      "rjson_s": 0.6801407970001492,
-      "speedup": 6.236561417443094,
-      "same_output": true
-    },
-    {
-      "case": "60 MB file, --compact",
-      "json_tool_s": 3.9006249549997847,
-      "rjson_s": 0.49695089099986944,
-      "speedup": 7.849115527596084,
-      "same_output": true
-    },
-    {
-      "case": "200k JSON Lines, --compact",
-      "json_tool_s": 4.269779644000209,
-      "rjson_s": 0.4300129100001868,
-      "speedup": 9.929421988745302,
-      "same_output": true
-    }
-  ]
+ "python": "3.13.12",
+ "rjson": "0.4.1",
+ "results": [
+  {
+   "case": "twitter.json (0.6 MB)",
+   "json_tool_s": 0.08245447299987063,
+   "rjson_s": 0.04199717499977851,
+   "speedup": 1.96,
+   "same_output": true
+  },
+  {
+   "case": "citm_catalog.json (1.7 MB)",
+   "json_tool_s": 0.16986387499991906,
+   "rjson_s": 0.05224881699996331,
+   "speedup": 3.25,
+   "same_output": true
+  },
+  {
+   "case": "canada.json (2.2 MB, floats)",
+   "json_tool_s": 0.385389712000233,
+   "rjson_s": 0.07920838900008675,
+   "speedup": 4.87,
+   "same_output": true
+  },
+  {
+   "case": "github.json (55 KB)",
+   "json_tool_s": 0.036657492000358616,
+   "rjson_s": 0.03891210400024647,
+   "speedup": 0.94,
+   "same_output": true
+  },
+  {
+   "case": "60 MB file, pretty-print",
+   "json_tool_s": 4.286214357000063,
+   "rjson_s": 0.6347559659998296,
+   "speedup": 6.75,
+   "same_output": true
+  },
+  {
+   "case": "60 MB file, --sort-keys",
+   "json_tool_s": 4.406946179999977,
+   "rjson_s": 0.703760575999695,
+   "speedup": 6.26,
+   "same_output": true
+  },
+  {
+   "case": "60 MB file, --compact",
+   "json_tool_s": 3.888670599999841,
+   "rjson_s": 0.5257679170003939,
+   "speedup": 7.4,
+   "same_output": true
+  },
+  {
+   "case": "200k JSON Lines, --compact",
+   "json_tool_s": 4.318700438000178,
+   "rjson_s": 0.42172150699980193,
+   "speedup": 10.24,
+   "same_output": true
+  }
+ ],
+ "meta": {
+  "runs_aggregated": 3
+ }
 }

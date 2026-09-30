@@ -845,13 +845,99 @@ impl Unit for u32 {
 /// Copies `n` code units, widening from `S` to `D` (`D` is never narrower).
 #[inline(always)]
 unsafe fn widen<S: Unit, D: Unit>(src: *const S, dst: *mut D, n: usize) {
-    if std::mem::size_of::<S>() == std::mem::size_of::<D>() {
+    let (ss, ds) = (std::mem::size_of::<S>(), std::mem::size_of::<D>());
+    if ss == ds {
         ptr::copy_nonoverlapping(src as *const D, dst, n);
+    } else if cfg!(all(target_arch = "x86_64", target_feature = "sse4.1")) {
+        #[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
+        match (ss, ds) {
+            (1, 2) => widen_sse41::<1, 2>(src as *const u8, dst as *mut u8, n),
+            (1, 4) => widen_sse41::<1, 4>(src as *const u8, dst as *mut u8, n),
+            _ => widen_sse41::<2, 4>(src as *const u8, dst as *mut u8, n),
+        }
     } else {
         let s = std::slice::from_raw_parts(src, n);
         let d = std::slice::from_raw_parts_mut(dst, n);
         for (o, i) in d.iter_mut().zip(s) {
             *o = D::from_u32(i.to_u32());
+        }
+    }
+}
+
+/// `widen` for `S`-byte to `D`-byte units (1 -> 2, 1 -> 4, 2 -> 4) with
+/// SSE4.1 zero-extension: 16 source bytes per step, then one overlapping
+/// step for the rest (it rewrites some units with the same values); runs
+/// shorter than a step take two overlapping 8- or 4-byte steps, and only
+/// the last 1-3 bytes a scalar loop. `str` results are filled from ASCII
+/// runs and segments of typically 10-1,500 units (twitter.json: 755
+/// segments, runs of median 223), where the auto-vectorized loop's
+/// structure (runtime overlap check, unroll factor, scalar remainder) was
+/// decided by the PGO profile: builds with different profiles filled
+/// twitter.json's UCS4 result 5-8% apart with the same instruction count.
+#[cfg(all(target_arch = "x86_64", target_feature = "sse4.1"))]
+#[inline(always)]
+unsafe fn widen_sse41<const S: usize, const D: usize>(src: *const u8, dst: *mut u8, n: usize) {
+    use std::arch::x86_64::*;
+    // Zero-extends the low `bytes` source bytes of `v` (16, 8 or 4) to `dst`.
+    #[inline(always)]
+    unsafe fn step<const S: usize, const D: usize>(v: __m128i, dst: *mut u8, bytes: usize) {
+        let st = |off: usize, x: __m128i| _mm_storeu_si128(dst.add(off) as *mut __m128i, x);
+        match (S, D, bytes) {
+            (1, 2, 16) => {
+                st(0, _mm_cvtepu8_epi16(v));
+                st(16, _mm_cvtepu8_epi16(_mm_srli_si128(v, 8)));
+            }
+            (1, 2, 8) => st(0, _mm_cvtepu8_epi16(v)),
+            (1, 2, _) => _mm_storel_epi64(dst as *mut __m128i, _mm_cvtepu8_epi16(v)),
+            (1, 4, 16) => {
+                st(0, _mm_cvtepu8_epi32(v));
+                st(16, _mm_cvtepu8_epi32(_mm_srli_si128(v, 4)));
+                st(32, _mm_cvtepu8_epi32(_mm_srli_si128(v, 8)));
+                st(48, _mm_cvtepu8_epi32(_mm_srli_si128(v, 12)));
+            }
+            (1, 4, 8) => {
+                st(0, _mm_cvtepu8_epi32(v));
+                st(16, _mm_cvtepu8_epi32(_mm_srli_si128(v, 4)));
+            }
+            (1, 4, _) => st(0, _mm_cvtepu8_epi32(v)),
+            (_, _, 16) => {
+                st(0, _mm_cvtepu16_epi32(v));
+                st(16, _mm_cvtepu16_epi32(_mm_srli_si128(v, 8)));
+            }
+            (_, _, 8) => st(0, _mm_cvtepu16_epi32(v)),
+            _ => _mm_storel_epi64(dst as *mut __m128i, _mm_cvtepu16_epi32(v)),
+        }
+    }
+    let bytes = n * S;
+    // Destination offset of source byte offset `b`.
+    let d = |b: usize| dst.add(b / S * D);
+    if bytes >= 16 {
+        let mut b = 0;
+        while b + 16 <= bytes {
+            step::<S, D>(_mm_loadu_si128(src.add(b) as *const __m128i), d(b), 16);
+            b += 16;
+        }
+        if b < bytes {
+            let b = bytes - 16;
+            step::<S, D>(_mm_loadu_si128(src.add(b) as *const __m128i), d(b), 16);
+        }
+    } else if bytes >= 8 {
+        step::<S, D>(_mm_loadl_epi64(src as *const __m128i), d(0), 8);
+        let b = bytes - 8;
+        step::<S, D>(_mm_loadl_epi64(src.add(b) as *const __m128i), d(b), 8);
+    } else if bytes >= 4 {
+        let load4 = |p: *const u8| _mm_cvtsi32_si128(ptr::read_unaligned(p as *const i32));
+        step::<S, D>(load4(src), d(0), 4);
+        let b = bytes - 4;
+        step::<S, D>(load4(src.add(b)), d(b), 4);
+    } else {
+        for k in 0..n {
+            let v = if S == 1 { *src.add(k) as u32 } else { ptr::read_unaligned(src.add(2 * k) as *const u16) as u32 };
+            if D == 2 {
+                ptr::write_unaligned(dst.add(2 * k) as *mut u16, v as u16);
+            } else {
+                ptr::write_unaligned(dst.add(4 * k) as *mut u32, v);
+            }
         }
     }
 }

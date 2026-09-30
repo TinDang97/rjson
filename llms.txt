@@ -1,6 +1,6 @@
 # rjson
 
-> Fast JSON library for Python (PyPI: `pyrjson`, import: `rjson`), written in Rust against the CPython C API. An alternative to orjson and the standard library `json`: faster than orjson on most workloads (geomean `loads` 1.23×, `dumps` 1.47× on the reference benchmark; 21 of 22 production-shaped workloads and parity on the other, 1.60×), with byte-identical output to `orjson.dumps`. CPython 3.10–3.14, Linux (glibc, musl), macOS, Windows. MIT license. Status: 0.x, pin the version.
+> Fast JSON library for Python (PyPI: `pyrjson`, import: `rjson`), written in Rust against the CPython C API. An alternative to orjson and the standard library `json`: faster than orjson on most workloads (geomean `loads` 1.29×, `dumps` 1.46× on the reference benchmark; faster on 20 of 22 production-shaped workloads in every run, 1.60×), with byte-identical output to `orjson.dumps`. CPython 3.10–3.14, Linux (glibc, musl), macOS, Windows. MIT license. Status: 0.x, pin the version.
 
 Install with `pip install pyrjson` (not `rjson`, an unrelated package), then `import rjson`.
 

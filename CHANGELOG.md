@@ -7,15 +7,21 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-30
+
 ### Performance
 
 - `loads` decodes non-ASCII strings 16 bytes per step with SIMD instead of
   branching on each character's length, for all three string kinds:
-  accented Latin text 0.53× → 0.31× of orjson's time, Cyrillic and Greek
-  ~0.73× → 0.55×, hangul 0.88× → 0.72×, emoji-only text 1.1× → 0.67×, the
-  benchmark's unicode strings 0.81× → 0.61×; pure CJK unchanged. Their speed
+  accented Latin text 0.57× → 0.31× of orjson's time, Cyrillic and Greek
+  0.74× → 0.56×, hangul 0.88× → 0.70×, emoji-only text 1.10× → 0.68×, the
+  benchmark's unicode strings 0.77× → 0.60×; pure CJK unchanged. Their speed
   also no longer changes from one PGO build to the next (PGO wheels decoded
   such text up to 20% slower than plain builds).
+- `dumps_str` widens the ASCII runs and strings of a non-ASCII result with
+  explicit SSE4.1 steps instead of an auto-vectorized loop, whose shape the
+  PGO profile decided: a first 0.4.1 build filled twitter.json's result 5–8%
+  slower than 0.4.0 with the same instruction count; now at 0.4.0's speed.
 
 ### Changed
 
@@ -152,7 +158,8 @@ Tagged, not published to PyPI (see 0.1.1); everything below ships in 0.1.1.
   output buffer sizing, and fewer UTF-8 copies attached to strings (#10).
   Current numbers: [docs/PERFORMANCE_REVIEW.md](docs/PERFORMANCE_REVIEW.md).
 
-[Unreleased]: https://github.com/TinDang97/rjson/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/TinDang97/rjson/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/TinDang97/rjson/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/TinDang97/rjson/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/TinDang97/rjson/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/TinDang97/rjson/compare/v0.1.1...v0.2.0

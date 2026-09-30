@@ -76,7 +76,7 @@ docs/guides/                  # user-facing guides (faster-json-in-python-servic
 
 ### dumps (`ser.rs`)
 - Exact `ob_type` pointer dispatch on raw borrowed pointers; subclasses handled on a slower path.
-- Writes straight into a `bytes` object or a compact ASCII `str`; for non-ASCII `str` output, source strings' native UCS1/2/4 data is copied into a result of the exact kind (no UTF-8 round trip), checking/escaping each string right before copying it.
+- Writes straight into a `bytes` object or a compact ASCII `str`; for non-ASCII `str` output, source strings' native UCS1/2/4 data is copied into a result of the exact kind (no UTF-8 round trip), checking/escaping each string right before copying it. Widening (ASCII runs and narrower segments) goes through `widen_sse41` (explicit 16/8/4-byte steps): the auto-vectorized loop's shape followed the PGO profile (twitter.json `dumps_str` 5–8% apart between builds).
 - Writers take and return the output cursor (`Cur`, null = error) so it stays in a register; `Out::len` is only synced on growth/finish.
 - Dicts: direct entry iteration on CPython 3.11-3.13 (cfg `rjson_dict_direct` from build.rs + import-time self-test vs `PyDict_Next`); split tables and other versions use `PyDict_Next`. Adding a Python version means checking `struct _dictkeysobject` in its `pycore_dict.h` first.
 - Lists: runs of exact ints/floats go through a register-resident loop with a per-item exact type check.

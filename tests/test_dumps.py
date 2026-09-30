@@ -122,6 +122,22 @@ class TestStrings:
             assert s == ref(obj)
             assert max(map(ord, s)) == max(map(ord, ref(obj)))
 
+    def test_str_result_widening(self):
+        # A non-ASCII str result is filled from ASCII runs of the buffer and
+        # the strings' own data, widened 1 -> 2, 1 -> 4 or 2 -> 4 bytes per
+        # unit in 16-, 8- and 4-byte steps plus a scalar tail: every run and
+        # segment length that picks a different step, into UCS2 and UCS4
+        # results, with the marker that sets the result kind first or last.
+        for marker in ("日", "😀"):
+            for seg_char in ("é", "ж", "日"):
+                if marker == "日" and seg_char == "日":
+                    continue
+                for run in range(0, 80):
+                    for seg in (0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 39):
+                        a = "a" * run
+                        for obj in ([a, seg_char * seg, marker], [marker, seg_char * seg + a, a]):
+                            assert rjson.dumps_str(obj) == ref(obj), (marker, seg_char, run, seg)
+
     def test_lone_surrogates(self):
         # str output behaves like json.dumps(ensure_ascii=False) ...
         for s in ("\ud800", "a\udfffb", "\ud800\n"):
