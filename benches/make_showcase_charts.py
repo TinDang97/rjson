@@ -70,7 +70,7 @@ def showcase_svg(t, x, rows, meta):
                for key, title in GROUPS]
     n_rows = sum(len(g) for _, g in grouped)
     h = top + len(grouped) * group_h + n_rows * row_h + 72
-    wins = sum(r["speedup"] > 1 for r in rows)
+    wins = sum(r.get("speedup_min", r["speedup"]) > 1 for r in rows)  # faster in every run
     geo = math.exp(sum(math.log(r["speedup"]) for r in rows) / len(rows))
 
     parts = [svg_open(w, h, f"rjson speedup over orjson on {len(rows)} workloads: faster in {wins}, "
@@ -197,12 +197,12 @@ def social_svg(rows):
     """1280x640 card for the repository's social preview (link unfurls)."""
     t = THEMES["dark"]
     w, h = 1280, 640
-    wins = sum(r["speedup"] > 1 for r in rows)
+    wins = sum(r.get("speedup_min", r["speedup"]) > 1 for r in rows)  # faster in every run
     geo = math.exp(sum(math.log(r["speedup"]) for r in rows) / len(rows))
     best = max(rows, key=lambda r: r["speedup"])
     stats = [(fmt_x(geo), f"vs orjson, {len(rows)} workloads"),
              (fmt_x(best["speedup"]), f"{best['name']} vs orjson"),
-             ("14×", "dumps vs stdlib json")]
+             ("15×", "dumps vs stdlib json")]
     parts = [svg_open(w, h, "rjson: fast JSON for Python, written in Rust"),
              f'<rect width="{w}" height="{h}" fill="{t["surface"]}"/>',
              f'<rect x="0" y="0" width="12" height="{h}" fill="{t["accent"]}"/>',

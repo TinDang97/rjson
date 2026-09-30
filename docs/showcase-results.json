@@ -1,269 +1,269 @@
 {
  "meta": {
-  "rjson": "0.1.0",
+  "rjson": "0.4.0",
   "orjson": "3.12.0",
   "python": "3.13.12",
   "machine": "x86_64",
   "rounds": 15,
-  "build": "PGO (scripts/build_pgo.sh)",
   "runs": 3,
+  "build": "PGO (scripts/build_pgo.sh)",
   "note": "speedup = orjson time / rjson time; median of 3 runs of benches/showcase.py --rounds 15 --fresh"
  },
  "geomean_per_run": [
-  1.506,
-  1.512,
-  1.527
+  1.596,
+  1.597,
+  1.59
  ],
  "rows": [
   {
    "group": "strings",
    "name": "log records with tracebacks",
    "desc": "2,000 records, newlines/quotes/backslashes",
-   "rjson_s": 0.00041227217391916264,
-   "orjson_s": 0.0006417976521689801,
-   "speedup": 1.557,
-   "speedup_min": 1.526,
-   "speedup_max": 1.614
+   "rjson_s": 0.00040471443137493244,
+   "orjson_s": 0.0006660261428620214,
+   "speedup": 1.646,
+   "speedup_min": 1.638,
+   "speedup_max": 1.667
   },
   {
    "group": "strings",
    "name": "NDJSON log stream, one line per record",
    "desc": "2,000 dumps calls written to a stream",
-   "rjson_s": 0.000958190999989754,
-   "orjson_s": 0.0008799660952371639,
-   "speedup": 0.923,
-   "speedup_min": 0.918,
-   "speedup_max": 0.939
+   "rjson_s": 0.0009855398499894364,
+   "orjson_s": 0.0009890681000115364,
+   "speedup": 1.004,
+   "speedup_min": 0.987,
+   "speedup_max": 1.008
   },
   {
    "group": "strings",
    "name": "parse the log stream back",
    "desc": "the same 2,000 records as one document",
-   "rjson_s": 0.0011913493529337918,
-   "orjson_s": 0.0016685521176548397,
-   "speedup": 1.401,
-   "speedup_min": 1.393,
-   "speedup_max": 1.449
+   "rjson_s": 0.0011431504705850623,
+   "orjson_s": 0.0019607511176485894,
+   "speedup": 1.715,
+   "speedup_min": 1.709,
+   "speedup_max": 1.718
   },
   {
    "group": "web api",
    "name": "github.json response",
    "desc": "GitHub API events (55 KB)",
-   "rjson_s": 1.1976737629309865e-05,
-   "orjson_s": 2.1574238780257974e-05,
-   "speedup": 1.778,
-   "speedup_min": 1.775,
-   "speedup_max": 1.801
+   "rjson_s": 1.2081819233197673e-05,
+   "orjson_s": 2.0370761760931192e-05,
+   "speedup": 1.701,
+   "speedup_min": 1.683,
+   "speedup_max": 1.715
   },
   {
    "group": "web api",
    "name": "github.json request",
    "desc": "GitHub API events (55 KB)",
-   "rjson_s": 7.011529310304844e-05,
-   "orjson_s": 9.347539094706157e-05,
-   "speedup": 1.29,
-   "speedup_min": 1.248,
-   "speedup_max": 1.344
+   "rjson_s": 6.566082084625303e-05,
+   "orjson_s": 9.903379545401597e-05,
+   "speedup": 1.504,
+   "speedup_min": 1.502,
+   "speedup_max": 1.511
   },
   {
    "group": "web api",
    "name": "paginated REST page",
    "desc": "50 users, nested objects, nulls (~45 KB)",
-   "rjson_s": 1.8783484601196204e-05,
-   "orjson_s": 3.080342230705954e-05,
-   "speedup": 1.639,
-   "speedup_min": 1.603,
-   "speedup_max": 1.676
+   "rjson_s": 1.8835054883692106e-05,
+   "orjson_s": 3.20721934884543e-05,
+   "speedup": 1.703,
+   "speedup_min": 1.69,
+   "speedup_max": 1.704
   },
   {
    "group": "web api",
    "name": "1,000 small responses",
    "desc": "one dumps call per response (~150 B each)",
-   "rjson_s": 0.00014955399999976973,
-   "orjson_s": 0.00018655058729997282,
-   "speedup": 1.235,
-   "speedup_min": 1.2,
-   "speedup_max": 1.253
+   "rjson_s": 0.00017249234453721183,
+   "orjson_s": 0.00020539487394969665,
+   "speedup": 1.191,
+   "speedup_min": 1.147,
+   "speedup_max": 1.194
   },
   {
    "group": "web api",
    "name": "1,000 small request bodies",
    "desc": "one loads call per body (bytes)",
-   "rjson_s": 0.0012825268571370024,
-   "orjson_s": 0.0015324182142779006,
-   "speedup": 1.247,
-   "speedup_min": 1.195,
-   "speedup_max": 1.252
+   "rjson_s": 0.001143491062521207,
+   "orjson_s": 0.0016920925882539664,
+   "speedup": 1.502,
+   "speedup_min": 1.417,
+   "speedup_max": 1.53
   },
   {
    "group": "native types",
    "name": "events with datetime, UUID, Enum",
    "desc": "2,000 records, no default= needed",
-   "rjson_s": 0.0003484646896563861,
-   "orjson_s": 0.0008147314310369031,
-   "speedup": 2.338,
-   "speedup_min": 2.314,
-   "speedup_max": 2.339
+   "rjson_s": 0.0004114174693851816,
+   "orjson_s": 0.0009379368399913802,
+   "speedup": 2.262,
+   "speedup_min": 2.243,
+   "speedup_max": 2.321
   },
   {
    "group": "native types",
    "name": "UTC timestamps",
    "desc": "5,000 aware datetimes",
-   "rjson_s": 0.0001599403255793788,
-   "orjson_s": 0.0005006038720021024,
-   "speedup": 3.172,
-   "speedup_min": 3.123,
-   "speedup_max": 3.292
+   "rjson_s": 0.0001679817672413327,
+   "orjson_s": 0.0005375597983871675,
+   "speedup": 3.196,
+   "speedup_min": 3.151,
+   "speedup_max": 3.226
   },
   {
    "group": "native types",
    "name": "dataclasses",
    "desc": "1,000 dataclass instances with nested items",
-   "rjson_s": 0.0001928638712883239,
-   "orjson_s": 0.00021223176237513279,
-   "speedup": 1.089,
-   "speedup_min": 1.078,
-   "speedup_max": 1.1
+   "rjson_s": 0.00020344117647076856,
+   "orjson_s": 0.0002487239117664442,
+   "speedup": 1.237,
+   "speedup_min": 1.223,
+   "speedup_max": 1.255
   },
   {
    "group": "native types",
    "name": "dataclasses with __slots__",
    "desc": "2,000 slots=True instances",
-   "rjson_s": 0.0004480878000019099,
-   "orjson_s": 0.0009863910930234428,
-   "speedup": 2.138,
-   "speedup_min": 2.099,
-   "speedup_max": 2.366
+   "rjson_s": 0.0005326142857191891,
+   "orjson_s": 0.0011626594285709352,
+   "speedup": 2.153,
+   "speedup_min": 2.107,
+   "speedup_max": 2.183
   },
   {
    "group": "native types",
    "name": "int-keyed aggregates",
    "desc": "5,000 int keys (non_str_keys / OPT_NON_STR_KEYS)",
-   "rjson_s": 8.453681967231935e-05,
-   "orjson_s": 0.0001862274653051697,
-   "speedup": 2.19,
-   "speedup_min": 2.145,
-   "speedup_max": 2.228
+   "rjson_s": 8.863148245477772e-05,
+   "orjson_s": 0.0001870024122796933,
+   "speedup": 2.11,
+   "speedup_min": 2.06,
+   "speedup_max": 2.152
   },
   {
    "group": "str output",
    "name": "github.json as str",
    "desc": "rjson.dumps_str vs orjson.dumps().decode()",
-   "rjson_s": 1.371717532038326e-05,
-   "orjson_s": 2.716283277161427e-05,
-   "speedup": 1.994,
-   "speedup_min": 1.98,
-   "speedup_max": 2.062
+   "rjson_s": 1.3602413420030617e-05,
+   "orjson_s": 2.653374219283725e-05,
+   "speedup": 1.91,
+   "speedup_min": 1.884,
+   "speedup_max": 2.006
   },
   {
    "group": "str output",
    "name": "twitter.json as str",
    "desc": "rjson.dumps_str vs orjson.dumps().decode()",
-   "rjson_s": 0.00028851696363496805,
-   "orjson_s": 0.00047711667273026915,
-   "speedup": 1.654,
-   "speedup_min": 1.628,
-   "speedup_max": 1.661
+   "rjson_s": 0.0002765002777778136,
+   "orjson_s": 0.00047222530555599305,
+   "speedup": 1.708,
+   "speedup_min": 1.691,
+   "speedup_max": 1.718
   },
   {
    "group": "str output",
    "name": "log records as str",
    "desc": "rjson.dumps_str vs orjson.dumps().decode()",
-   "rjson_s": 0.00041705330302261933,
-   "orjson_s": 0.0007365196363686912,
-   "speedup": 1.769,
-   "speedup_min": 1.766,
-   "speedup_max": 1.778
+   "rjson_s": 0.00039511259999926553,
+   "orjson_s": 0.0007541759607870606,
+   "speedup": 1.894,
+   "speedup_min": 1.869,
+   "speedup_max": 1.91
   },
   {
    "group": "corpus",
    "name": "twitter.json loads",
    "desc": "616 KB",
-   "rjson_s": 0.0011959928823510862,
-   "orjson_s": 0.0012600591176391497,
-   "speedup": 1.098,
-   "speedup_min": 1.046,
-   "speedup_max": 1.258
+   "rjson_s": 0.0010795182222409494,
+   "orjson_s": 0.001494003733326584,
+   "speedup": 1.392,
+   "speedup_min": 1.215,
+   "speedup_max": 1.394
   },
   {
    "group": "corpus",
    "name": "twitter.json dumps",
    "desc": "616 KB",
-   "rjson_s": 0.00013327877777988934,
-   "orjson_s": 0.00024095210967589668,
-   "speedup": 1.82,
-   "speedup_min": 1.769,
-   "speedup_max": 1.867
+   "rjson_s": 0.00013916890972293712,
+   "orjson_s": 0.00024073347916618736,
+   "speedup": 1.73,
+   "speedup_min": 1.692,
+   "speedup_max": 1.736
   },
   {
    "group": "corpus",
    "name": "citm_catalog.json loads",
    "desc": "1686 KB",
-   "rjson_s": 0.003501092799979233,
-   "orjson_s": 0.003755694199935533,
-   "speedup": 1.093,
-   "speedup_min": 1.073,
-   "speedup_max": 1.176
+   "rjson_s": 0.003648138599965023,
+   "orjson_s": 0.004191814600017096,
+   "speedup": 1.149,
+   "speedup_min": 1.119,
+   "speedup_max": 1.157
   },
   {
    "group": "corpus",
    "name": "citm_catalog.json dumps",
    "desc": "1686 KB",
-   "rjson_s": 0.0003861188600058085,
-   "orjson_s": 0.0005156974199962861,
-   "speedup": 1.335,
-   "speedup_min": 1.092,
-   "speedup_max": 1.336
+   "rjson_s": 0.0004179115000045964,
+   "orjson_s": 0.0005893325000091533,
+   "speedup": 1.41,
+   "speedup_min": 1.403,
+   "speedup_max": 1.411
   },
   {
    "group": "corpus",
    "name": "canada.json loads",
    "desc": "2198 KB",
-   "rjson_s": 0.007354967000082979,
-   "orjson_s": 0.00829606699994656,
-   "speedup": 1.112,
-   "speedup_min": 1.001,
-   "speedup_max": 1.128
+   "rjson_s": 0.00845392900009756,
+   "orjson_s": 0.009339573000033852,
+   "speedup": 1.098,
+   "speedup_min": 1.064,
+   "speedup_max": 1.105
   },
   {
    "group": "corpus",
    "name": "canada.json dumps",
    "desc": "2198 KB",
-   "rjson_s": 0.0025792564285568786,
-   "orjson_s": 0.002861697714316896,
-   "speedup": 1.122,
-   "speedup_min": 1.11,
-   "speedup_max": 1.138
+   "rjson_s": 0.002741722666693628,
+   "orjson_s": 0.0035825501666598334,
+   "speedup": 1.309,
+   "speedup_min": 1.307,
+   "speedup_max": 1.337
   }
  ],
  "fresh_process": [
   {
    "rjson": [
-    0.0008629280000604922,
-    4
+    0.0008384630000364268,
+    2
    ],
    "orjson": [
-    0.0035611549997156544,
+    0.0033915519998117816,
     1976
    ]
   },
   {
    "rjson": [
-    0.0008473730003970559,
-    3
+    0.0008305469996230386,
+    2
    ],
    "orjson": [
-    0.0037385079999694426,
+    0.003380842999831657,
     1976
    ]
   },
   {
    "rjson": [
-    0.0008073099998000544,
+    0.0008777349999036232,
     1
    ],
    "orjson": [
-    0.0033173269998769683,
+    0.0039824129999033175,
     1976
    ]
   }
