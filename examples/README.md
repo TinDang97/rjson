@@ -100,6 +100,10 @@ All apps mount their routes through an `APIRouter`, as this example does.
 | `write_ndjson`, per record (10,000 records) | 3.2–3.5 µs | 6.32–6.61× | **12.5–12.6×** (253–281 ns) |
 | `read_ndjson`, per line (10,000 lines) | 2.1–2.6 µs | 2.39–2.52× | **2.48–2.82×** (833–924 ns) |
 
+`read_ndjson` streams a file line by line with per-line error handling. For NDJSON already
+in memory, `rjson.loads_ndjson(data)` (0.4.0) parses all lines in one call, 1.4–2.6× faster
+than the same loop on orjson.
+
 A whole `logger.info` call gains less than `format()` because the `logging` module itself
 (record creation, handler lock, filters) costs ~6–8 µs.
 

@@ -11,7 +11,30 @@ The loads, dumps and build reviews each prototyped and measured their changes, a
 
 ## 1. Results
 
-### Current (after PR #11, PGO wheels, CPython 3.13)
+### 0.4.0 (PGO wheels, CPython 3.13)
+
+rjson time ÷ orjson time, so **below 1.00 means rjson is faster**. Median time per case over 5 runs of `benches/corpus_benchmark.py --json --repeat 11`, in parentheses the lowest and highest ratio of the 5 runs; CPython 3.13.12, orjson 3.12.0, x86_64 Xeon (4 cores), PGO build from `scripts/build_pgo.sh`. Raw data: `docs/img/benchmark-results.json`.
+
+| case | loads | loads_str | dumps | dumps_str |
+|---|---|---|---|---|
+| twitter | **0.83** (0.79–0.87) | 1.34 (1.29–1.39) | **0.63** (0.59–0.64) | 1.18 (1.14–1.21) |
+| citm_catalog | **0.85** (0.72–0.87) | 1.16 (1.11–1.29) | **0.72** (0.71–0.76) | **0.80** (0.77–0.83) |
+| canada | **0.91** (0.87–0.95) | **0.93** (0.90–1.02) | **0.80** (0.78–0.82) | **0.80** (0.79–0.81) |
+| github | **0.68** (0.65–0.70) | **0.67** (0.64–0.69) | **0.54** (0.53–0.61) | **0.62** (0.60–0.68) |
+| small_dict | **0.64** (0.63–0.65) | **0.66** (0.60–0.67) | **0.69** (0.65–0.72) | **0.72** (0.67–0.74) |
+| records | **0.71** (0.69–0.72) | **0.70** (0.69–0.72) | **0.61** (0.59–0.63) | **0.61** (0.59–0.62) |
+| unicode_strings | **0.77** (0.75–0.82) | 1.34 (1.28–1.37) | **0.90** (0.89–0.93) | 2.40 (2.36–2.46) |
+| escaped_strings | **0.91** (0.89–1.29) | **0.92** (0.90–1.24) | **0.36** (0.34–0.36) | **0.35** (0.34–0.37) |
+| int_array | **0.88** (0.84–0.91) | **0.88** (0.85–0.88) | 1.01 (0.98–1.01) | 1.01 (0.97–1.07) |
+| float_array | **0.99** (0.91–1.02) | 1.00 (0.99–1.01) | **0.77** (0.75–0.82) | **0.78** (0.77–0.81) |
+| **geomean** | **0.81** | **0.93** | **0.68** | **0.82** |
+
+- **Headline** (README): `loads` 1.23× and `dumps` 1.47× faster than orjson on the geomean (0.3.0: 1.17× and 1.36×); 19 of 20 `loads`/`dumps` medians below 1.00; the other (int array `dumps` 1.01, per-run 0.98–1.01) is at parity.
+- **Where 0.4.0 moved `loads`:** the shape cache (§3 loads item 12): records 0.90 → 0.71, small_dict 0.79 → 0.64, citm 1.06 → 0.85, github 0.75 → 0.68. Cases without dicts are unchanged; float array reads 0.99 here against 0.79 in the 0.3.0 table, but a 0.3.0 PGO wheel measured on the same host on the same day also gives 0.98, so that is the host, not the release.
+- **PGO builds are not reproducible run to run** (§4 item 19): the first 0.4.0 PGO build measured unicode_strings `loads` 18% slower than 0.3.0; rebuilding the same commit with the same script gave parity (514 vs 514 µs). These numbers are from the second build.
+- The `loads_str` column keeps the trade-off described under the 0.3.0 table below.
+
+### After PR #11 (0.2.0/0.3.0, PGO wheels, CPython 3.13)
 
 rjson time ÷ orjson time, so **below 1.00 means rjson is faster**. Median time per case over 5 runs of `benches/corpus_benchmark.py --json --repeat 11`, in parentheses the lowest and highest ratio of the 5 runs; CPython 3.13.12, orjson 3.12.0, x86_64 Xeon (4 cores), PGO build from `scripts/build_pgo.sh` (what the published wheels are). `loads` parses the document's UTF-8 `bytes`; `loads_str` parses the same `str` object every call; `dumps` returns `bytes` like `orjson.dumps`, `dumps_str` returns `str` (compared with the same `orjson.dumps` time). Raw data: `docs/img/benchmark-results.json`.
 
@@ -165,7 +188,7 @@ Second round (branch `wip-loads`, results in §1):
     | citm_catalog / canada / github | 0.99–1.01 | 0.98–0.99 | 0.96–1.00 |
     | unique_shapes | 0.97 | 0.98 | 1.02 |
 
-    Against orjson (`corpus_benchmark.py --repeat 7`, 3.13 plain build, best of 2 runs), the `loads` geomean went from 0.85 to 0.76: twitter 0.87 → 0.64, github 0.74 → 0.55, records 0.87 → 0.68, small_dict 0.82 → 0.69, citm 0.94 → 0.84. The other cases have no dicts and moved within noise. The README table (PGO) predates this change.
+    Against orjson (`corpus_benchmark.py --repeat 7`, 3.13 plain build, best of 2 runs), the `loads` geomean went from 0.85 to 0.76: twitter 0.87 → 0.64, github 0.74 → 0.55, records 0.87 → 0.68, small_dict 0.82 → 0.69, citm 0.94 → 0.84. The other cases have no dicts and moved within noise. The 0.4.0 PGO numbers are in §1.
 
     Memory: copies have the compact str-key table that `json.loads`'s dicts have. On 3.11/3.12 objects with more than 8 keys used to get `_PyDict_NewPresized`'s generic table; results with 12 and 30 keys per record are now 16% smaller (a 12-key dict: 632 → 464 B). Nothing is larger than before.
 
@@ -257,6 +280,7 @@ rjson ÷ orjson time before the fix (plain build, CPython 3.13; below 1.00 is fa
 | 16 | one `dumps` per ~600 B record with many escapes, streamed: 1.09 (the same records as one document: 0.64) | open: per-call fixed cost. Output-buffer hint variants (largest reservation made; max of last two sizes when small) cut regrowth 60% with no measurable change (A/B 0.86–1.01 both), not kept |
 | 17 | fresh process, per-record results kept: orjson takes one page fault per call (glibc trims/regrows around its buffers) | not rjson's gap: 0.24 (1–4 faults vs 1,976); gone once any output > ~128 KiB was freed |
 | 18 | `indent=2` 0.48×, `sort_keys=True` 0.78× on twitter.json (PGO-less build, vs orjson's options) | open: `indent` is a second pass over the compact output (~9 instructions per input byte: a structural byte every few characters); matching orjson means writing the indentation in the serializer, i.e. multi-byte separators in every writer. `sort_keys` sorts each dict's items by key object before writing (`cmp_str`, memcmp for Latin-1 keys); the rest is the per-dict `Vec` |
+| 19 | PGO builds differ from build to build: two `scripts/build_pgo.sh` builds of the same 0.4.0 commit gave 606 vs 503 µs on 2,000 emoji-heavy strings (`loads`, UCS-4 decode; 0.3.0: 514 µs), while plain builds were 496 µs | open: `scripts/pgo_train.py` runs each case for a fixed time (`RJSON_PGO_SECONDS`), so branch counts and hence code layout change with host load. Adding long UCS-4 strings to the training did not fix it (it traded UCS-2 for UCS-4 speed). Next: fixed iteration counts, and a check of the built wheel against a plain build on a few cases before publishing |
 
 ### Threading and I/O (researched, mostly not applicable)
 

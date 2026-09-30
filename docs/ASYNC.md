@@ -62,6 +62,8 @@ async def read_ndjson(reader: asyncio.StreamReader, batch: int = 1000):
             await asyncio.sleep(0)
 
 # 41 MB / 300k records: longest loop stall 16.5 ms, instead of ~430 ms for one loads()
+# With whole chunks in hand (reader.read(n) up to the last b"\n"), rjson.loads_ndjson(chunk)
+# parses all their lines in one call; keep chunks small (~16 KiB) and await between them.
 
 def to_ndjson(records) -> bytes:
     return b"\n".join(map(rjson.dumps, records)) + b"\n"
@@ -178,8 +180,9 @@ uv add pyrjson
 In priority order:
 
 1. **Streaming API.** An incremental decoder (`feed(chunk) -> list[obj]`) for NDJSON from
-   sockets, and a chunked encoder for streaming responses, so large payloads never stall
-   the loop.
+   sockets that keeps the unfinished last line between chunks (0.4.0's `loads_ndjson` parses
+   the complete lines of one chunk), and a chunked encoder for streaming responses, so
+   large payloads never stall the loop.
 2. **Free-threaded CPython.** Per-thread key cache and buffers, locking dicts and lists
    during iteration, no direct dict-layout reads, a GIL-free module declaration, and a
    ThreadSanitizer CI job. With these, threads and `to_thread` run in parallel.
