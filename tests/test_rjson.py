@@ -763,16 +763,24 @@ class TestLoadsParser:
         # scratch buffer).
         import json
         import random
-        chars = ["a", " ", "é", "ÿ", "Ω", "ж", "日", "한", "￿", "😀", "\U00010348", "\U0010ffff"]
+        # Beyond U+FFFF: each of code point bits 16..20 set somewhere (U+20000..
+        # is CJK Extension B, U+E0100 variation selectors).
+        chars = ["a", " ", "é", "ÿ", "Ω", "ж", "日", "한", "\uffff", "😀", "\U00010348", "\U0010ffff",
+                 "\U00020000", "\U0002a6d6", "\U0004abcd", "\U000e0100", "\U000fffff"]
         cases = []
         for n in range(0, 80):
             cases.append("😀" + "a" * n)
             cases.append("a" * n + "😀")
             for c in ("é", "日", "😀"):
                 cases.append("x" * n + c + "😀" + "y" * (n % 7))
+            # Runs of 4-byte characters (the 4 x 4-byte step) at every offset.
+            cases.append("é" * (n % 5) + "a" * (n // 5) + "😀🎉\U0010ffff\U00010000" * (n % 9 + 1) + "b" * (n % 3))
+            cases.append("日" * (n % 4) + "\U00020000\U000e0100\U000fffff\U0004abcd" * (n % 5 + 1) + "x" * (n % 6))
         rng = random.Random(4)
         for _ in range(400):
             s = "".join(rng.choice(chars) for _ in range(rng.randint(1, 120)))
+            cases.append(s + "😀")
+            s = "".join(rng.choice(chars[-8:] if rng.random() < 0.7 else chars) for _ in range(rng.randint(1, 60)))
             cases.append(s + "😀")
         for s in cases:
             assert rjson.loads(json.dumps(s, ensure_ascii=False).encode()) == s, s
@@ -781,6 +789,57 @@ class TestLoadsParser:
             doc = json.dumps("\\n" + s, ensure_ascii=False)
             assert rjson.loads(doc) == json.loads(doc)
             doc = json.dumps(s + "\t", ensure_ascii=False)
+            assert rjson.loads(doc) == json.loads(doc)
+
+    def test_ucs1_block_decoder(self):
+        # Latin-1 strings: 16-byte blocks of 1- and 2-byte characters,
+        # all-ASCII blocks, lookback into the previous block, scalar tail.
+        import json
+        import random
+        chars = ["a", " ", "7", "\x7f", "\x80", "é", "ß", "ñ", "ÿ", "\xa0", "¿"]
+        cases = []
+        for n in range(0, 80):
+            cases.append("é" + "a" * n)
+            cases.append("a" * n + "é")
+            cases.append("x" * n + "ÿ\x80" + "y" * (n % 7))
+            cases.append("é" * n)
+        rng = random.Random(6)
+        for _ in range(400):
+            s = "".join(rng.choice(chars) for _ in range(rng.randint(1, 120)))
+            cases.append(s + "é")
+        for s in cases:
+            assert rjson.loads(json.dumps(s, ensure_ascii=False).encode()) == s, s
+            assert rjson.loads(json.dumps(s, ensure_ascii=False)) == s, s
+        for s in cases[::7]:
+            doc = json.dumps("\\n" + s, ensure_ascii=False)
+            assert rjson.loads(doc) == json.loads(doc)
+
+    def test_ucs2_block_decoder(self):
+        # UCS2 strings: 16-byte blocks, all-ASCII blocks, five-3-byte-char
+        # steps at a character boundary (entered at any alignment), lookback
+        # across both, and the scalar tail.
+        import json
+        import random
+        chars = ["a", " ", "7", "é", "ÿ", "Ω", "ж", "ק", "日", "한", "。", "ࠀ", "￿"]
+        cases = []
+        for n in range(0, 80):
+            cases.append("Ā" + "a" * n)
+            cases.append("a" * n + "Ā")
+            for c in ("é", "ж", "日"):
+                cases.append("x" * n + c + "Ā" + "y" * (n % 7))
+            # 3-byte runs entered at every offset, broken by other lengths.
+            cases.append("é" * (n % 5) + "a" * (n // 5) + "日本語テキスト" * (n % 9 + 1) + "ж" * (n % 3) + "中文" * (n % 4))
+        rng = random.Random(5)
+        for _ in range(400):
+            s = "".join(rng.choice(chars) for _ in range(rng.randint(1, 120)))
+            cases.append(s + "Ā")
+            s = "".join(rng.choice(chars[8:] if rng.random() < 0.8 else chars) for _ in range(rng.randint(1, 80)))
+            cases.append(s + "Ā")
+        for s in cases:
+            assert rjson.loads(json.dumps(s, ensure_ascii=False).encode()) == s, s
+            assert rjson.loads(json.dumps(s, ensure_ascii=False)) == s, s
+        for s in cases[::7]:
+            doc = json.dumps("\\n" + s, ensure_ascii=False)
             assert rjson.loads(doc) == json.loads(doc)
 
     def test_lists_are_normal_lists(self):

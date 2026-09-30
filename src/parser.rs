@@ -1863,11 +1863,106 @@ unsafe fn new_utf8_str(bytes: &[u8]) -> *mut ffi::PyObject {
     }
     let data = crate::compat::PyUnicode_DATA(s);
     match crate::compat::PyUnicode_KIND(s) {
-        1 => decode_into(bytes, data as *mut u8),
+        1 => decode_ucs1(bytes, data as *mut u8, nchars),
         2 => decode_ucs2(bytes, data as *mut u16, nchars),
         _ => decode_ucs4(bytes, data as *mut u32, nchars),
     }
     s
+}
+
+/// `decode_into` for UCS1 results (Latin-1: accented Latin text). Its
+/// characters are 1 or 2 bytes (leads 0xC2/0xC3), and `decode_into`'s branch
+/// on each one mispredicted on words with accents; its speed also moved with
+/// the code around it (18% when the UCS2/UCS4 decoders changed). See
+/// `decode_ucs1_ssse3`.
+#[inline(always)]
+unsafe fn decode_ucs1(bytes: &[u8], out: *mut u8, nchars: usize) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
+    {
+        decode_ucs1_ssse3(bytes, out, nchars)
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "ssse3")))]
+    {
+        let _ = nchars;
+        decode_into(bytes, out)
+    }
+}
+
+/// Byte shuffles for `decode_ucs1_ssse3`: entry `m` moves the bytes whose
+/// bit is set in the 8-bit mask `m` to the front, in order.
+#[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
+static COMPACT_U8: [[u8; 8]; 256] = {
+    let mut t = [[0x80u8; 8]; 256];
+    let mut m = 0;
+    while m < 256 {
+        let (mut k, mut lane) = (0, 0);
+        while lane < 8 {
+            if m & (1 << lane) != 0 {
+                t[m][k] = lane as u8;
+                k += 1;
+            }
+            lane += 1;
+        }
+        m += 1;
+    }
+    t
+};
+
+/// 16-byte blocks, as `decode_ucs4_ssse3`: each continuation byte becomes
+/// (previous byte & 3) << 6 | (byte & 0x3F), ASCII bytes stay; the bytes
+/// where a character ends (the next one is not a continuation) are packed 8
+/// at a time with `COMPACT_U8`. The cursor advances by 16; all-ASCII blocks
+/// are copied. Lookback is the previous block's last byte. Stores write up
+/// to 16 bytes past the block's first unit, so blocks run while 16 units
+/// are left in the `nchars`-unit result, and while 17 bytes are left; the
+/// rest, from the first character not yet written, goes through
+/// `decode_into`. The input is valid UTF-8 with no lead above 0xC3.
+///
+/// Standalone, ~150 bytes of accented Latin: 88-135 ns -> 34-35 ns; 2 KB of
+/// Spanish 1053 -> 337 ns; mostly-ASCII text unchanged (21 vs 24 ns).
+#[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
+#[inline(never)]
+unsafe fn decode_ucs1_ssse3(bytes: &[u8], mut out: *mut u8, nchars: usize) {
+    use std::arch::x86_64::*;
+    let n = bytes.len();
+    let p = bytes.as_ptr();
+    let out_end = out.add(nchars);
+    let cont_lim = _mm_set1_epi8(-64); // bytes 0x80..=0xBF are < -64 as i8
+    let mut prev = _mm_setzero_si128();
+    let mut i = 0;
+    while i + 17 <= n && out.add(16) <= out_end {
+        let v = _mm_loadu_si128(p.add(i) as *const __m128i);
+        if _mm_movemask_epi8(v) == 0 {
+            _mm_storeu_si128(out as *mut __m128i, v);
+            out = out.add(16);
+            prev = v;
+            i += 16;
+            continue;
+        }
+        let next = _mm_loadu_si128(p.add(i + 1) as *const __m128i);
+        let cont = _mm_cmplt_epi8(v, cont_lim);
+        // (byte j-1 & 3) << 6 per byte: 2 bits shifted by 6 stay in their byte.
+        let top = _mm_slli_epi16(_mm_and_si128(_mm_alignr_epi8(v, prev, 15), _mm_set1_epi8(0x03)), 6);
+        let joined = _mm_or_si128(_mm_and_si128(v, _mm_set1_epi8(0x3F)), top);
+        let units = _mm_or_si128(_mm_and_si128(cont, joined), _mm_andnot_si128(cont, v));
+        let ends = !(_mm_movemask_epi8(_mm_cmplt_epi8(next, cont_lim)) as u32);
+        let m0 = (ends & 255) as usize;
+        let m1 = ((ends >> 8) & 255) as usize;
+        let s0 = _mm_loadl_epi64(COMPACT_U8.get_unchecked(m0).as_ptr() as *const __m128i);
+        let s1 = _mm_loadl_epi64(COMPACT_U8.get_unchecked(m1).as_ptr() as *const __m128i);
+        _mm_storel_epi64(out as *mut __m128i, _mm_shuffle_epi8(units, s0));
+        out = out.add(m0.count_ones() as usize);
+        _mm_storel_epi64(out as *mut __m128i, _mm_shuffle_epi8(_mm_srli_si128(units, 8), s1));
+        out = out.add(m1.count_ones() as usize);
+        prev = v;
+        i += 16;
+    }
+    // Characters ending before byte i are written; back up to the start of
+    // the one containing it.
+    while i > 0 && i < n && *p.add(i) & 0xC0 == 0x80 {
+        i -= 1;
+    }
+    decode_into(bytes.get_unchecked(i..), out);
 }
 
 /// `decode_into` for UCS4 results (text with a character beyond U+FFFF,
@@ -1892,51 +1987,36 @@ unsafe fn decode_ucs4(bytes: &[u8], out: *mut u32, nchars: usize) {
     }
 }
 
-/// Byte shuffles for `decode_ucs4_ssse3`: entry `m` moves the u32 lanes
-/// whose bit is set in the 4-bit mask `m` to the front, in order.
-#[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
-static COMPACT_U32: [[u8; 16]; 16] = {
-    let mut t = [[0x80u8; 16]; 16];
-    let mut m = 0;
-    while m < 16 {
-        let (mut k, mut lane) = (0, 0);
-        while lane < 4 {
-            if m & (1 << lane) != 0 {
-                let mut b = 0;
-                while b < 4 {
-                    t[m][k * 4 + b] = (lane * 4 + b) as u8;
-                    b += 1;
-                }
-                k += 1;
-            }
-            lane += 1;
-        }
-        m += 1;
-    }
-    t
-};
-
 /// Per 16-byte block, the code point of the character that ends at each
 /// byte, assuming one does, is computed for all 16 bytes at once: each
 /// byte's payload bits (by its high nibble: ASCII 7, continuation 6, 2/3/4-
 /// byte leads 5/4/3), plus the payloads of the 1-3 bytes before it, each
-/// taken only while the bytes in between are continuations; those four are
-/// combined with multiply-adds (`maddubs`: a + b << 6, `madd`: lo + hi <<
-/// 12). The lanes where a character really ends (the next byte is not a
-/// continuation) are then packed 4 at a time with `COMPACT_U32` and stored.
-/// The cursor always advances by 16 and the output by a popcount, so no
-/// step waits on a branch or a load of the previous one; all-ASCII blocks
-/// are widened directly.
+/// taken only while the bytes in between are continuations. Bits 0..15 come
+/// from multiply-adds (`maddubs`: a + b << 6) and a shift, bits 16..20 from
+/// the two oldest payloads. The lanes where a character really ends (the
+/// next byte is not a continuation) are packed 8 at a time with
+/// `COMPACT_U16`, low and high halves alike, and interleaved into u32s. The
+/// cursor always advances by 16 and the output by a popcount, so no step
+/// waits on a branch or a load of the previous one.
+///
+/// Two runs take shorter steps: all-ASCII blocks are widened, and four
+/// 4-byte characters at a character boundary (emoji-only text) are decoded
+/// with 32-bit shifts; after one of those the cursor is at a boundary.
 ///
 /// Lookback into the previous block uses its payloads and continuation
-/// mask (zero before the first). Stores write 16 bytes per group of 4 lanes,
-/// up to 16 units past the block's start, so blocks run while 16 units are
-/// left in the `nchars`-unit result, and while 17 bytes are left (the byte
-/// after the block decides whether its last byte ends a character). The
-/// rest, from the first character not yet written, goes through
-/// `decode_into`. The input is valid UTF-8 (validated before).
-// Out of line: inside `new_utf8_str` it made the UCS1 path 35% slower
-// (Latin-1 text), with no gain for UCS4 strings, which are rarer.
+/// mask (zero at a boundary). Blocks store up to 16 units past their first
+/// one, so they run while 16 units are left in the `nchars`-unit result,
+/// and while 17 bytes are left (the byte after the block decides whether
+/// its last byte ends a character); the 4-byte run step needs 4 units and
+/// 16 bytes. The rest, from the first character not yet written, goes
+/// through `decode_into`. The input is valid UTF-8 (validated before).
+///
+/// Standalone, 120 characters: mixed text 176 -> 90 ns, CJK + emoji 256 ->
+/// 155, emoji only 260 -> 85, 2 KB of mixed text 1760 -> 840 (compacting 4
+/// u32 lanes at a time instead: 10% slower; without the 4-byte run step
+/// emoji only: 200 ns).
+// Out of line: inside `new_utf8_str` it made the (then scalar) UCS1 path
+// 35% slower, with no gain for UCS4 strings, which are rarer.
 #[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
 #[inline(never)]
 unsafe fn decode_ucs4_ssse3(bytes: &[u8], mut out: *mut u32, nchars: usize) {
@@ -1950,12 +2030,38 @@ unsafe fn decode_ucs4_ssse3(bytes: &[u8], mut out: *mut u32, nchars: usize) {
     );
     let cont_lim = _mm_set1_epi8(-64); // bytes 0x80..=0xBF are < -64 as i8
     let by64 = _mm_set1_epi16(0x4001); // byte weights 1, 64
-    let by4096 = _mm_set1_epi32(0x1000_0001); // u16 weights 1, 4096
+    // Four 4-byte sequences: lead 11110xxx + three 10xxxxxx, per u32 lane.
+    let mask4 = _mm_set1_epi32(0xC0C0_C0F8u32 as i32);
+    let want4 = _mm_set1_epi32(0x8080_80F0u32 as i32);
     let zero = _mm_setzero_si128();
     let mut prev_pl = zero;
     let mut prev_cont = zero;
     let mut i = 0;
-    while i + 17 <= n && out.add(16) <= out_end {
+    while i + 16 <= n {
+        // The 4-byte run step stores 4 units: it keeps going where blocks
+        // (16 units) no longer fit.
+        if *p.add(i) >= 0xF0 && out.add(4) <= out_end {
+            let v = _mm_loadu_si128(p.add(i) as *const __m128i);
+            if _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_and_si128(v, mask4), want4)) == 0xFFFF {
+                let hi = _mm_or_si128(
+                    _mm_slli_epi32(_mm_and_si128(v, _mm_set1_epi32(0x07)), 18),
+                    _mm_slli_epi32(_mm_and_si128(v, _mm_set1_epi32(0x3F00)), 4),
+                );
+                let lo = _mm_or_si128(
+                    _mm_and_si128(_mm_srli_epi32(v, 10), _mm_set1_epi32(0xFC0)),
+                    _mm_and_si128(_mm_srli_epi32(v, 24), _mm_set1_epi32(0x3F)),
+                );
+                _mm_storeu_si128(out as *mut __m128i, _mm_or_si128(hi, lo));
+                out = out.add(4);
+                i += 16;
+                prev_pl = zero;
+                prev_cont = zero;
+                continue;
+            }
+        }
+        if i + 17 > n || out.add(16) > out_end {
+            break;
+        }
         let v = _mm_loadu_si128(p.add(i) as *const __m128i);
         if _mm_movemask_epi8(v) == 0 {
             let lo = _mm_unpacklo_epi8(v, zero);
@@ -1980,21 +2086,20 @@ unsafe fn decode_ucs4_ssse3(bytes: &[u8], mut out: *mut u32, nchars: usize) {
         let a1 = _mm_and_si128(_mm_alignr_epi8(pl, prev_pl, 15), cont);
         let a2 = _mm_and_si128(_mm_alignr_epi8(pl, prev_pl, 14), cont2);
         let a3 = _mm_and_si128(_mm_alignr_epi8(pl, prev_pl, 13), cont3);
-        let lo01 = _mm_maddubs_epi16(_mm_unpacklo_epi8(pl, a1), by64);
-        let hi01 = _mm_maddubs_epi16(_mm_unpackhi_epi8(pl, a1), by64);
-        let lo23 = _mm_maddubs_epi16(_mm_unpacklo_epi8(a2, a3), by64);
-        let hi23 = _mm_maddubs_epi16(_mm_unpackhi_epi8(a2, a3), by64);
-        let cps = [
-            _mm_madd_epi16(_mm_unpacklo_epi16(lo01, lo23), by4096),
-            _mm_madd_epi16(_mm_unpackhi_epi16(lo01, lo23), by4096),
-            _mm_madd_epi16(_mm_unpacklo_epi16(hi01, hi23), by4096),
-            _mm_madd_epi16(_mm_unpackhi_epi16(hi01, hi23), by4096),
-        ];
+        // Bits 16..20 per byte: a2 >> 4 | a3 << 2 (a2 <= 0x3F, a3 <= 7, so
+        // the 16-bit shifts move no bits between bytes after the mask).
+        let top = _mm_or_si128(_mm_and_si128(_mm_srli_epi16(a2, 4), _mm_set1_epi8(0x03)), _mm_slli_epi16(a3, 2));
+        // Bits 0..15: payload + a1 << 6 + a2 << 12 (the shift drops a2's
+        // bits 4..5, which are in `top`).
+        let lo = _mm_or_si128(_mm_maddubs_epi16(_mm_unpacklo_epi8(pl, a1), by64), _mm_slli_epi16(_mm_unpacklo_epi8(zero, a2), 4));
+        let hi = _mm_or_si128(_mm_maddubs_epi16(_mm_unpackhi_epi8(pl, a1), by64), _mm_slli_epi16(_mm_unpackhi_epi8(zero, a2), 4));
         let ends = !(_mm_movemask_epi8(_mm_cmplt_epi8(next, cont_lim)) as u32);
-        for (g, cp) in cps.into_iter().enumerate() {
-            let m = ((ends >> (4 * g)) & 15) as usize;
-            let shuf = _mm_loadu_si128(COMPACT_U32.get_unchecked(m).as_ptr() as *const __m128i);
-            _mm_storeu_si128(out as *mut __m128i, _mm_shuffle_epi8(cp, shuf));
+        for (g, (low, high)) in [(lo, _mm_unpacklo_epi8(top, zero)), (hi, _mm_unpackhi_epi8(top, zero))].into_iter().enumerate() {
+            let m = ((ends >> (8 * g)) & 255) as usize;
+            let shuf = _mm_loadu_si128(COMPACT_U16.get_unchecked(m).as_ptr() as *const __m128i);
+            let (l, h) = (_mm_shuffle_epi8(low, shuf), _mm_shuffle_epi8(high, shuf));
+            _mm_storeu_si128(out as *mut __m128i, _mm_unpacklo_epi16(l, h));
+            _mm_storeu_si128(out.add(4) as *mut __m128i, _mm_unpackhi_epi16(l, h));
             out = out.add(m.count_ones() as usize);
         }
         prev_pl = pl;
@@ -2009,24 +2114,13 @@ unsafe fn decode_ucs4_ssse3(bytes: &[u8], mut out: *mut u32, nchars: usize) {
     decode_into(bytes.get_unchecked(i..), out);
 }
 
-/// `decode_into` for UCS2 results (CJK, and most other non-Latin-1 text),
-/// with SIMD fast paths for the two runs that dominate such text: ASCII
-/// (spaces, digits, markup) and 3-byte sequences (U+0800..U+FFFF, which
-/// covers CJK, kana and hangul). Each step looks at the next 16 input bytes
-/// at a character boundary:
-/// * leading ASCII bytes: all 16 bytes are widened and stored, and the
-///   cursor advances by the number of leading ASCII bytes;
-/// * leading 3-byte sequences (up to 5 in 15 bytes): validated as lead
-///   `1110xxxx` + two `10xxxxxx` per character with one masked compare,
-///   assembled into UTF-16 with shuffles, 8 units stored, the cursor
-///   advancing by the number of leading complete sequences;
-/// * anything else (2-byte sequences): one character, scalar.
-///
-/// Stores may write past the characters they account for (up to 16 units
-/// for ASCII, 8 for 3-byte runs); they are only taken when that many units
-/// are left in the `nchars`-unit result, and later steps overwrite the
-/// extra units. The input is valid UTF-8 (validated before), so the scalar
-/// step never reads past `bytes`.
+/// `decode_into` for UCS2 results (CJK, Cyrillic, Greek, hangul, and most
+/// other non-Latin-1 text). Like `decode_ucs4_ssse3`, it decodes 16-byte
+/// blocks without a branch per character: per-character steps (the former
+/// scalar ones for 2-byte sequences, lone 3-byte characters and short runs)
+/// mispredicted on mixed text such as words between spaces, and their speed
+/// changed with code layout (PGO wheels decoded such text ~20% slower than
+/// plain builds). See `decode_ucs2_ssse3`.
 #[inline(always)]
 unsafe fn decode_ucs2(bytes: &[u8], out: *mut u16, nchars: usize) {
     #[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
@@ -2040,14 +2134,69 @@ unsafe fn decode_ucs2(bytes: &[u8], out: *mut u16, nchars: usize) {
     }
 }
 
+/// Byte shuffles for `decode_ucs2_ssse3`: entry `m` moves the u16 lanes
+/// whose bit is set in the 8-bit mask `m` to the front, in order.
 #[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
-#[inline(always)]
+static COMPACT_U16: [[u8; 16]; 256] = {
+    let mut t = [[0x80u8; 16]; 256];
+    let mut m = 0;
+    while m < 256 {
+        let (mut k, mut lane) = (0, 0);
+        while lane < 8 {
+            if m & (1 << lane) != 0 {
+                t[m][k * 2] = (lane * 2) as u8;
+                t[m][k * 2 + 1] = (lane * 2 + 1) as u8;
+                k += 1;
+            }
+            lane += 1;
+        }
+        m += 1;
+    }
+    t
+};
+
+/// Three kinds of 16-byte steps:
+/// * all ASCII: widened and stored;
+/// * five 3-byte characters (a CJK, kana or hangul run) at a character
+///   boundary: validated as lead `1110xxxx` + two `10xxxxxx` each with one
+///   masked compare (after a scalar check of bytes 8..15, which rejects
+///   nearly every other block cheaply), assembled with shuffles, advancing
+///   15 bytes. Pure 3-byte text reaches such a boundary within two blocks
+///   (16 = 1 mod 3) and then stays on this step;
+/// * anything else: the code point of the character ending at each byte, as
+///   in `decode_ucs4_ssse3` but in 16-bit lanes (no 4-byte sequences in a
+///   UCS2 result): payload + previous payload << 6 by `maddubs`, the one
+///   before << 12 by a shift; the real ends are packed 8 lanes at a time
+///   through `COMPACT_U16`, and the cursor advances by 16.
+///
+/// Lookback into the previous 16 bytes uses their payloads and continuation
+/// mask; after a 3-byte run step the cursor is at a character boundary, so
+/// they are zero. Blocks store up to 16 units past their first one, so they
+/// run while 16 units are left in the `nchars`-unit result, and while 17
+/// bytes are left (the byte after a block decides whether its last byte
+/// ends a character); the 3-byte run step needs 8 units and 16 bytes (with
+/// the blocks' 16, short CJK strings lost up to 15 characters to the scalar
+/// tail: pure CJK `loads` 15% slower). The rest, from the first character
+/// not yet written, goes through `decode_into`. The input is valid UTF-8.
+///
+/// End to end (2,000 distinct 18-120 character strings per script, vs
+/// orjson): Cyrillic 0.71 -> 0.58, Greek 0.73 -> 0.59, hangul words 0.82 ->
+/// 0.68, CJK with ASCII 0.77 -> 0.70, Japanese 0.74 -> 0.72, pure CJK 0.73
+/// -> 0.74. Standalone against the previous decoder (per-character steps
+/// plus the ASCII and 3-byte run steps), 120-170 characters: mixed text
+/// 2-2.5x faster (Cyrillic 182 -> 80 ns, hangul words 187 -> 84, Latin with
+/// CJK 126 -> 55), pure CJK 95 -> 84, Chinese with full-width punctuation
+/// 86 -> 90. Without the 3-byte run step pure CJK was 22% slower; with a
+/// data-dependent advance after each block (to stay at character
+/// boundaries) mixed text lost most of the gain.
+// Out of line, like `decode_ucs4_ssse3`.
+#[cfg(all(target_arch = "x86_64", target_feature = "ssse3"))]
+#[inline(never)]
 unsafe fn decode_ucs2_ssse3(bytes: &[u8], mut out: *mut u16, nchars: usize) {
     use std::arch::x86_64::*;
     let n = bytes.len();
     let p = bytes.as_ptr();
     let out_end = out.add(nchars);
-    let mut i = 0;
     // Byte pattern of five 3-byte sequences in bytes 0..15; byte 15 is
     // masked out (always matches).
     let mask3 = _mm_setr_epi8(
@@ -2064,61 +2213,22 @@ unsafe fn decode_ucs2_ssse3(bytes: &[u8], mut out: *mut u16, nchars: usize) {
     let lead_mid = _mm_setr_epi8(1, 0, 4, 3, 7, 6, 10, 9, 13, 12, -1, -1, -1, -1, -1, -1);
     // u16 lane k = byte 3k+2.
     let last = _mm_setr_epi8(2, -1, 5, -1, 8, -1, 11, -1, 14, -1, -1, -1, -1, -1, -1, -1);
+    // Payload mask by high nibble: 0-7 ASCII, 8-B continuation, C-D, E, F leads.
+    let nibble_mask = _mm_setr_epi8(
+        0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x7F, 0x3F, 0x3F, 0x3F, 0x3F, 0x1F, 0x1F, 0x0F, 0x07,
+    );
+    let cont_lim = _mm_set1_epi8(-64); // bytes 0x80..=0xBF are < -64 as i8
+    let by64 = _mm_set1_epi16(0x4001); // byte weights 1, 64
     let zero = _mm_setzero_si128();
-    // Only whole blocks take the vector path: the cursor then advances by a
-    // constant, so the next load doesn't wait for this block's compare (a
-    // data-dependent advance made mixed text 1.4-1.6x slower). Partial runs
-    // go through the scalar step, which branch prediction runs ahead on.
-    // A block is only loaded when scalar checks say it is whole (two ASCII
-    // words; the byte pattern of bytes 8..15 after two 3-byte leads), so
-    // text that alternates short runs (hangul words, Cyrillic with ASCII)
-    // pays a scalar compare per step, not a vector load and compare.
-    // Measured alternatives that lost: checking the leads at bytes 3/6/9/12
-    // separately, backing off after a failed attempt, a once-per-run flag,
-    // and moving the block conversion out of line.
+    let mut prev_pl = zero;
+    let mut prev_cont = zero;
+    let mut i = 0;
     while i + 16 <= n {
-        let b0 = *p.add(i);
-        if b0 < 0x80 {
-            // ASCII: 8 bytes at a time (as in `decode_into`), 16 when the
-            // next 8 are ASCII too and 16 units are left. These 8 bytes are
-            // 8 characters, so 8 units are always left (i + 16 <= n).
-            let w = ptr::read_unaligned(p.add(i) as *const u64);
-            if w & 0x8080_8080_8080_8080 == 0 {
-                let w2 = ptr::read_unaligned(p.add(i + 8) as *const u64);
-                if w2 & 0x8080_8080_8080_8080 == 0 && out.add(16) <= out_end {
-                    let v = _mm_loadu_si128(p.add(i) as *const __m128i);
-                    _mm_storeu_si128(out as *mut __m128i, _mm_unpacklo_epi8(v, zero));
-                    _mm_storeu_si128(out.add(8) as *mut __m128i, _mm_unpackhi_epi8(v, zero));
-                    out = out.add(16);
-                    i += 16;
-                } else {
-                    let v = _mm_loadl_epi64(p.add(i) as *const __m128i);
-                    _mm_storeu_si128(out as *mut __m128i, _mm_unpacklo_epi8(v, zero));
-                    out = out.add(8);
-                    i += 8;
-                }
-                continue;
-            }
-            *out = b0 as u16;
-            out = out.add(1);
-            i += 1;
-            continue;
-        }
-        if b0 >= 0xE0 {
-            let b3 = *p.add(i + 3);
-            if b3 < 0xE0 {
-                // A lone 3-byte character (a 4-byte one can't occur in UCS2).
-                *out = ((b0 as u16 & 0x0F) << 12) | ((*p.add(i + 1) as u16 & 0x3F) << 6) | (*p.add(i + 2) as u16 & 0x3F);
-                out = out.add(1);
-                i += 3;
-                continue;
-            }
-            // At least two 3-byte characters. Bytes 8..15 in one scalar
-            // load: a whole block has leads at 9 and 12 and continuations at
-            // 8, 10, 11, 13, 14; this rejects nearly every block that the
-            // vector compare would (hangul words, CJK mixed with spaces).
+        // The 3-byte run step stores 8 units: it keeps going where blocks
+        // (16 units) no longer fit, e.g. the last 15 characters of CJK text.
+        if *p.add(i) & 0xF0 == 0xE0 && out.add(8) <= out_end {
             let w = ptr::read_unaligned(p.add(i + 8) as *const u64);
-            if w & 0x00C0_C0F0_C0C0_F0C0 == 0x0080_80E0_8080_E080 && out.add(8) <= out_end {
+            if w & 0x00C0_C0F0_C0C0_F0C0 == 0x0080_80E0_8080_E080 {
                 let v = _mm_loadu_si128(p.add(i) as *const __m128i);
                 if _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_and_si128(v, mask3), want3)) == 0xFFFF {
                     let a = _mm_shuffle_epi8(v, lead_mid); // b0 << 8 | b1
@@ -2129,31 +2239,49 @@ unsafe fn decode_ucs2_ssse3(bytes: &[u8], mut out: *mut u16, nchars: usize) {
                     _mm_storeu_si128(out as *mut __m128i, _mm_or_si128(_mm_or_si128(hi, mid), lo));
                     out = out.add(5);
                     i += 15;
+                    prev_pl = zero;
+                    prev_cont = zero;
                     continue;
                 }
             }
-            // Two characters per iteration: short runs (2-4 hangul
-            // syllables per word) take half the loop trips. Both are complete
-            // (the input is valid UTF-8 and i + 6 <= i + 16 <= n) and fit in
-            // the result.
-            *out = ((b0 as u16 & 0x0F) << 12) | ((*p.add(i + 1) as u16 & 0x3F) << 6) | (*p.add(i + 2) as u16 & 0x3F);
-            *out.add(1) = ((b3 as u16 & 0x0F) << 12) | ((*p.add(i + 4) as u16 & 0x3F) << 6) | (*p.add(i + 5) as u16 & 0x3F);
-            out = out.add(2);
-            i += 6;
+        }
+        if i + 17 > n || out.add(16) > out_end {
+            break;
+        }
+        let v = _mm_loadu_si128(p.add(i) as *const __m128i);
+        if _mm_movemask_epi8(v) == 0 {
+            _mm_storeu_si128(out as *mut __m128i, _mm_unpacklo_epi8(v, zero));
+            _mm_storeu_si128(out.add(8) as *mut __m128i, _mm_unpackhi_epi8(v, zero));
+            out = out.add(16);
+            prev_pl = v;
+            prev_cont = zero;
+            i += 16;
             continue;
         }
-        // 2-byte sequences (Cyrillic, Greek, Hebrew, Arabic, ...): two per
-        // iteration when the next character is one too (0xC0..0xDF lead).
-        *out = ((b0 as u16 & 0x1F) << 6) | (*p.add(i + 1) as u16 & 0x3F);
-        let b2 = *p.add(i + 2);
-        if b2 & 0xE0 == 0xC0 {
-            *out.add(1) = ((b2 as u16 & 0x1F) << 6) | (*p.add(i + 3) as u16 & 0x3F);
-            out = out.add(2);
-            i += 4;
-        } else {
-            out = out.add(1);
-            i += 2;
+        let next = _mm_loadu_si128(p.add(i + 1) as *const __m128i);
+        let pl = _mm_and_si128(v, _mm_shuffle_epi8(nibble_mask, _mm_and_si128(_mm_srli_epi16(v, 4), _mm_set1_epi8(0x0F))));
+        let cont = _mm_cmplt_epi8(v, cont_lim);
+        let cont2 = _mm_and_si128(cont, _mm_alignr_epi8(cont, prev_cont, 15));
+        let a1 = _mm_and_si128(_mm_alignr_epi8(pl, prev_pl, 15), cont);
+        let a2 = _mm_and_si128(_mm_alignr_epi8(pl, prev_pl, 14), cont2);
+        // a2 is at most a 3-byte lead's 4 bits: << 12 stays within 16 bits.
+        let lo = _mm_or_si128(_mm_maddubs_epi16(_mm_unpacklo_epi8(pl, a1), by64), _mm_slli_epi16(_mm_unpacklo_epi8(zero, a2), 4));
+        let hi = _mm_or_si128(_mm_maddubs_epi16(_mm_unpackhi_epi8(pl, a1), by64), _mm_slli_epi16(_mm_unpackhi_epi8(zero, a2), 4));
+        let ends = !(_mm_movemask_epi8(_mm_cmplt_epi8(next, cont_lim)) as u32);
+        for (g, cp) in [lo, hi].into_iter().enumerate() {
+            let m = ((ends >> (8 * g)) & 255) as usize;
+            let shuf = _mm_loadu_si128(COMPACT_U16.get_unchecked(m).as_ptr() as *const __m128i);
+            _mm_storeu_si128(out as *mut __m128i, _mm_shuffle_epi8(cp, shuf));
+            out = out.add(m.count_ones() as usize);
         }
+        prev_pl = pl;
+        prev_cont = cont;
+        i += 16;
+    }
+    // Characters ending before byte i are written; back up to the start of
+    // the one containing it.
+    while i > 0 && i < n && *p.add(i) & 0xC0 == 0x80 {
+        i -= 1;
     }
     decode_into(bytes.get_unchecked(i..), out);
 }
