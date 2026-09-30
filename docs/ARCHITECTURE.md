@@ -498,7 +498,9 @@ This rule exists because an early version hard-coded the str data offset: it cra
   Building for `native`/v3 also made zmij ~1.6× slower on the benchmark host, because of the
   BMI2 code it generates **[R]**.
 - **PGO wheels.** `scripts/build_pgo.sh` builds instrumented, trains on synthetic documents
-  that share no data with any benchmark, then rebuilds. Worth 0–4%. An earlier profile
+  that share no data with any benchmark, then rebuilds. Worth 0–4%. Training makes a fixed
+  number of calls per case, with a fixed hash seed and (Linux) no address randomization, so
+  two builds of a commit give the same binary. An earlier profile
   trained on the benchmark itself showed 7–10% and was discarded as dishonest **[R]**.
 - **`panic = "abort"`**, and no `unwrap` on data that comes from Python.
 

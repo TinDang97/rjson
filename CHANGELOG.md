@@ -7,6 +7,17 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- PGO builds are reproducible: `scripts/pgo_train.py` makes a fixed number of
+  calls per training step instead of running each for 0.2 s, and
+  `scripts/build_pgo.sh` trains with `PYTHONHASHSEED=0` and, on Linux, address
+  randomization off (the `loads` shape cache picks slots from object
+  addresses). Two builds of the same commit now give a byte-identical
+  extension module; before, their speed on single cases differed by up to 20%.
+  `RJSON_PGO_SECONDS` is replaced by `RJSON_PGO_SCALE`; `PROFILE_DIR=` keeps
+  the merged profiles.
+
 ## [0.4.0] - 2026-09-30
 
 ### Added

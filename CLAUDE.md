@@ -46,7 +46,8 @@ benches/perf_gate.py          # compare base/head benchmark runs, fail on >5% ge
 benches/make_charts.py        # README charts (docs/img/*.svg) + table from a --json --output-json run
 benches/demo.py, make_demo_svg.py # 10-second head-to-head; its recorded output -> animated docs/img/demo.svg (README top; re-record on a PGO build, pick the run closest to the median of 5)
 benches/make_showcase_charts.py # README showcase chart + architecture diagram (docs/img/showcase-*, architecture-*) + social-preview.svg/.png from docs/showcase-results.json
-scripts/build_pgo.sh, scripts/pgo_train.py   # PGO wheel build; training is synthetic, disjoint from the benchmark
+scripts/build_pgo.sh, scripts/pgo_train.py   # PGO wheel build; training is synthetic, disjoint from the benchmark;
+                              # fixed call counts (`CALLS`, re-derive with `pgo_train.py --calibrate`), hash seed and no ASLR: reproducible wheels
 .github/workflows/            # ci.yml (clippy + tests + ASan job), wheels.yml (PGO wheels; on a v* tag: provenance + PyPI trusted publishing), perf.yml (perf gate, label `perf`)
                               # actions pinned to commit SHAs (Dependabot bumps them); SECURITY.md, CHANGELOG.md at the root
 docs/ARCHITECTURE.md          # design deep-dive (both pipelines, reasons, measured effects); update when a design changes
