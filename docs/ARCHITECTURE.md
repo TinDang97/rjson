@@ -60,8 +60,8 @@ What the missing steps are worth, measured **[W]**:
 
 | step removed | effect |
 |---|---|
-| `loads`: the tree | 85 MB vs 183 MB peak memory above a 60 MB input; 0.19 s vs 0.29 s |
-| `dumps` to `str`: bytes + decode | 1.9 MB vs 3.2 MB allocated for twitter.json; 277 vs 474 µs |
+| `loads`: the tree | 85 MB vs 183 MB peak memory above a 60 MB input; 0.18 s vs 0.28 s |
+| `dumps` to `str`: bytes + decode | 1.9 MB vs 3.2 MB allocated for twitter.json; 294 vs 475 µs |
 
 ---
 
@@ -90,8 +90,8 @@ Result: `loads('1')` ~25 ns and `dumps(None)` ~35 ns, against orjson's 67 and 53
 
 | instructions per call | rjson | orjson |
 |---|---|---|
-| `dumps` small dict | 2,182 | 2,606 |
-| `loads` small dict | 3,994 | 4,967 |
+| `dumps` small dict | 2,210 | 2,497 |
+| `loads` small dict | 3,932 | 4,794 |
 
 ---
 
@@ -260,7 +260,7 @@ orjson hands the text to yyjson, which builds its own document tree
 yyjson's parser is excellent, but the tree costs memory proportional to the input and a
 second pass over data that is no longer in cache. rjson's parser is less general (it
 creates Python objects and nothing else), which is what lets it skip the tree. **[W]**: 85
-vs 183 MB peak memory above a 60 MB input; 10.19 M vs 13.19 M instructions for
+vs 183 MB peak memory above a 60 MB input; 9.20 M vs 13.15 M instructions for
 twitter.json.
 
 ---
@@ -333,7 +333,7 @@ one result of the exact kind (UCS1/2/4), widens the ASCII runs, and copies each 
 string's native data into its hole, checking for escapes right before each copy while the
 string is in cache. That skips both the encode and the full decode that
 `PyUnicode_FromStringAndSize` would do: unicode_strings went from 25.6× to 2.2× orjson's
-bytes-plus-decode time over two rounds **[R]**. Today, twitter.json to `str` is 277 vs 474 µs
+bytes-plus-decode time over two rounds **[R]**. Today, twitter.json to `str` is 294 vs 475 µs
 **[W]**.
 
 ### 4.5 Escaping
@@ -346,7 +346,7 @@ The kernels, selected at run time, are AVX-512VL (masked loads for the tail), AV
 as the baseline. Each block is loaded once and stored once, and **every escape in the block
 is handled from the one compare mask**. orjson's AVX-512 kernel (`src/serialize/writer/str/avx512.rs`)
 restarts the block after each escape, so each escape costs a full load, compare and store.
-On text with an escape every 12 characters: 3.39 vs 0.96 GB/s on the same CPU **[W]**.
+On text with an escape every 12 characters: 3.40 vs 0.96 GB/s on the same CPU **[W]**.
 
 One implementation detail: the crate targets x86-64-v2 (see §7), and that tuning makes LLVM
 split every unaligned 256-bit load and store in two, even inside `#[target_feature(enable =
@@ -396,7 +396,7 @@ reference (`TZ_CACHE`). A `timezone` is immutable and its offset doesn't depend 
 datetime, so a list of UTC timestamps asks for it once. Date and time fields are read from
 the C struct. orjson, for `timezone.utc`, runs `slow_offset` for every value (up to three
 `hasattr` probes, then `utcoffset()`, which allocates a `timedelta`;
-`src/ffi/pydatetimeref.rs`). Result: 28 vs 94 ns per datetime **[W]**.
+`src/ffi/pydatetimeref.rs`). Result: 28 vs 93 ns per datetime **[W]**.
 
 Dataclasses whose `__dict__` read runs no Python code are serialized without guarded mode
 on 3.12+ (§6.1). That took dataclasses from 1.64× to 0.92×, and `slots=True` dataclasses to
