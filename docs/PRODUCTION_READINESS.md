@@ -33,7 +33,7 @@ each is tracked as an issue.
 | Memory? | Better on large `loads`: peak RSS 30–37% below orjson. Retained small results cost ~400 B instead of ~8 KB each. |
 | Safe for async services? | Yes, but each call blocks the event loop, and `to_thread` doesn't help. See [ASYNC.md](ASYNC.md). |
 | Compress / go binary? | Compress at the transport, and only payloads of a few KB and up. Use Arrow/Polars only for columnar data. See [Transfer size](#transfer-size-compression-and-binary-formats). |
-| Installable? | Yes: `pip install pyrjson` (0.4.0), PGO wheels for CPython 3.10–3.14 on Linux (glibc and musl, x86_64 and aarch64), macOS and Windows, published with trusted publishing and provenance attestations. |
+| Installable? | Yes: `pip install pyrjson` (0.4.1), PGO wheels for CPython 3.10–3.14 on Linux (glibc and musl, x86_64 and aarch64), macOS and Windows, published with trusted publishing and provenance attestations. |
 | Stable API? | No: 0.x, experimental. |
 
 ## Workload results

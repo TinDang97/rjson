@@ -7,6 +7,8 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-30
+
 ### Performance
 
 - `loads` decodes non-ASCII strings 16 bytes per step with SIMD instead of
@@ -152,7 +154,8 @@ Tagged, not published to PyPI (see 0.1.1); everything below ships in 0.1.1.
   output buffer sizing, and fewer UTF-8 copies attached to strings (#10).
   Current numbers: [docs/PERFORMANCE_REVIEW.md](docs/PERFORMANCE_REVIEW.md).
 
-[Unreleased]: https://github.com/TinDang97/rjson/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/TinDang97/rjson/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/TinDang97/rjson/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/TinDang97/rjson/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/TinDang97/rjson/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/TinDang97/rjson/compare/v0.1.1...v0.2.0

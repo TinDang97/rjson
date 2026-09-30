@@ -115,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "rjson"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "fast-float",
  "itoap",
