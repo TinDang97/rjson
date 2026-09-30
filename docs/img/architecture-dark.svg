@@ -23,7 +23,7 @@
 <rect x="259.2" y="138.0" width="580.8" height="44" rx="6" fill="#1d2a3a" stroke="#3987e5" stroke-width="1"/>
 <text x="549.6" y="157.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12.5" font-weight="600" fill="#ffffff" text-anchor="middle">one pass</text>
 <text x="549.6" y="173.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="11" font-weight="400" fill="#c3c2b7" text-anchor="middle">text → Python objects directly</text>
-<text x="88.0" y="204.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="600" fill="#3987e5" text-anchor="start">loads 1.10–1.49× faster · 30–37% less peak memory on large files (no intermediate tree)</text>
+<text x="88.0" y="204.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="600" fill="#3987e5" text-anchor="start">loads 1.08–1.52× faster · 30–37% less peak memory on large files (no intermediate tree)</text>
 <line x1="24" y1="212.0" x2="856" y2="212.0" stroke="#2c2c2a" stroke-width="1"/>
 <text x="24.0" y="234.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="13.5" font-weight="600" fill="#ffffff" text-anchor="start">dumps<tspan dx="10" font-weight="400" fill="#c3c2b7">output sized from recent calls, written as bytes or str</tspan></text>
 <text x="24.0" y="272.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12.5" font-weight="600" fill="#8c8a82" text-anchor="start">orjson</text>
@@ -54,7 +54,7 @@
 <rect x="658.5" y="300.0" width="181.5" height="44" rx="6" fill="#1d2a3a" stroke="#3987e5" stroke-width="1"/>
 <text x="749.3" y="319.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12.5" font-weight="600" fill="#ffffff" text-anchor="middle">bytes or str</text>
 <text x="749.3" y="335.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="11" font-weight="400" fill="#c3c2b7" text-anchor="middle">written directly</text>
-<text x="88.0" y="366.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="600" fill="#3987e5" text-anchor="start">dumps 1.19–1.71× faster · as str 1.62–1.92×</text>
+<text x="88.0" y="366.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="600" fill="#3987e5" text-anchor="start">dumps 1.21–1.80× faster · as str 1.71–1.91×</text>
 <line x1="24" y1="374.0" x2="856" y2="374.0" stroke="#2c2c2a" stroke-width="1"/>
 <text x="24.0" y="396.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="13.5" font-weight="600" fill="#ffffff" text-anchor="start">datetime · UUID · Enum · dataclass<tspan dx="10" font-weight="400" fill="#c3c2b7">what orjson looks up per value, rjson caches</tspan></text>
 <text x="24.0" y="434.5" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12.5" font-weight="600" fill="#8c8a82" text-anchor="start">orjson</text>
@@ -75,6 +75,6 @@
 <rect x="632.6" y="462.0" width="207.4" height="44" rx="6" fill="#1d2a3a" stroke="#3987e5" stroke-width="1"/>
 <text x="736.3" y="481.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12.5" font-weight="600" fill="#ffffff" text-anchor="middle">format</text>
 <text x="736.3" y="497.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="11" font-weight="400" fill="#c3c2b7" text-anchor="middle">C fields</text>
-<text x="88.0" y="528.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="600" fill="#3987e5" text-anchor="start">UTC datetimes 3.09× · datetime/UUID/Enum records 2.31× · slots dataclasses 2.28×</text>
+<text x="88.0" y="528.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="600" fill="#3987e5" text-anchor="start">UTC datetimes 3.18× · datetime/UUID/Enum records 2.28× · slots dataclasses 2.24×</text>
 <text x="24.0" y="564.0" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif' font-size="12" font-weight="400" fill="#9a988f" text-anchor="start">orjson 3.12.0 per its source · measured effects: docs/SHOWCASE.md, docs/PRODUCTION_READINESS.md</text>
 </svg>

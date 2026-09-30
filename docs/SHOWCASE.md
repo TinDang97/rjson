@@ -6,13 +6,14 @@ dataclasses), `str` output, plus the standard corpora for reference. Every case 
 that both libraries produce the same result (byte-identical output for `dumps`, equal objects
 for `loads`), then times them interleaved in one process.
 
-**Result (rjson 0.4.1): rjson is faster in 21 of 22 cases, 1.59× on the geometric
-mean.** The one case where it is not ahead (per-record NDJSON, 0.97×, slightly
-behind) is listed with the rest.
+**Result (rjson 0.4.1): rjson is faster in 20 of 22 cases in every run, 1.60× on the
+geometric mean.** Of the other two, canada.json `loads` is faster on the median
+(1.08×, 0.98–1.09 across runs) and per-record NDJSON is at parity
+(0.99×); the latter is listed with the rest below.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="img/showcase-dark.svg">
-  <img alt="Speed relative to orjson on 22 workloads: rjson faster in 21, geomean 1.59×; per-record NDJSON 0.97×." src="img/showcase-light.svg" width="880">
+  <img alt="Speed relative to orjson on 22 workloads: rjson faster in 20 in every run, canada.json loads faster on the median, per-record NDJSON at parity; geomean 1.60×." src="img/showcase-light.svg" width="880">
 </picture>
 
 Speedup = orjson's time ÷ rjson's time (higher is better). Median of 3 runs of
@@ -24,29 +25,29 @@ numbers: [showcase-results.json](showcase-results.json).
 | workload | rjson | orjson | speedup |
 |---|---|---|---|
 | **Application types** (no `default=` needed in either) | | | |
-| 5,000 UTC `datetime`s | 170 µs | 525 µs | **3.09×** (3.03–3.13) |
-| 2,000 events with `datetime`, `UUID`, `Enum` | 411 µs | 944 µs | **2.31×** (2.18–2.31) |
-| 2,000 `@dataclass(slots=True)` instances | 492 µs | 1.12 ms | **2.28×** (2.21–2.29) |
-| dict with 5,000 int keys (`non_str_keys` / `OPT_NON_STR_KEYS`) | 88.5 µs | 184 µs | **2.08×** (2.06–2.12) |
-| 1,000 dataclasses with nested items | 198 µs | 236 µs | **1.19×** (1.15–1.19) |
+| 5,000 UTC `datetime`s | 167 µs | 538 µs | **3.18×** (3.15–3.22) |
+| 2,000 events with `datetime`, `UUID`, `Enum` | 413 µs | 952 µs | **2.28×** (2.27–2.31) |
+| 2,000 `@dataclass(slots=True)` instances | 501 µs | 1.13 ms | **2.24×** (2.20–2.38) |
+| dict with 5,000 int keys (`non_str_keys` / `OPT_NON_STR_KEYS`) | 86.3 µs | 182 µs | **2.12×** (2.06–2.26) |
+| 1,000 dataclasses with nested items | 200 µs | 239 µs | **1.20×** (1.16–1.20) |
 | **Output as `str`** (`dumps_str` vs `orjson.dumps(...).decode()`) | | | |
-| github.json | 13.4 µs | 26.6 µs | **1.92×** (1.86–2.03) |
-| log records | 412 µs | 762 µs | **1.85×** (1.81–1.93) |
-| twitter.json | 291 µs | 472 µs | **1.62×** (1.60–1.69) |
+| github.json | 13.7 µs | 26.4 µs | **1.91×** (1.90–1.94) |
+| log records | 405 µs | 771 µs | **1.90×** (1.86–1.91) |
+| twitter.json | 288 µs | 482 µs | **1.71×** (1.68–1.73) |
 | **Web API** | | | |
-| paginated REST page (50 users, 45 KB) | 18.8 µs | 31.9 µs | **1.70×** (1.66–1.72) |
-| github.json response (`dumps`, 55 KB) | 12.4 µs | 20.6 µs | **1.68×** (1.66–1.69) |
-| 1,000 small request bodies, one `loads` each | 1.25 ms | 1.76 ms | **1.49×** (1.20–1.51) |
-| github.json request (`loads` of bytes) | 68.2 µs | 101 µs | **1.49×** (1.48–1.50) |
-| 1,000 small responses, one `dumps` each | 174 µs | 206 µs | **1.19×** (1.15–1.22) |
+| paginated REST page (50 users, 45 KB) | 19.5 µs | 35.1 µs | **1.80×** (1.70–2.06) |
+| github.json response (`dumps`, 55 KB) | 12.3 µs | 20.5 µs | **1.67×** (1.63–1.69) |
+| github.json request (`loads` of bytes) | 66.9 µs | 102 µs | **1.52×** (1.46–1.55) |
+| 1,000 small request bodies, one `loads` each | 1.16 ms | 1.74 ms | **1.49×** (1.44–1.51) |
+| 1,000 small responses, one `dumps` each | 172 µs | 203 µs | **1.21×** (1.14–1.22) |
 | **Strings that need escaping** (tracebacks, SQL, paths) | | | |
-| 2,000 log records as one document | 405 µs | 667 µs | **1.64×** (1.48–1.65) |
-| parse them back | 1.16 ms | 2.09 ms | **1.78×** (1.65–1.80) |
-| NDJSON: one `dumps` per record, written to a stream | 1.01 ms | 972 µs | 0.97× (0.96–0.97) |
+| 2,000 log records as one document | 414 µs | 676 µs | **1.63×** (1.63–1.64) |
+| parse them back | 1.16 ms | 2.08 ms | **1.80×** (1.74–1.83) |
+| NDJSON: one `dumps` per record, written to a stream | 1.01 ms | 993 µs | 0.99× (0.98–0.99) |
 | **Standard corpora** | | | |
-| twitter.json `dumps` / `loads` | 141 µs / 1.06 ms | 242 µs / 1.46 ms | **1.71×** / **1.35×** |
-| citm_catalog.json `dumps` / `loads` | 422 µs / 3.88 ms | 595 µs / 4.24 ms | **1.41×** / **1.13×** |
-| canada.json `dumps` / `loads` | 2.76 ms / 8.39 ms | 3.69 ms / 9.38 ms | **1.35×** / **1.10×** |
+| twitter.json `dumps` / `loads` | 148 µs / 1.06 ms | 252 µs / 1.48 ms | **1.70×** / **1.36×** |
+| citm_catalog.json `dumps` / `loads` | 439 µs / 3.82 ms | 610 µs / 4.37 ms | **1.40×** / **1.15×** |
+| canada.json `dumps` / `loads` | 2.78 ms / 9.57 ms | 3.74 ms / 10.42 ms | **1.35×** / **1.08×** |
 
 Times are the medians of the 3 runs.
 
@@ -101,15 +102,13 @@ timestamps 1.36× → 3.64×, dataclasses 0.61× → 1.1×.
 
 ## Where rjson is not ahead
 
-**One `dumps` call per ~600-byte record with many escapes, results streamed out: 0.97×**
-(0.92× in 0.3.0, 1.00× in 0.4.0; the 0.4.1 build runs the same `dumps` code with the same
-instruction count, so the difference is code placement). The same records as one document
-are 1.64× faster, so the escaping is not the cause. The
+**One `dumps` call per ~600-byte record with many escapes, results streamed out: 0.99×**
+(0.92× in 0.3.0, 1.00× in 0.4.0). The same records as one document are 1.63× faster, so the escaping is not the cause. The
 per-call fixed cost is, and on this record size it outweighs rjson's per-byte advantage.
 Two output-buffer sizing variants (hinting from the largest reservation a call made, and
 using the larger of the last two sizes for small outputs) cut buffer regrowth by 60% but
 made no measurable difference, so they were not kept. Smaller records are faster in rjson
-(1,000 small responses: 1.19×).
+(1,000 small responses: 1.21×).
 
 ## Allocator effect: short-lived processes
 
@@ -118,10 +117,10 @@ or a bulk insert), and do it in a new process that has not yet produced a large 
 
 | | time | page faults |
 |---|---|---|
-| rjson | 0.83–0.86 ms | 1–2 |
-| orjson | 3.46–3.87 ms | 1,976 |
+| rjson | 0.85–0.87 ms | 1–3 |
+| orjson | 3.26–4.30 ms | 1,976 |
 
-That is about 4.3× in rjson's favour. In this state glibc's malloc returns memory to the OS
+That is about 4.8× in rjson's favour. In this state glibc's malloc returns memory to the OS
 and takes it back around every orjson call, one page fault per call. Once any output over
 ~128 KiB has been freed, glibc's thresholds rise and the effect disappears. The main table
 above is measured in that warm state (the suite builds its big fixtures first), so it does

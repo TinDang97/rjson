@@ -10,260 +10,260 @@
   "note": "speedup = orjson time / rjson time; median of 3 runs of benches/showcase.py --rounds 15 --fresh"
  },
  "geomean_per_run": [
-  1.553,
-  1.59,
-  1.593
+  1.602,
+  1.603,
+  1.614
  ],
  "rows": [
   {
    "group": "strings",
    "name": "log records with tracebacks",
    "desc": "2,000 records, newlines/quotes/backslashes",
-   "rjson_s": 0.0004053900208352464,
-   "orjson_s": 0.0006672667708329527,
-   "speedup": 1.637,
-   "speedup_min": 1.478,
-   "speedup_max": 1.646
+   "rjson_s": 0.0004137189999937618,
+   "orjson_s": 0.0006762813200020901,
+   "speedup": 1.629,
+   "speedup_min": 1.626,
+   "speedup_max": 1.64
   },
   {
    "group": "strings",
    "name": "NDJSON log stream, one line per record",
    "desc": "2,000 dumps calls written to a stream",
-   "rjson_s": 0.0010095990999957395,
-   "orjson_s": 0.0009719049000011637,
-   "speedup": 0.969,
-   "speedup_min": 0.963,
-   "speedup_max": 0.972
+   "rjson_s": 0.0010093949500060261,
+   "orjson_s": 0.000992822550006167,
+   "speedup": 0.99,
+   "speedup_min": 0.984,
+   "speedup_max": 0.995
   },
   {
    "group": "strings",
    "name": "parse the log stream back",
    "desc": "the same 2,000 records as one document",
-   "rjson_s": 0.001156012352941402,
-   "orjson_s": 0.002085430352936408,
-   "speedup": 1.782,
-   "speedup_min": 1.649,
-   "speedup_max": 1.804
+   "rjson_s": 0.0011583592777747577,
+   "orjson_s": 0.0020823953529329363,
+   "speedup": 1.802,
+   "speedup_min": 1.736,
+   "speedup_max": 1.826
   },
   {
    "group": "web api",
    "name": "github.json response",
    "desc": "GitHub API events (55 KB)",
-   "rjson_s": 1.2386258801717254e-05,
-   "orjson_s": 2.0617324029118007e-05,
-   "speedup": 1.683,
-   "speedup_min": 1.663,
-   "speedup_max": 1.693
+   "rjson_s": 1.2295336561645993e-05,
+   "orjson_s": 2.0512189926427785e-05,
+   "speedup": 1.666,
+   "speedup_min": 1.631,
+   "speedup_max": 1.686
   },
   {
    "group": "web api",
    "name": "github.json request",
    "desc": "GitHub API events (55 KB)",
-   "rjson_s": 6.816190939587723e-05,
-   "orjson_s": 0.00010063702013446084,
-   "speedup": 1.489,
-   "speedup_min": 1.476,
-   "speedup_max": 1.495
+   "rjson_s": 6.689669902857311e-05,
+   "orjson_s": 0.00010243526315739952,
+   "speedup": 1.52,
+   "speedup_min": 1.461,
+   "speedup_max": 1.55
   },
   {
    "group": "web api",
    "name": "paginated REST page",
    "desc": "50 users, nested objects, nulls (~45 KB)",
-   "rjson_s": 1.8824736325303164e-05,
-   "orjson_s": 3.191422854558484e-05,
-   "speedup": 1.699,
-   "speedup_min": 1.664,
-   "speedup_max": 1.718
+   "rjson_s": 1.9509114739107578e-05,
+   "orjson_s": 3.5086108208961786e-05,
+   "speedup": 1.798,
+   "speedup_min": 1.697,
+   "speedup_max": 2.058
   },
   {
    "group": "web api",
    "name": "1,000 small responses",
    "desc": "one dumps call per response (~150 B each)",
-   "rjson_s": 0.00017436345299166013,
-   "orjson_s": 0.00020591241176486213,
-   "speedup": 1.188,
-   "speedup_min": 1.153,
-   "speedup_max": 1.22
+   "rjson_s": 0.00017179414406863375,
+   "orjson_s": 0.000203249405174198,
+   "speedup": 1.212,
+   "speedup_min": 1.137,
+   "speedup_max": 1.224
   },
   {
    "group": "web api",
    "name": "1,000 small request bodies",
    "desc": "one loads call per body (bytes)",
-   "rjson_s": 0.0012514780588215966,
-   "orjson_s": 0.0017592611818186429,
-   "speedup": 1.491,
-   "speedup_min": 1.195,
-   "speedup_max": 1.511
+   "rjson_s": 0.0011622816249996504,
+   "orjson_s": 0.001739795076935899,
+   "speedup": 1.485,
+   "speedup_min": 1.444,
+   "speedup_max": 1.514
   },
   {
    "group": "native types",
    "name": "events with datetime, UUID, Enum",
    "desc": "2,000 records, no default= needed",
-   "rjson_s": 0.0004111141400017004,
-   "orjson_s": 0.0009438037083337273,
-   "speedup": 2.311,
-   "speedup_min": 2.178,
-   "speedup_max": 2.314
+   "rjson_s": 0.00041265313889956207,
+   "orjson_s": 0.0009523924999888954,
+   "speedup": 2.281,
+   "speedup_min": 2.267,
+   "speedup_max": 2.308
   },
   {
    "group": "native types",
    "name": "UTC timestamps",
    "desc": "5,000 aware datetimes",
-   "rjson_s": 0.00017022797413801527,
-   "orjson_s": 0.0005250217009340143,
-   "speedup": 3.092,
-   "speedup_min": 3.03,
-   "speedup_max": 3.133
+   "rjson_s": 0.00016730006086815947,
+   "orjson_s": 0.0005379642782629715,
+   "speedup": 3.178,
+   "speedup_min": 3.152,
+   "speedup_max": 3.216
   },
   {
    "group": "native types",
    "name": "dataclasses",
    "desc": "1,000 dataclass instances with nested items",
-   "rjson_s": 0.00019770967326797353,
-   "orjson_s": 0.00023574471999950218,
-   "speedup": 1.191,
-   "speedup_min": 1.147,
-   "speedup_max": 1.194
+   "rjson_s": 0.00019976849999985238,
+   "orjson_s": 0.00023931416037912813,
+   "speedup": 1.197,
+   "speedup_min": 1.155,
+   "speedup_max": 1.198
   },
   {
    "group": "native types",
    "name": "dataclasses with __slots__",
    "desc": "2,000 slots=True instances",
-   "rjson_s": 0.0004921460243905108,
-   "orjson_s": 0.0011166528780483154,
-   "speedup": 2.277,
-   "speedup_min": 2.213,
-   "speedup_max": 2.288
+   "rjson_s": 0.0005013472499967974,
+   "orjson_s": 0.001126787421059673,
+   "speedup": 2.243,
+   "speedup_min": 2.201,
+   "speedup_max": 2.381
   },
   {
    "group": "native types",
    "name": "int-keyed aggregates",
    "desc": "5,000 int keys (non_str_keys / OPT_NON_STR_KEYS)",
-   "rjson_s": 8.849283620671438e-05,
-   "orjson_s": 0.0001836627877357284,
-   "speedup": 2.078,
-   "speedup_min": 2.063,
-   "speedup_max": 2.116
+   "rjson_s": 8.626006779657905e-05,
+   "orjson_s": 0.00018194684792722886,
+   "speedup": 2.121,
+   "speedup_min": 2.055,
+   "speedup_max": 2.259
   },
   {
    "group": "str output",
    "name": "github.json as str",
    "desc": "rjson.dumps_str vs orjson.dumps().decode()",
-   "rjson_s": 1.338912508185324e-05,
-   "orjson_s": 2.655603706239053e-05,
-   "speedup": 1.922,
-   "speedup_min": 1.862,
-   "speedup_max": 2.031
+   "rjson_s": 1.373463897760785e-05,
+   "orjson_s": 2.6435883413547308e-05,
+   "speedup": 1.906,
+   "speedup_min": 1.899,
+   "speedup_max": 1.94
   },
   {
    "group": "str output",
    "name": "twitter.json as str",
    "desc": "rjson.dumps_str vs orjson.dumps().decode()",
-   "rjson_s": 0.0002909021944440661,
-   "orjson_s": 0.0004721201509435662,
-   "speedup": 1.618,
-   "speedup_min": 1.6,
-   "speedup_max": 1.69
+   "rjson_s": 0.00028792589855452274,
+   "orjson_s": 0.0004822877246387298,
+   "speedup": 1.709,
+   "speedup_min": 1.675,
+   "speedup_max": 1.727
   },
   {
    "group": "str output",
    "name": "log records as str",
    "desc": "rjson.dumps_str vs orjson.dumps().decode()",
-   "rjson_s": 0.0004118162173901273,
-   "orjson_s": 0.0007616744130428822,
-   "speedup": 1.85,
-   "speedup_min": 1.815,
-   "speedup_max": 1.927
+   "rjson_s": 0.00040464841999892086,
+   "orjson_s": 0.000771329479994165,
+   "speedup": 1.904,
+   "speedup_min": 1.86,
+   "speedup_max": 1.906
   },
   {
    "group": "corpus",
    "name": "twitter.json loads",
    "desc": "616 KB",
-   "rjson_s": 0.0010639104736858492,
-   "orjson_s": 0.001456485866666905,
-   "speedup": 1.346,
-   "speedup_min": 1.273,
-   "speedup_max": 1.376
+   "rjson_s": 0.0010550503157949272,
+   "orjson_s": 0.001475776736840903,
+   "speedup": 1.359,
+   "speedup_min": 1.303,
+   "speedup_max": 1.399
   },
   {
    "group": "corpus",
    "name": "twitter.json dumps",
    "desc": "616 KB",
-   "rjson_s": 0.00014115336363648294,
-   "orjson_s": 0.00024190646853118391,
-   "speedup": 1.714,
-   "speedup_min": 1.705,
-   "speedup_max": 1.783
+   "rjson_s": 0.00014770206249813277,
+   "orjson_s": 0.0002515575902780003,
+   "speedup": 1.703,
+   "speedup_min": 1.702,
+   "speedup_max": 1.802
   },
   {
    "group": "corpus",
    "name": "citm_catalog.json loads",
    "desc": "1686 KB",
-   "rjson_s": 0.0038805910000064615,
-   "orjson_s": 0.0042363117999912,
-   "speedup": 1.132,
-   "speedup_min": 1.076,
-   "speedup_max": 1.144
+   "rjson_s": 0.003824655799962784,
+   "orjson_s": 0.004365796666813064,
+   "speedup": 1.151,
+   "speedup_min": 1.118,
+   "speedup_max": 1.284
   },
   {
    "group": "corpus",
    "name": "citm_catalog.json dumps",
    "desc": "1686 KB",
-   "rjson_s": 0.00042221047826150544,
-   "orjson_s": 0.0005948383043479897,
-   "speedup": 1.409,
-   "speedup_min": 1.392,
-   "speedup_max": 1.446
+   "rjson_s": 0.0004389970212712874,
+   "orjson_s": 0.0006100109148974298,
+   "speedup": 1.398,
+   "speedup_min": 1.333,
+   "speedup_max": 1.517
   },
   {
    "group": "corpus",
    "name": "canada.json loads",
    "desc": "2198 KB",
-   "rjson_s": 0.008386385999983759,
-   "orjson_s": 0.009382459999983439,
-   "speedup": 1.102,
-   "speedup_min": 1.084,
-   "speedup_max": 1.119
+   "rjson_s": 0.00957246000007217,
+   "orjson_s": 0.010421745000257943,
+   "speedup": 1.078,
+   "speedup_min": 0.984,
+   "speedup_max": 1.089
   },
   {
    "group": "corpus",
    "name": "canada.json dumps",
    "desc": "2198 KB",
-   "rjson_s": 0.002756694428577638,
-   "orjson_s": 0.0036941734999989726,
-   "speedup": 1.346,
-   "speedup_min": 1.317,
-   "speedup_max": 1.366
+   "rjson_s": 0.002775940428559157,
+   "orjson_s": 0.0037387435713753803,
+   "speedup": 1.347,
+   "speedup_min": 1.333,
+   "speedup_max": 1.364
   }
  ],
  "fresh_process": [
   {
    "rjson": [
-    0.00086369600001035,
+    0.0008601939998698072,
     1
    ],
    "orjson": [
-    0.0036787340000046242,
+    0.004295256000204972,
     1976
    ]
   },
   {
    "rjson": [
-    0.0008583000000044194,
+    0.0008523480000803829,
     1
    ],
    "orjson": [
-    0.0034551740000097197,
+    0.003257785000187141,
     1976
    ]
   },
   {
    "rjson": [
-    0.0008314269999800672,
-    2
+    0.0008716180000192253,
+    3
    ],
    "orjson": [
-    0.0038683380000748002,
+    0.004198417000225163,
     1976
    ]
   }
