@@ -7,6 +7,16 @@ All notable changes to rjson (PyPI: `pyrjson`). The format follows
 
 ## [Unreleased]
 
+### Performance
+
+- Small `dumps`/`dumps_str` results (recent outputs up to 4 KiB) are written
+  into a per-thread scratch buffer and copied into a result of their exact
+  size (#26). Records of varying size no longer grow the output with a
+  realloc on most calls: one `dumps` per log record (~600 B, many escapes)
+  went from 1.02× to 1.31× orjson's speed, 1,000 small responses from 1.16×
+  to 1.54×, with 19% fewer instructions per call. Small results also hold no
+  unused allocation (a kept 145-byte result: 382 → 187 bytes).
+
 ## [0.4.1] - 2026-09-30
 
 ### Performance
