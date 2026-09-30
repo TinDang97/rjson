@@ -520,9 +520,12 @@ This rule exists because an early version hard-coded the str data offset: it cra
   Indentation is a second pass over the compact output, about 9 instructions per input
   byte. orjson writes indentation in its serializer. Matching it means multi-byte separators
   in every writer; it is on the roadmap.
-- **One `dumps` per small record with many escapes, in a stream**: 0.92× **[S]**. This is the
-  fixed cost per call. Buffer-hint variants cut buffer regrowth by 60% with no measurable
-  change, so they weren't kept **[R]**.
+- ~~**One `dumps` per small record with many escapes, in a stream**~~: fixed (issue #26),
+  now 1.31× orjson's speed **[S]**. The output was a result object sized from recent calls
+  and grown with a realloc when larger, on three calls in four for records of varying
+  size (~20% of a call's instructions). Small outputs (recent peak ≤ 4 KiB) now go
+  through a per-thread scratch buffer and are copied into an exact-size result: no
+  growth, and no unused allocation left in the result **[R]**.
 - **Non-x86 CPUs**: the scalar/SWAR fallbacks are correct and tested on aarch64, but NEON
   kernels aren't written yet (issue #25).
 

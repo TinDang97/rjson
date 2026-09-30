@@ -171,6 +171,45 @@ class TestDirectUtf8Encoding:
             for obj in (s, [s, {"k": s}], {s: s}):
                 assert rjson.dumps(obj) == self.expected(obj)
 
+    def test_chunked_encoding_of_long_strings(self):
+        # Long UCS2/UCS4 strings are encoded in chunks the buffer surely
+        # holds (6 bytes per unit worst case), and near the end with a
+        # per-unit bound, instead of reserving 6x the whole string up front.
+        import threading
+
+        units = ["日", "😀", "é", "a", '"', "\\", "\n", "\x01", "\x1f", "߿", "ࠀ", "\U0010ffff"]
+        cases = []
+        for n in (256, 4095, 4096, 4097, 8193, 30000):
+            for k, u in enumerate(units):
+                base = (units[(k + 1) % len(units)] + u) * (n // 2 + 1)
+                cases.append(base[:n] + "😀")  # UCS4
+                cases.append(base[:n].replace("😀", "日").replace("\U0010ffff", "日"))
+
+        def run():
+            outs = []
+            for s in cases:
+                rjson.dumps({"small": 1})  # a small previous result: small buffer
+                outs.append((s, rjson.dumps(s), rjson.dumps([s, {"k": s}])))
+            return outs
+
+        results = []
+        t = threading.Thread(target=lambda: results.extend(run()))
+        t.start()
+        t.join()
+        for s, one, nested in results:
+            assert one == self.expected(s)
+            assert nested == self.expected([s, {"k": s}])
+
+    def test_lone_surrogate_after_the_buffer_grew(self):
+        # A lone surrogate found in a later chunk still raises the same
+        # error, and ensure_ascii still writes it as json does.
+        for n in (300, 5000, 20000):
+            for s in ("日" * n + "\ud800", "😀" * n + "\udc00" + "x" * 10):
+                with pytest.raises(UnicodeEncodeError):
+                    rjson.dumps(s)
+                assert rjson.dumps(s, ensure_ascii=True) == json.dumps(s).encode()
+                assert rjson.dumps_str([s]) == json.dumps([s], ensure_ascii=False, separators=(",", ":"))
+
     def test_every_unit_at_every_offset(self):
         # Each character kind (incl. escapes) at every offset of the 8-unit
         # ASCII blocks, in strings long enough for the direct encoder.
@@ -964,6 +1003,97 @@ class TestOutputBuffer:
         held, out = self._in_fresh_thread(run)
         assert out == ref(obj).encode()
         assert held < len(out) * 1.25
+
+    # Small outputs (recent peak <= 4 KiB) are written into a per-thread
+    # scratch buffer and copied into an exact-size result (issue #26).
+
+    def test_small_results_of_varying_size(self):
+        # Sizes varying within the peak, above it, and below it, in both
+        # modes, with ASCII and non-ASCII str results.
+        objs = [{"i": i, "s": "x" * (i * 37 % 900), "t": ["é"] * (i % 3)} for i in range(300)]
+        for _ in range(2):
+            for obj in objs:
+                assert both(obj) == ref(obj)
+
+    def test_small_results_hold_no_slack(self):
+        # A small result is exactly sized even right after a larger one.
+        import tracemalloc
+
+        def run():
+            rjson.dumps({"k": "x" * 3500})
+            tracemalloc.start()
+            try:
+                base, _ = tracemalloc.get_traced_memory()
+                outs = [rjson.dumps({"a": i}) for i in range(1000)]
+                current, _ = tracemalloc.get_traced_memory()
+            finally:
+                tracemalloc.stop()
+            return (current - base) / len(outs), outs
+
+        per_result, outs = self._in_fresh_thread(run)
+        assert outs[7] == b'{"a":7}'
+        assert per_result < 100  # a bytes object of 7-9 bytes plus the list slot
+
+    def test_nested_dumps_while_scratch_is_in_use(self):
+        # default= runs Python code mid-serialization; a dumps call from
+        # there finds the thread's scratch buffer busy and must not share it.
+        class Point:
+            def __init__(self, x):
+                self.x = x
+
+        def default(o):
+            inner = rjson.dumps({"x": o.x, "pad": "p" * o.x})
+            return inner.decode()
+
+        obj = [Point(i) for i in range(40)]
+        expected = json.dumps([json.dumps({"x": i, "pad": "p" * i}, separators=(",", ":")) for i in range(40)],
+                              separators=(",", ":"))
+        for fn in (rjson.dumps, rjson.dumps_str):
+            out = fn(obj, default=default)
+            assert (out.decode() if isinstance(out, bytes) else out) == expected
+
+    def test_small_history_then_huge_output(self):
+        # A scratch output that grows past 1 MiB moves into a result object.
+        big = ["y" * 100] * 30_000  # ~3 MB
+
+        def run():
+            outs = []
+            for _ in range(3):
+                for i in range(70):
+                    outs.append(({"i": i}, rjson.dumps({"i": i})))
+                outs.append((big, rjson.dumps(big)))
+                outs.append((big, rjson.dumps_str(big).encode()))
+            return outs
+
+        for obj, out in self._in_fresh_thread(run):
+            assert out == ref(obj).encode()
+
+    def test_error_releases_scratch(self):
+        for _ in range(3):
+            with pytest.raises(rjson.JSONEncodeError):
+                rjson.dumps({"a": [1, 2, object()]})
+            assert rjson.dumps({"a": [1, 2]}) == b'{"a":[1,2]}'
+            with pytest.raises(rjson.JSONEncodeError):
+                rjson.dumps_str(["é", object()])
+            assert rjson.dumps_str(["é", 1]) == '["é",1]'
+
+    def test_threads_use_their_own_scratch(self):
+        import threading
+
+        errors = []
+
+        def work(k):
+            for i in range(2000):
+                obj = {"t": k, "i": i, "s": "z" * ((i * k) % 700)}
+                if rjson.dumps(obj) != ref(obj).encode():
+                    errors.append((k, i))
+
+        threads = [threading.Thread(target=work, args=(k,)) for k in range(1, 9)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux") or platform.libc_ver()[0] != "glibc",

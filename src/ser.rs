@@ -1286,6 +1286,90 @@ struct Out {
     /// Capacity growth jumps to once the output is large enough (the
     /// larger recent output size, with headroom), or 0: see `reserve`.
     jump: usize,
+    /// Writing into the thread's scratch buffer (`obj` is null): see
+    /// `Out::new`.
+    scratch: bool,
+}
+
+/// Small outputs are written into a per-thread scratch buffer sized from the
+/// recent peak, then copied into a result object of their exact size.
+///
+/// Writing straight into the result object meant starting from a size hint
+/// (the smaller of the last two sizes) and growing it with a realloc when
+/// the output turned out larger: for records of varying size (log lines with
+/// 1-4 traceback frames) three calls in four grew, ~20% of a call's
+/// instructions (issue #26). Starting at the recent peak instead avoids the
+/// growth, but a result then keeps the unused part of its allocation (7.8x
+/// the payload on a mix of 150 B and 3.5 KB results that are kept), and
+/// copying such results into an exact-size object cost as much as the
+/// realloc (a second allocation of the peak size per call). The scratch
+/// buffer is allocated once per thread, so a call costs one exact-size
+/// allocation plus a copy of a few KiB at most, and results hold
+/// no slack at all.
+struct Scratch {
+    ptr: *mut u8,
+    cap: usize,
+    busy: bool,
+}
+
+/// Outputs whose recent peak is at most this size use the scratch buffer.
+/// Larger ones are written in place: the copy would cost more than the
+/// growth it saves (a 55 KB result written in place needs no copy).
+const SCRATCH_PEAK: usize = 4096;
+/// A scratch output that grows past this moves to a result object (large
+/// outputs keep their direct, mmap-friendly growth).
+const SCRATCH_MAX: usize = 1 << 20;
+/// A released scratch buffer larger than this is freed, so a thread keeps at
+/// most this much between calls.
+const SCRATCH_KEEP: usize = 64 * 1024;
+
+thread_local! {
+    static SCRATCH: Cell<Scratch> = const { Cell::new(Scratch { ptr: ptr::null_mut(), cap: 0, busy: false }) };
+}
+
+/// Takes the thread's scratch buffer with at least `min` bytes, or None if
+/// it is in use (a `dumps` call made from inside another one, through
+/// `default=` or a native type's Python code) or cannot be allocated.
+fn take_scratch(min: usize) -> Option<(*mut u8, usize)> {
+    SCRATCH.with(|c| {
+        let s = c.replace(Scratch { ptr: ptr::null_mut(), cap: 0, busy: true });
+        if s.busy {
+            c.set(s);
+            return None;
+        }
+        if s.cap >= min {
+            return Some((s.ptr, s.cap));
+        }
+        let cap = min.max(4096);
+        // SAFETY: `s.ptr` is null or was allocated here with `s.cap` bytes.
+        let p = unsafe { scratch_realloc(s.ptr, s.cap, cap) };
+        if p.is_null() {
+            c.set(Scratch { ptr: s.ptr, cap: s.cap, busy: false });
+            return None;
+        }
+        Some((p, cap))
+    })
+}
+
+/// Returns the scratch buffer (possibly moved or grown by `Out::reserve`).
+fn release_scratch(ptr: *mut u8, cap: usize) {
+    let (ptr, cap) = if cap > SCRATCH_KEEP {
+        // SAFETY: allocated by `scratch_realloc` with `cap` bytes.
+        unsafe { std::alloc::dealloc(ptr, std::alloc::Layout::from_size_align_unchecked(cap, 1)) };
+        (ptr::null_mut(), 0)
+    } else {
+        (ptr, cap)
+    };
+    SCRATCH.with(|c| c.set(Scratch { ptr, cap, busy: false }));
+}
+
+/// `realloc` for the scratch buffer (`old` null: `alloc`); null on failure.
+unsafe fn scratch_realloc(old: *mut u8, old_cap: usize, cap: usize) -> *mut u8 {
+    if old.is_null() {
+        std::alloc::alloc(std::alloc::Layout::from_size_align_unchecked(cap, 1))
+    } else {
+        std::alloc::realloc(old, std::alloc::Layout::from_size_align_unchecked(old_cap, 1), cap)
+    }
 }
 
 /// Recent output sizes of one mode on one thread: the capacity hints.
@@ -1364,6 +1448,11 @@ fn with_headroom(len: usize) -> usize {
 impl Out {
     unsafe fn new(unicode: bool) -> Out {
         let h = SIZES.with(|c| c[unicode as usize].get());
+        if h.peak <= SCRATCH_PEAK {
+            if let Some((data, cap)) = take_scratch(with_headroom(h.peak)) {
+                return Out { obj: ptr::null_mut(), data, len: 0, cap, unicode, jump: 0, scratch: true };
+            }
+        }
         let cap = with_headroom(h.last.min(h.prev));
         let jump = with_headroom(h.peak);
         let obj = Self::alloc(cap, unicode);
@@ -1374,6 +1463,7 @@ impl Out {
             cap,
             unicode,
             jump: if jump > cap { jump } else { 0 },
+            scratch: false,
         }
     }
 
@@ -1453,6 +1543,10 @@ impl Out {
             return;
         }
         let need = self.len.checked_add(n).unwrap_or_else(|| Self::oom(isize::MAX as usize));
+        if self.scratch {
+            unsafe { self.grow_scratch(need) };
+            return;
+        }
         // The jump is taken at most once, when the output reaches the
         // threshold; if it is too small by then, it never becomes useful.
         let jump = if self.jump != 0 && need >= jump_threshold(self.jump) {
@@ -1471,6 +1565,32 @@ impl Out {
             }
         };
         unsafe { self.resize(cap) };
+    }
+
+    /// `reserve` for a scratch output: doubles the scratch buffer, or once
+    /// the output passes `SCRATCH_MAX`, moves it into a result object and
+    /// continues there (as a large output that started small would).
+    #[cold]
+    unsafe fn grow_scratch(&mut self, need: usize) {
+        let cap = need.max(self.cap.saturating_mul(2));
+        if cap <= SCRATCH_MAX {
+            let p = scratch_realloc(self.data, self.cap, cap);
+            if p.is_null() {
+                Self::oom(cap);
+            }
+            self.data = p;
+            self.cap = cap;
+            return;
+        }
+        let cap = cap.max(LARGE_RESERVE);
+        let obj = Self::alloc(cap, self.unicode);
+        let data = Self::data_of(obj, self.unicode);
+        ptr::copy_nonoverlapping(self.data, data, self.len);
+        release_scratch(self.data, self.cap);
+        self.obj = obj;
+        self.data = data;
+        self.cap = cap;
+        self.scratch = false;
     }
 
     unsafe fn resize(&mut self, cap: usize) {
@@ -1500,6 +1620,13 @@ impl Out {
     /// Shrinks to the written length and hands the object over.
     unsafe fn into_object(&mut self) -> *mut ffi::PyObject {
         self.record_len();
+        if self.scratch {
+            let obj = Self::alloc(self.len, self.unicode);
+            ptr::copy_nonoverlapping(self.data, Self::data_of(obj, self.unicode), self.len);
+            self.scratch = false;
+            release_scratch(self.data, self.cap);
+            return obj;
+        }
         if self.cap > SHRINK_COPY_THRESHOLD
             && self.len < self.cap / 4
             && self.len <= SHRINK_COPY_THRESHOLD
@@ -1544,7 +1671,12 @@ impl Out {
 
 impl Drop for Out {
     fn drop(&mut self) {
-        if !self.obj.is_null() {
+        if self.scratch {
+            // A non-ASCII str result (built from this buffer by `fill`) or
+            // an error.
+            self.record_len();
+            release_scratch(self.data, self.cap);
+        } else if !self.obj.is_null() {
             // Non-ASCII str results (and errors) end here: the buffer's
             // length is what the next call's buffer will hold.
             self.record_len();
@@ -2067,24 +2199,17 @@ impl Serializer {
             ffi::Py_DECREF(b);
             return q;
         }
-        // Worst case 6 output bytes per character (an escape; UTF-8 needs at
-        // most 4), two quotes, and 8 bytes for the blind escape-table store.
-        let q = self.reserve(p, len * 6 + 2 + 8);
         let data = crate::compat::PyUnicode_DATA(obj);
-        *q = b'"';
         let end = if kind == 2 {
-            encode_utf8_escaped(q.add(1), data as *const u16, len)
+            self.encode_utf8_chunked(p, data as *const u16, len)
         } else {
-            encode_utf8_escaped(q.add(1), data as *const u32, len)
+            self.encode_utf8_chunked(p, data as *const u32, len)
         };
         match end {
-            Some(e) => {
-                *e = b'"';
-                e.add(1)
-            }
+            Ok(e) => e,
             // A lone surrogate: let CPython's encoder raise the same
             // UnicodeEncodeError as before (nothing past `q` is kept).
-            None => {
+            Err(q) => {
                 let (src, n) = match utf8_of(obj) {
                     Ok(v) => v,
                     Err(_) if self.wtf8 => return self.write_wtf8(q, obj),
@@ -2093,6 +2218,47 @@ impl Serializer {
                 self.write_utf8(q, src, n, 0, 0)
             }
         }
+    }
+
+    /// Writes `"<escaped UTF-8 of len units>"` at `p`: `Ok(end)`, or at a
+    /// lone surrogate `Err(q)` with `q` the cursor at the opening quote
+    /// (nothing written past it is kept).
+    ///
+    /// A unit takes at most 6 output bytes (an escape; UTF-8 needs at most 4),
+    /// but reserving that for the whole string made a buffer sized from the
+    /// previous result grow on every call: 400,000 emoji reserved 2.4 MB for
+    /// a 1.6 MB result, so each call took the large-growth path and mapped
+    /// (and page-faulted) a fresh 32 MiB block. As `escape_chunked` does for
+    /// UTF-8, encode as much as the room surely holds, and near the end
+    /// reserve a per-unit bound for the rest.
+    unsafe fn encode_utf8_chunked<T: StrUnit>(&mut self, p: Cur, src: *const T, len: usize) -> Result<Cur, Cur> {
+        // The opening quote, plus 8 bytes of slack for the blind escape-table store.
+        let q = self.reserve(p, 1 + 8);
+        *q = b'"';
+        let start = self.offset(q);
+        let mut cur = q.add(1);
+        let mut off = 0;
+        while off < len {
+            let mut n = len - off;
+            let room = self.room(cur);
+            if room < n * 6 + 8 {
+                let safe = room.saturating_sub(8) / 6;
+                if safe >= 4096 {
+                    n = safe;
+                } else {
+                    n = n.min(4096);
+                    cur = self.reserve(cur, utf8_escaped_bound(src.add(off), n) + 8);
+                }
+            }
+            match encode_utf8_escaped(cur, src.add(off), n) {
+                Some(e) => cur = e,
+                None => return Err(self.buf.as_mut_ptr().add(start)),
+            }
+            off += n;
+        }
+        let cur = self.reserve(cur, 1);
+        *cur = b'"';
+        Ok(cur.add(1))
     }
 
     /// `str` output: record the non-ASCII string instead of encoding it.
@@ -3211,6 +3377,27 @@ impl StrUnit for u32 {
             w
         }
     }
+}
+
+/// Output bytes `encode_utf8_escaped` can write for these `n` units: 6 for a
+/// control character (`\\u00XX`), 2 for other ASCII (at most a 2-byte escape)
+/// and for U+0080..U+07FF, 3 up to U+FFFF, 4 above.
+#[inline]
+unsafe fn utf8_escaped_bound<T: StrUnit>(src: *const T, n: usize) -> usize {
+    let mut total = 0;
+    for k in 0..n {
+        let c = (*src.add(k)).get();
+        total += if c < 0x20 {
+            6
+        } else if c < 0x800 {
+            2
+        } else if c < 0x10000 {
+            3
+        } else {
+            4
+        };
+    }
+    total
 }
 
 /// Encodes `len` units of native str data as escaped UTF-8 at `dst` (the
