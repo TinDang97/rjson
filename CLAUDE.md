@@ -23,6 +23,7 @@ src/
   compat.rs   # version-portable str accessors (3.14: own bitfield reader + import self-test)
               # and extern decls of private-but-exported C-API symbols
   stack.rs    # thread stack bounds (pthread/macOS/Windows) + headroom check for deep nesting
+  neon.rs     # aarch64: NEON versions of the SSE2 primitives (exact movemask, escape/whitespace lane tests)
 build.rs      # pyo3_build_config::use_pyo3_cfgs() -> Py_3_10/Py_3_12... cfgs
 python/rjson/ # mixed maturin layout (python-source; extension = rjson.rjson): __init__.py (star-imports the
               # extension), __init__.pyi stubs + py.typed, tool.py (CLI) + __main__.py; console script `rjson`
@@ -133,6 +134,7 @@ cargo clippy --release
 - Benchmarks: always compare against orjson in the same process (ratio); the dev host is noisy (±10%), so trust geomeans and repeat before believing <10% changes.
 - Performance changes: measure each change separately, keep output byte-identical unless intended, update `docs/PERFORMANCE_REVIEW.md` and the README table.
 - README links and images are absolute URLs (github.com / raw.githubusercontent.com) because PyPI renders the same file and cannot resolve relative paths; keep new ones absolute. Keep numbers in README, llms.txt and the charts in sync.
+- aarch64 locally (NEON paths, no ARM hardware needed): `rustup target add aarch64-unknown-linux-gnu`, `apt install qemu-user-static gcc-aarch64-linux-gnu libc6-dev-arm64-cross`, `uv python install cpython-3.13-linux-aarch64-gnu`; build with `PYO3_CROSS_LIB_DIR=<that python>/lib PYO3_CROSS_PYTHON_VERSION=3.13 CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc cargo build --release --target aarch64-unknown-linux-gnu`, copy `librjson.so` as `rjson/rjson.cpython-313-aarch64-linux-gnu.so` next to `python/rjson/*` in its site-packages, and run pytest with `QEMU_LD_PREFIX=/usr/aarch64-linux-gnu` (register qemu with binfmt_misc so subprocess tests run). Correctness only: time it on real hardware.
 - ASan locally (as the CI `sanitize` job): `RUSTUP_TOOLCHAIN=nightly CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=-Zsanitizer=address maturin build --release --target x86_64-unknown-linux-gnu`, install, then `ASAN_OPTIONS=detect_leaks=0 PYTHONMALLOC=malloc RJSON_SANITIZER=asan LD_PRELOAD=$(gcc -print-file-name=libasan.so) python -m pytest tests`.
 - Releasing: bump `version` in Cargo.toml and pyproject.toml (a test checks they agree), move CHANGELOG's Unreleased section under the version, push tag `vX.Y.Z`; wheels.yml builds, attests and publishes (needs the PyPI trusted publisher + `pypi` environment, see its header).
 

@@ -242,6 +242,18 @@ impl<'a> Parser<'a> {
                 i += 16;
             }
         }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            use crate::neon;
+            while i + 16 <= len {
+                let non_ws = !neon::movemask(neon::whitespace(neon::load(buf.as_ptr().add(i)))) & 0xFFFF;
+                if non_ws != 0 {
+                    self.pos = i + non_ws.trailing_zeros() as usize;
+                    return;
+                }
+                i += 16;
+            }
+        }
         while i < len && is_ws(unsafe { *buf.get_unchecked(i) }) {
             i += 1;
         }
@@ -510,7 +522,22 @@ impl<'a> Parser<'a> {
                 i += 16;
             }
         }
-        // Scalar tail (and non-x86 path).
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            use crate::neon;
+            while i + 16 <= len {
+                let v = neon::load(buf.as_ptr().add(i));
+                let m = neon::special(v);
+                if neon::any(m) {
+                    let tz = neon::movemask(m).trailing_zeros();
+                    non_ascii |= (neon::movemask(v) & ((1u32 << tz) - 1)) != 0;
+                    return (i + tz as usize, non_ascii);
+                }
+                non_ascii |= std::arch::aarch64::vmaxvq_u8(v) >= 0x80;
+                i += 16;
+            }
+        }
+        // Scalar tail (and the path on other targets).
         while i < len {
             let b = unsafe { *buf.get_unchecked(i) };
             if b == b'"' || b == b'\\' || b < 0x20 {
@@ -651,6 +678,11 @@ impl<'a> Parser<'a> {
             } else {
                 escape_blocks_sse2(buf, &mut out, &mut st);
             }
+        }
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            // SAFETY: as for x86_64 above.
+            escape_blocks_neon(buf, &mut out, &mut st);
         }
         unsafe { out.set_len(st.olen) };
         let r = if st.done {
@@ -1253,12 +1285,12 @@ struct EscState {
 /// Input bytes a kernel block may touch past its start: the 32-byte block,
 /// a 32-byte copy starting anywhere in it, and a surrogate-pair escape
 /// (12 bytes) starting at its last byte.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const ESC_LOOKAHEAD: usize = 64;
 /// Output bytes a kernel block may write past `olen` at block start: up to
 /// 32 + 12 bytes consumed (output never exceeds input), plus a 32-byte copy
 /// overrun or a 4-byte store.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const ESC_OUT_MARGIN: usize = 96;
 
 /// Decode `\uXXXX` (or a surrogate pair) at `p` into UTF-8 at `o`, writing 4
@@ -1266,7 +1298,7 @@ const ESC_OUT_MARGIN: usize = 96;
 /// for anything invalid (the scalar tail then reports the error).
 ///
 /// SAFETY: `p..p+12` readable, `o..o+4` writable.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[inline(always)]
 unsafe fn unescape_u_fast(p: *const u8, o: *mut u8) -> Option<(usize, usize)> {
     #[inline(always)]
@@ -1309,7 +1341,7 @@ unsafe fn unescape_u_fast(p: *const u8, o: *mut u8) -> Option<(usize, usize)> {
 ///
 /// Every escape in a block is handled from its bitmask without re-scanning:
 /// the plain run before it is copied with one unconditional 32-byte copy.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[inline(always)]
 unsafe fn escape_blocks<M, C>(buf: &[u8], out: &mut Vec<u8>, st: &mut EscState, masks: M, copy32: C)
 where
@@ -1379,6 +1411,25 @@ where
     }
     st.olen = olen;
     st.non_ascii |= high_acc != 0;
+}
+
+/// `escape_blocks` with NEON masks: two 16-byte halves per 32-byte block.
+#[cfg(target_arch = "aarch64")]
+#[inline(never)]
+unsafe fn escape_blocks_neon(buf: &[u8], out: &mut Vec<u8>, st: &mut EscState) {
+    use crate::neon;
+    let masks = |src: *const u8| {
+        let a = neon::load(src);
+        let b = neon::load(src.add(16));
+        let special = neon::movemask(neon::special(a)) | (neon::movemask(neon::special(b)) << 16);
+        let high = neon::movemask(a) | (neon::movemask(b) << 16);
+        (special, high)
+    };
+    let copy32 = |s: *const u8, d: *mut u8| {
+        neon::store(d, neon::load(s));
+        neon::store(d.add(16), neon::load(s.add(16)));
+    };
+    escape_blocks(buf, out, st, masks, copy32)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -2308,6 +2359,20 @@ fn utf8_count_and_max(bytes: &[u8]) -> (usize, u8) {
         _mm_storeu_si128(lanes.as_mut_ptr() as *mut __m128i, vmax);
         max_lead = lanes.iter().copied().max().unwrap_or(0);
     }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use crate::neon;
+        use std::arch::aarch64::*;
+        let mut vmax = vdupq_n_u8(0);
+        while i + 16 <= n {
+            let v = neon::load(bytes.as_ptr().add(i));
+            // Continuation bytes 0x80..=0xBF are < -64 as i8.
+            cont += neon::count(vcltq_s8(vreinterpretq_s8_u8(v), vdupq_n_s8(-64))) as usize;
+            vmax = vmaxq_u8(vmax, v);
+            i += 16;
+        }
+        max_lead = vmaxvq_u8(vmax);
+    }
     for &b in &bytes[i..] {
         cont += ((b & 0xC0) == 0x80) as usize;
         max_lead = max_lead.max(b);
@@ -2896,6 +2961,18 @@ fn find_newline(buf: &[u8], from: usize, to: usize) -> usize {
             let m = _mm_movemask_epi8(_mm_cmpeq_epi8(v, nl)) as u32;
             if m != 0 {
                 return i + m.trailing_zeros() as usize;
+            }
+            i += 16;
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use crate::neon;
+        use std::arch::aarch64::*;
+        while i + 16 <= to {
+            let m = vceqq_u8(neon::load(buf.as_ptr().add(i)), vdupq_n_u8(b'\n'));
+            if neon::any(m) {
+                return i + neon::movemask(m).trailing_zeros() as usize;
             }
             i += 16;
         }
